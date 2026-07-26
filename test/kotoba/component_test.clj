@@ -512,6 +512,119 @@
       (finally
         (Files/deleteIfExists path)))))
 
+(deftest aggregate-match-returns-fresh-owned-lists
+  (let [payload [:ref :demo/items]
+        descriptor [:option payload]
+        schemas {:demo/items
+                 [:record :demo/items
+                  [[:values :vector-i64] [:enabled :bool]]]}
+        kir {:format :kotoba.kir/v4
+             :exports ['append-selected] :schemas schemas :effects #{}
+             :functions
+             [{:name 'append-selected
+               :params ['value 'fallback 'item]
+               :param-types [descriptor :vector-i64 :i64]
+               :result :vector-i64 :effects #{}
+               :body
+               '(option-match
+                 [:option [:ref :demo/items]] value fallback selected
+                 (vector-conj
+                  (record-get
+                   [:record :demo/items
+                    [[:values :vector-i64] [:enabled :bool]]]
+                   selected :values)
+                  item))}]}
+        world (wit/emit kir)
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+        component (artifact/package core-bytes kir world)
+        component-path
+        (Files/createTempFile "kotoba-component-owned-option-" ".wasm"
+                              (make-array FileAttribute 0))
+        core-path
+        (Files/createTempFile "kotoba-component-owned-option-core-" ".wasm"
+                              (make-array FileAttribute 0))]
+    (try
+      (Files/write component-path ^bytes (:bytes component)
+                   (make-array java.nio.file.OpenOption 0))
+      (Files/write core-path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :owned-vector-match (:canonical-lowering component)))
+      (doseq [[invoke expected]
+              [["append-selected(none, [8, 9], 4)" "[8, 9]"]
+               ["append-selected(some({values: [1, 2], enabled: true}), [8], 3)"
+                "[1, 2, 3]"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke" invoke
+                            (str component-path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      ;; Joined payload slots are lazy for none, but every selected leaf is
+      ;; checked for some even when the body only reads the list.
+      (let [inactive
+            (shell/sh "wasmtime" "run" "--invoke" "cm32p2||append-selected"
+                      (str core-path) "0" "1" "16385" "2" "0" "0" "4")
+            active-list
+            (shell/sh "wasmtime" "run" "--invoke" "cm32p2||append-selected"
+                      (str core-path) "1" "1" "16385" "1" "0" "0" "4")
+            active-bool
+            (shell/sh "wasmtime" "run" "--invoke" "cm32p2||append-selected"
+                      (str core-path) "1" "8" "0" "2" "0" "0" "4")]
+        (is (zero? (:exit inactive)) (:err inactive))
+        (is (not (zero? (:exit active-list))))
+        (is (not (zero? (:exit active-bool)))))
+      (let [script
+            (str
+             "const fs=require('fs');"
+             "WebAssembly.instantiate(fs.readFileSync(process.argv[1]))"
+             ".then(({instance})=>{const e=instance.exports,m=e.cm32p2_memory;"
+             "e.cm32p2_initialize();for(let n=0;n<20000;n++){"
+             "const p=e.cm32p2_realloc(0,0,8,16);"
+             "const input=new BigInt64Array(m.buffer,p,2);"
+             "input[0]=1n;input[1]=2n;"
+             "const r=e['cm32p2||append-selected'](1,p,2,1,0,0,3n);"
+             "const area=new DataView(m.buffer);"
+             "const q=area.getUint32(r,true),len=area.getUint32(r+4,true);"
+             "const out=new BigInt64Array(m.buffer,q,len);"
+             "if(len!==3||out[0]!==1n||out[1]!==2n||out[2]!==3n)"
+             "throw Error('result');"
+             "if(input[0]!==1n||input[1]!==2n)throw Error('aliased');"
+             "e['cm32p2||append-selected_post'](r);}})"
+             ".catch(e=>{console.error(e);process.exit(1)})")
+            run (shell/sh "node" "-e" script (str core-path))]
+        (is (zero? (:exit run)) (:err run)))
+      (finally
+        (Files/deleteIfExists component-path)
+        (Files/deleteIfExists core-path))))
+  (let [descriptor [:result :vector-f64 :vector-f64]
+        kir {:format :kotoba.kir/v4
+             :exports ['adjust] :schemas {} :effects #{}
+             :functions
+             [{:name 'adjust
+               :params ['value 'index 'item]
+               :param-types [descriptor :i64 :f64]
+               :result :vector-f64 :effects #{}
+               :body
+               '(result-match-of
+                 [:result :vector-f64 :vector-f64] value
+                 values (vector-f64-drop values index)
+                 errors
+                 (vector-f64-assoc (vector-f64-new 4.5 5.5) index item))}]}
+        path (Files/createTempFile "kotoba-component-owned-result-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (let [component (artifact/package
+                       (core/emit kir :wasm32-wasi-kotoba-v1)
+                       kir (wit/emit kir))]
+        (Files/write path ^bytes (:bytes component)
+                     (make-array java.nio.file.OpenOption 0))
+        (doseq [[invoke expected]
+                [["adjust(ok([1.5, 2.5, 3.5]), 1, 9.5)" "[2.5, 3.5]"]
+                 ["adjust(err([1.5, 2.5]), 0, 9.5)" "[9.5, 5.5]"]]]
+          (let [run (shell/sh "wasmtime" "run" "--invoke" invoke (str path))]
+            (is (zero? (:exit run)) (:err run))
+            (is (= expected (str/trim (:out run))) invoke))))
+      (finally
+        (Files/deleteIfExists path)))))
+
 (deftest multi-function-union-component-is-self-contained
   (let [world (wit/emit multi-match-kir)
         core-bytes (core/emit multi-match-kir :wasm32-wasi-kotoba-v1 {:fuel 2})
