@@ -165,6 +165,19 @@
           exports (->> (:functions kir)
                        (filter (comp (set (:exports kir)) :name))
                        (sort-by (comp str :name)))
+          canonical-export-names (mapv (comp wit-name :name) exports)
+          _export-collision
+          (when-not (= (count canonical-export-names)
+                       (count (distinct canonical-export-names)))
+            (reject "export names collide after WIT canonicalization"
+                    {:exports (mapv :name exports)}))
+          _parameter-collision
+          (doseq [function exports
+                  :let [parameter-names (mapv wit-name (:params function))]
+                  :when (not= (count parameter-names)
+                              (count (distinct parameter-names)))]
+            (reject "parameter names collide after WIT canonicalization"
+                    {:export (:name function) :parameters (:params function)}))
           export-types (mapcat (fn [f] (conj (vec (:param-types f)) (:result f))) exports)
           _ (doseq [descriptor (mapcat #(tree-seq coll? seq %) export-types)
                     :when (and (vector? descriptor) (= :record (first descriptor)))]
