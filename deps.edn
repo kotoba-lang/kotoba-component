@@ -5,7 +5,7 @@
          :git/sha "22d31af066d773e30504133fd3cde831149cfd63"}
         io.github.kotoba-lang/kotoba-wasm
         {:git/url "https://github.com/kotoba-lang/kotoba-wasm.git"
-         :git/sha "9550a083e53db2dac6c9aecb04764905cc281546"}}
+         :git/sha "0eb2cf954bcf98f3bc8beee2b65a247f8dbbcd51"}}
  :aliases {:test {:extra-paths ["test"]
                   :extra-deps {io.github.cognitect-labs/test-runner
                                {:git/url "https://github.com/cognitect-labs/test-runner.git"
