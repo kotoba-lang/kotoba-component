@@ -492,9 +492,20 @@
             (when (and (seq? node)
                        (= 6 (count node))
                        (= 'option-match (first node))
-                       (= [:option :vector-i64] (second node)))
+                       (contains? #{[:option :vector-i64]
+                                    [:option :vector-f64]
+                                    [:option [:list :i64]]
+                                    [:option [:list :f64]]}
+                                  (second node)))
               (let [[_ descriptor call fallback result-binder result-body] node]
-                (and (seq? call)
+                (let [leaf-descriptor
+                      (:descriptor (get leaves-by-path []))
+                      count-op
+                      (if (contains? #{:vector-f64 [:list :f64]}
+                                     leaf-descriptor)
+                        'vector-f64-count
+                        'vector-count)]
+                  (and (seq? call)
                      (= 5 (count call))
                      (= 'typed-cap-call (first call))
                      (let [[_ _ request-type result-type request] call]
@@ -504,10 +515,11 @@
                             (= (list 'option-some-of descriptor binder)
                                request)))
                      (symbol? result-binder)
-                     (= result-body (list 'vector-count result-binder))
-                     (contains? #{:vector-i64 [:list :i64]}
-                                (:descriptor (get leaves-by-path [])))
-                     (valid? fallback)))))
+                     (= result-body (list count-op result-binder))
+                     (contains? #{:vector-i64 :vector-f64
+                                  [:list :i64] [:list :f64]}
+                                leaf-descriptor)
+                     (valid? fallback))))))
           (valid? [node]
             (cond
               (option-list-capability-count? node) true
@@ -832,7 +844,11 @@
             (when (and (seq? node)
                        (= 6 (count node))
                        (= 'option-match (first node))
-                       (= [:option :vector-i64] (second node)))
+                       (contains? #{[:option :vector-i64]
+                                    [:option :vector-f64]
+                                    [:option [:list :i64]]
+                                    [:option [:list :f64]]}
+                                  (second node)))
               (let [[_ descriptor call fallback result-binder result-body] node]
                 (when (and (seq? call)
                            (= 5 (count call))
@@ -843,14 +859,19 @@
                                (= 'option-some-of (first request)))
                       (let [[_ constructor-type request-value] request
                             request-leaf (get replacements [])
-                            result-layout (canonical/layout descriptor {})]
+                            result-layout (canonical/layout descriptor {})
+                            count-op
+                            (if (contains? #{:vector-f64 [:list :f64]}
+                                           (second descriptor))
+                              'vector-f64-count
+                              'vector-count)]
                         (when (and (= request-type descriptor)
                                    (= result-type descriptor)
                                    (= constructor-type descriptor)
                                    (= request-value binder)
                                    (symbol? result-binder)
                                    (= result-body
-                                      (list 'vector-count result-binder))
+                                      (list count-op result-binder))
                                    (:indirect-list? request-leaf))
                           (list 'component-option-list-capability-count
                                 capability-id
@@ -1108,7 +1129,7 @@
 (defn- structural-match-capability-imports
   "Named imports admitted inside a shared structural-union match module.
   Scalar calls retain ADR 0076's direct signature. The aggregate slice lowers
-  option<list<s64>> to its standard32 flat request and indirect result pointer;
+  option<list<s64|f64>> to its standard32 flat request and indirect result pointer;
   the adapter rewrites the only admitted use into the matching backend
   primitive, so no host-reference aggregate can reach this signature."
   [kir]
@@ -1129,13 +1150,17 @@
                  :type [0x60 1 (scalar-type request-type)
                         1 (scalar-type result-type)]}
 
-                (and (= request-type [:option :vector-i64])
+                (and (contains? #{[:option :vector-i64]
+                                  [:option :vector-f64]
+                                  [:option [:list :i64]]
+                                  [:option [:list :f64]]}
+                                request-type)
                      (= result-type request-type))
                 {:id id
                  :module (str "cm32p2|kotoba:application/"
                               (name (:interface entry)) "@1")
                  :field (:function entry)
-                 ;; option<list<s64>>: disc, pointer, count, retptr -> ().
+                 ;; option<list<T>>: disc, pointer, count, retptr -> ().
                  :type [0x60 4 0x7f 0x7f 0x7f 0x7f 0]}
 
                 :else nil))))]

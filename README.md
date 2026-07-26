@@ -59,7 +59,7 @@ scalar helpers, fuel global, and capability calls remain in one core module,
 so composition does not introduce a second expression compiler or ambient
 WASI authority.
 
-An `option<list<s64>>` match may reconstruct its selected list, pass that
+An `option<list<s64>>` or `option<list<f64>>` match may reconstruct its selected list, pass that
 bounded value to a named capability with the same request/result descriptor,
 and immediately match the returned option. The branch still compiles through
 the shared core-Wasm expression module; the generated standard32 adapter
