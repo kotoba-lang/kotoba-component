@@ -39,8 +39,10 @@ Bounded `list<s64>` and `list<f64>` payloads additionally validate item
 count, alignment, pointer overflow, and arena range in the selected case, then
 alias the admitted input buffer until canonical post-return resets the arena.
 
-Other list item types, nested option/result payloads, and recursive records
-remain fail-closed pending per-element validation and linearity analysis.
+Nested `option`/`result` payloads recursively validate each inner
+discriminant and only the selected inner case before storing the same nested
+in-memory union shape. Other list item types and recursive records remain
+fail-closed pending per-element validation and linearity analysis.
 
 ## Test
 
