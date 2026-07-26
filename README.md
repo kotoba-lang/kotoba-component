@@ -67,6 +67,11 @@ validates the request and returned list bounds and uses caller-allocated result
 storage. Other aggregate branch/capability shapes fail closed until their
 Canonical codec is admitted explicitly.
 
+A symmetric `result<list<T>, list<T>>` match has the same property for both
+`ok` and `err`. The request case is explicit, and the returned discriminant
+and active list range are validated before either branch can observe its
+count.
+
 A direct named capability may also transport one bounded structural
 `option`/`result` unchanged. Its leaves may be scalars, strings/keywords,
 `list<s64>`/`list<f64>`, or nested structural unions. Both application and

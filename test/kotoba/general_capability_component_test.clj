@@ -286,6 +286,68 @@
       (finally
         (Files/deleteIfExists path)))))
 
+(deftest structural-result-list-match-calls-a-named-capability
+  (doseq [[descriptor count-op values]
+          [[[:result :vector-i64 :vector-i64]
+            'vector-count "[1, -2, 3]"]
+           [[:result :vector-f64 :vector-f64]
+            'vector-f64-count "[1.5, -2.25, 3.0]"]]]
+    (let [inner
+          (fn [constructor binder]
+            (list 'result-match-of descriptor
+                  (list 'typed-cap-call
+                        clock-now descriptor descriptor
+                        (list constructor descriptor binder))
+                  'returned-ok (list count-op 'returned-ok)
+                  'returned-err (list count-op 'returned-err)))
+          kir {:format :kotoba.kir/v4
+               :exports ['choose 'echo]
+               :schemas {}
+               :effects #{:clock/read}
+               :functions
+               [{:name 'choose
+                 :params ['value]
+                 :param-types [descriptor]
+                 :result :i64
+                 :effects #{:clock/read}
+                 :body
+                 (list 'result-match-of descriptor 'value
+                       'ok-items (inner 'result-ok-of 'ok-items)
+                       'err-items (inner 'result-err-of 'err-items))}
+                {:name 'echo
+                 :params ['value]
+                 :param-types [:i64]
+                 :result :i64
+                 :effects #{}
+                 :body 'value}]}
+          application
+          (artifact/package
+           (component-core/emit kir :wasm32-wasi-kotoba-v1)
+           kir (wit/emit kir))
+          provider
+          (composition/package-structural-union-identity-provider
+           :clock/now descriptor)
+          closed (composition/compose-closed application [provider])
+          path (Files/createTempFile
+                "kotoba-result-list-match-capability-" ".wasm"
+                (make-array FileAttribute 0))]
+      (try
+        (Files/write path ^bytes (:bytes closed)
+                     (make-array java.nio.file.OpenOption 0))
+        (is (= :structural-union-match-module
+               (component-core/assert-supported! kir)))
+        (is (= [:clock/now] (:imports application)))
+        (doseq [[invoke expected]
+                [[(str "choose(ok(" values "))") "3"]
+                 [(str "choose(err(" values "))") "3"]
+                 ["echo(11)" "11"]]]
+          (let [run (shell/sh "wasmtime" "run" "--invoke"
+                              invoke (str path))]
+            (is (zero? (:exit run)) (:err run))
+            (is (= expected (str/trim (:out run))) invoke)))
+        (finally
+          (Files/deleteIfExists path))))))
+
 (deftest structural-union-capability-transports-bounded-lists
   (let [descriptor [:option :vector-i64]
         kir {:format :kotoba.kir/v4
