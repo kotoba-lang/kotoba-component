@@ -78,6 +78,12 @@ The non-trapping `vector-get`/`vector-f64-get` forms validate the selected
 list just as strictly, then return their explicit fallback for a negative or
 out-of-range index without forming a memory address.
 
+Top-level `vector-drop`/`vector-assoc`/`vector-conj` and their f64 forms
+produce owned Canonical list results. They validate the complete borrowed
+input, allocate and copy a fresh output buffer, apply the bounded transform,
+write the standard pointer/count result area, and release transient storage
+through post-return. No transform mutates or aliases the input buffer.
+
 ## Test
 
 ```bash
