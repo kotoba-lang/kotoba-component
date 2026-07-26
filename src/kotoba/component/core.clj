@@ -240,8 +240,8 @@
   sealed variant, so they deliberately share `variant-wat`. Payloads are
   admitted only when that emitter can recursively validate and store every
   active-case leaf: a Canonical scalar/string/keyword or a finite sealed record
-  recursively containing those leaves, plus bounded `list<s64>` and
-  `list<f64>`. Other list item types, nested option/result, and recursive
+  recursively containing those leaves, bounded `list<s64>`/`list<f64>`, or
+  another finite structural option/result. Other list item types and recursive
   record identities remain fail-closed."
   [function schemas]
   (let [{:keys [params param-types result body]} function
@@ -255,6 +255,17 @@
 
                       (contains? #{:vector-i64 :vector-f64} value)
                       true
+
+                      (and (vector? value)
+                           (= :option (first value))
+                           (= 2 (count value)))
+                      (supported? (second value) seen)
+
+                      (and (vector? value)
+                           (= :result (first value))
+                           (= 3 (count value)))
+                      (and (supported? (second value) seen)
+                           (supported? (nth value 2) seen))
 
                       (and (vector? value)
                            (contains? #{:ref :record} (first value)))
@@ -1420,6 +1431,80 @@
                     leaves))]
     (str validation stores)))
 
+(declare variant-layout-code)
+
+(defn- nested-variant-case-chain
+  "Dispatch one nested union using its flattened discriminant expression.
+  Every payload starts at the union's shared in-memory payload offset and at
+  the flat slot immediately after its discriminant. Range validation happens
+  before this chain, so the final fallthrough is the final valid case."
+  [cases discriminant-expr payload-base flat-base joined-types capacity store?]
+  (letfn [(build [remaining index]
+            (let [body (variant-layout-code
+                        (:layout (first remaining))
+                        payload-base flat-base joined-types capacity store?)]
+              (if (= 1 (count remaining))
+                body
+                (str "      " discriminant-expr " i32.const " index " i32.eq\n"
+                     "      if\n"
+                     body
+                     "      else\n"
+                     (build (rest remaining) (inc index))
+                     "      end\n"))))]
+    (build cases 0)))
+
+(defn- variant-layout-code
+  "Recursively validate and optionally store one selected case layout.
+  Products recurse by fixed field offsets. Nested unions validate and store
+  their own discriminant, then recurse only into the selected inner case.
+  Scalar and indirect leaves reuse the existing leaf validation/store code."
+  [layout base-offset base-flat-index joined-types capacity store?]
+  (cond
+    (empty? (:flat layout))
+    ""
+
+    (contains? layout :fields)
+    (loop [remaining (:fields layout)
+           flat-index base-flat-index
+           code ""]
+      (if-let [{field-offset :offset field-layout :layout} (first remaining)]
+        (recur (next remaining)
+               (+ flat-index (count (:flat field-layout)))
+               (str code
+                    (variant-layout-code
+                     field-layout (+ base-offset field-offset) flat-index
+                     joined-types capacity store?)))
+        code))
+
+    (contains? layout :cases)
+    (let [discriminant-expr
+          (variant-flat-value-expr joined-types base-flat-index :i32)
+          validation
+          (str "      " discriminant-expr " i32.const "
+               (count (:cases layout)) " i32.ge_u if unreachable end\n")
+          store
+          (when store?
+            (str "      local.get $ret " discriminant-expr " "
+                 (variant-disc-store (:discriminant-size layout))
+                 " offset=" base-offset "\n"))
+          cases
+          (nested-variant-case-chain
+           (:cases layout) discriminant-expr
+           (+ base-offset (:payload-offset layout))
+           (inc base-flat-index) joined-types capacity store?)]
+      (str validation store cases))
+
+    :else
+    (let [leaf (cond-> {:relative-offset base-offset
+                        :descriptor (:descriptor layout)
+                        :flat-index base-flat-index}
+                 (:max-bytes layout) (assoc :max-bytes (:max-bytes layout))
+                 (:max-items layout) (assoc :max-items (:max-items layout)
+                                            :item-layout (:item-layout layout)))]
+      (if store?
+        (variant-case-body 0 joined-types capacity [leaf])
+        (variant-case-validation joined-types capacity [leaf])))))
+
 (defn- variant-case-chain
   "The nested `if`/`else` chain that stores the active case's payload into
   the result area. Every case but the last is guarded by an explicit
@@ -1429,8 +1514,9 @@
   leaves exactly the last case."
   [cases payload-offset joined-types capacity]
   (letfn [(build [remaining index]
-            (let [body (variant-case-body payload-offset joined-types capacity
-                                          (variant-case-leaves (:layout (first remaining))))]
+            (let [body (variant-layout-code
+                        (:layout (first remaining))
+                        payload-offset 0 joined-types capacity true)]
               (if (= 1 (count remaining))
                 body
                 (str "    local.get $disc i32.const " index " i32.eq\n"
@@ -1440,6 +1526,23 @@
                      (build (rest remaining) (inc index))
                      "    end\n"))))]
     (build cases 0)))
+
+(defn- variant-layout-indirect-headroom
+  "Maximum indirect bytes reachable through one selected layout path."
+  [layout]
+  (cond
+    (:max-bytes layout) (:max-bytes layout)
+    (:max-items layout)
+    (* (:max-items layout)
+       (align-up (get-in layout [:item-layout :size])
+                 (get-in layout [:item-layout :alignment])))
+    (contains? layout :fields)
+    (reduce + 0 (map #(variant-layout-indirect-headroom (:layout %))
+                     (:fields layout)))
+    (contains? layout :cases)
+    (reduce max 0 (map #(variant-layout-indirect-headroom (:layout %))
+                       (:cases layout)))
+    :else 0))
 
 (defn- variant-wat
   "Identity export for a sealed variant whose every case's payload is a
@@ -1474,23 +1577,11 @@
   (let [export (wit-name (:name function))
         variant-layout (canonical/layout (first (:param-types function)) schemas)
         joined-types (vec (rest (:flat variant-layout)))
-        case-leaves (mapv (fn [case] (variant-case-leaves (:layout case))) (:cases variant-layout))
         indirect-headroom
         (reduce
          max 0
-         (map (fn [leaves]
-                (reduce
-                 +
-                 (map (fn [leaf]
-                        (cond
-                          (:max-bytes leaf) (:max-bytes leaf)
-                          (:max-items leaf)
-                          (* (:max-items leaf)
-                             (align-up (get-in leaf [:item-layout :size])
-                                       (get-in leaf [:item-layout :alignment])))
-                          :else 0))
-                      leaves)))
-              case-leaves))
+         (map #(variant-layout-indirect-headroom (:layout %))
+              (:cases variant-layout)))
         needs-indirect-headroom? (pos? indirect-headroom)
         pages (max 1 (quot (+ 8 indirect-headroom
                               (:size variant-layout) 65535)

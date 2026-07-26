@@ -92,6 +92,8 @@
         option-string [:option :string]
         option-list [:option :vector-i64]
         option-f64-list [:option :vector-f64]
+        option-option [:option [:option :i64]]
+        option-result [:option [:result :string :bool]]
         result-message [:result message :bool]
         schemas {:demo/point
                  [:record :demo/point [[:x :i64] [:visible :bool]]]
@@ -130,11 +132,29 @@
                          "some([1.5, -2.25])"]]
                 :core-check {:inactive ["0" "1" "16385"]
                              :active ["1" "1" "16385"]}}
+               {:descriptor option-option
+                :calls [["echo(none)" "none"]
+                        ["echo(some(none))" "some(none)"]
+                        ["echo(some(some(7)))" "some(some(7))"]]
+                :core-check {:inactive ["0" "2" "0"]
+                             :active ["1" "2" "0"]}}
+               {:descriptor option-result
+                :calls [["echo(none)" "none"]
+                        ["echo(some(ok(\"hello\")))"
+                         "some(ok(\"hello\"))"]
+                        ["echo(some(err(true)))"
+                         "some(err(true))"]]
+                :core-check {:inactive ["0" "2" "0" "65537"]
+                             :active ["1" "2" "0" "0"]}
+                :extra-core-checks
+                [{:args ["1" "0" "0" "65537"] :trap? true}
+                 {:args ["1" "1" "2" "65537"] :trap? true}
+                 {:args ["1" "1" "1" "65537"] :trap? false}]}
                {:descriptor result-message
                 :calls [["echo(ok({topic: \"demo\", text: \"hello\"}))"
                          "ok({topic: \"demo\", text: \"hello\"})"]
                         ["echo(err(true))" "err(true)"]]}]]
-    (doseq [{:keys [descriptor calls core-check]} cases]
+    (doseq [{:keys [descriptor calls core-check extra-core-checks]} cases]
       (let [kir {:format :kotoba.kir/v4
                  :exports ['echo]
                  :schemas schemas
@@ -173,12 +193,19 @@
                   "inactive joined payload storage must not be inspected")
               (is (not (zero? (:exit active-malformed)))
                   "the selected case must validate its payload leaves")))
+          (doseq [{:keys [args trap?]} extra-core-checks]
+            (let [run (apply shell/sh "wasmtime" "run" "--invoke"
+                             "cm32p2||echo" (str core-path) args)]
+              (if trap?
+                (is (not (zero? (:exit run)))
+                    "the selected nested leaf must reject malformed input")
+                (is (zero? (:exit run))
+                    "an inactive nested joined slot must remain uninterpreted"))))
           (finally
             (Files/deleteIfExists path)
             (Files/deleteIfExists core-path)))))
     (doseq [[descriptor schemas]
             [[[:result [:vector :i64] :bool] {}]
-             [[:option [:option :i64]] {}]
              [[:option [:list :bool]] {}]
              [[:option [:list [:list :i64]]] {}]
              [[:option [:ref :demo/node]]
