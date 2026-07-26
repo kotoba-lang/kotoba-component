@@ -239,12 +239,36 @@
   These layouts have the same discriminant-plus-joined-payload shape as a
   sealed variant, so they deliberately share `variant-wat`. Payloads are
   admitted only when that emitter can recursively validate and store every
-  active-case leaf: a Canonical scalar, a sealed flat scalar record, or a
-  sealed flat string/keyword-bearing record. Lists and nested records remain
-  fail-closed because `variant-case-leaves` does not yet recurse into them."
+  active-case leaf: a Canonical scalar/string/keyword or a finite sealed record
+  recursively containing those leaves. Lists, nested option/result, and
+  recursive record identities remain fail-closed."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         descriptor (first param-types)
+        supported-payload?
+        (fn supported-payload? [payload]
+          (letfn [(supported? [value seen]
+                    (cond
+                      (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
+                      true
+
+                      (and (vector? value)
+                           (contains? #{:ref :record} (first value)))
+                      (let [identity (second value)
+                            schema (if (= :ref (first value))
+                                     (get schemas identity)
+                                     value)]
+                        (and (keyword? identity)
+                             (not (contains? seen identity))
+                             (vector? schema)
+                             (= :record (first schema))
+                             (= identity (second schema))
+                             (every? (fn [[_ field-type]]
+                                       (supported? field-type (conj seen identity)))
+                                     (nth schema 2))))
+
+                      :else false))]
+            (supported? payload #{})))
         payloads (when (vector? descriptor)
                    (case (first descriptor)
                      :option [(second descriptor)]
@@ -255,7 +279,7 @@
          (= descriptor result)
          (= (first params) body)
          (seq payloads)
-         (every? #(record-or-scalar-variant-case? % schemas) payloads)
+         (every? supported-payload? payloads)
          (canonical/layout descriptor schemas))))
 
 (defn- structural-union-construction
@@ -1233,42 +1257,43 @@
     :i64-to-f64 ["f64.reinterpret_i64"]))
 
 (defn- variant-case-leaves
-  "The ordered `{:relative-offset :descriptor :flat-index}` (plus
-  `:max-bytes` on a string/keyword leaf) leaves of one variant case's own
-  payload layout: a scalar payload is its own single leaf at relative
-  offset 0 and flat-index 0; a sealed all-scalar record payload (ADR 0052)
-  or a sealed flat string/keyword-bearing record payload (ADR 0053, ADR
-  0054) contributes one leaf per top-level field, in the same order as the
-  record's own `:fields`/`:flat`. `flat-index` is now a running sum of each
-  preceding field's own flat *width* (1 for a scalar, 2 for a string/keyword
-  pointer+length leaf) rather than a plain field index, because a
-  string/keyword field's own `:flat` is two core positions
-  (`[:i32 :i32]`) -- `flat-index` must still line up with position
-  `flat-index` of *this case's own* `flatten_type` sequence, the same
-  sequence `variant-flatten-payload` folds every case's flat types into
-  position by position starting at index 0 for every case alike; a
-  string/keyword leaf's second (`length`) core value sits at `flat-index`+1
-  by construction (never re-derived from a separate counter -- see
-  `variant-string-leaf-value-exprs`). This does not recurse into nested
-  `:fields` (unlike `canonical-abi/layout-leaves`): a variant case payload
-  is bounded to the ADR 0043/0053 flat-record shape in this slice, never
-  the ADR 0051 one-level-nested shape, so no leaf here is itself a nested
-  record."
+  "Recursively return the ordered Canonical leaves of one active case.
+  Relative offsets accumulate through nested record layouts and flat indices
+  advance by each field layout's exact flattened width. String/keyword leaves
+  retain their byte bound and pointer/length pair; scalar leaves retain one
+  joined position. Admission excludes layouts with cases or lists before this
+  walker runs."
   [layout]
-  (cond
-    (empty? (:flat layout)) []
-    (contains? layout :fields)
-    (loop [remaining (:fields layout) flat-index 0 acc []]
-      (if-let [{:keys [offset layout]} (first remaining)]
-        (let [descriptor (:descriptor layout)
-              max-bytes (:max-bytes layout)
-              width (if max-bytes 2 1)
-              leaf (cond-> {:relative-offset offset :descriptor descriptor :flat-index flat-index}
-                     max-bytes (assoc :max-bytes max-bytes))]
-          (recur (next remaining) (+ flat-index width) (conj acc leaf)))
-        acc))
-    :else
-    [{:relative-offset 0 :descriptor (:descriptor layout) :flat-index 0}]))
+  (letfn [(walk [node base-offset base-flat-index]
+            (cond
+              (empty? (:flat node))
+              []
+
+              (:max-bytes node)
+              [{:relative-offset base-offset
+                :descriptor (:descriptor node)
+                :flat-index base-flat-index
+                :max-bytes (:max-bytes node)}]
+
+              (contains? node :fields)
+              (loop [remaining (:fields node)
+                     flat-index base-flat-index
+                     leaves []]
+                (if-let [{field-offset :offset field-layout :layout}
+                         (first remaining)]
+                  (recur (next remaining)
+                         (+ flat-index (count (:flat field-layout)))
+                         (into leaves
+                               (walk field-layout
+                                     (+ base-offset field-offset)
+                                     flat-index)))
+                  leaves))
+
+              :else
+              [{:relative-offset base-offset
+                :descriptor (:descriptor node)
+                :flat-index base-flat-index}]))]
+    (walk layout 0 0)))
 
 (defn- variant-flat-value-expr
   "The WAT expression that turns the joined-flat param at `flat-index`
