@@ -86,21 +86,42 @@
 (deftest structural-union-record-payloads-round-trip
   (let [point [:ref :demo/point]
         message [:ref :demo/message]
+        outer [:ref :demo/outer]
         option-point [:option point]
+        option-outer [:option outer]
+        option-string [:option :string]
         result-message [:result message :bool]
         schemas {:demo/point
                  [:record :demo/point [[:x :i64] [:visible :bool]]]
                  :demo/message
-                 [:record :demo/message [[:topic :keyword] [:text :string]]]}
+                 [:record :demo/message [[:topic :keyword] [:text :string]]]
+                 :demo/inner
+                 [:record :demo/inner [[:label :string] [:enabled :bool]]]
+                 :demo/outer
+                 [:record :demo/outer
+                  [[:id :i64] [:inner [:ref :demo/inner]]]]}
         cases [{:descriptor option-point
                 :calls [["echo(none)" "none"]
                         ["echo(some({x: 7, visible: true}))"
-                         "some({x: 7, visible: true})"]]}
+                         "some({x: 7, visible: true})"]]
+                :core-check {:inactive ["0" "0" "2"]
+                             :active ["1" "7" "2"]}}
+               {:descriptor option-outer
+                :calls [["echo(none)" "none"]
+                        ["echo(some({id: 9, inner: {label: \"hi\", enabled: true}}))"
+                         "some({id: 9, inner: {label: \"hi\", enabled: true}})"]]
+                :core-check {:inactive ["0" "0" "0" "0" "2"]
+                             :active ["1" "9" "0" "0" "2"]}}
+               {:descriptor option-string
+                :calls [["echo(none)" "none"]
+                        ["echo(some(\"hello\"))" "some(\"hello\")"]]
+                :core-check {:inactive ["0" "0" "65537"]
+                             :active ["1" "0" "65537"]}}
                {:descriptor result-message
                 :calls [["echo(ok({topic: \"demo\", text: \"hello\"}))"
                          "ok({topic: \"demo\", text: \"hello\"})"]
                         ["echo(err(true))" "err(true)"]]}]]
-    (doseq [{:keys [descriptor calls]} cases]
+    (doseq [{:keys [descriptor calls core-check]} cases]
       (let [kir {:format :kotoba.kir/v4
                  :exports ['echo]
                  :schemas schemas
@@ -128,13 +149,13 @@
             (let [run (shell/sh "wasmtime" "run" "--invoke" invoke (str path))]
               (is (zero? (:exit run)) (:err run))
               (is (= expected (str/trim (:out run))) invoke)))
-          (when (= descriptor option-point)
+          (when core-check
             (let [inactive-malformed
-                  (shell/sh "wasmtime" "run" "--invoke" "cm32p2||echo"
-                            (str core-path) "0" "0" "2")
+                  (apply shell/sh "wasmtime" "run" "--invoke" "cm32p2||echo"
+                         (str core-path) (:inactive core-check))
                   active-malformed
-                  (shell/sh "wasmtime" "run" "--invoke" "cm32p2||echo"
-                            (str core-path) "1" "7" "2")]
+                  (apply shell/sh "wasmtime" "run" "--invoke" "cm32p2||echo"
+                         (str core-path) (:active core-check))]
               (is (zero? (:exit inactive-malformed))
                   "inactive record bool storage must not be inspected")
               (is (not (zero? (:exit active-malformed)))
@@ -143,11 +164,11 @@
             (Files/deleteIfExists path)
             (Files/deleteIfExists core-path)))))
     (doseq [[descriptor schemas]
-            [[[:option [:ref :demo/outer]]
-              {:demo/inner [:record :demo/inner [[:value :i64]]]
-               :demo/outer
-               [:record :demo/outer [[:inner [:ref :demo/inner]]]]}]
-             [[:result [:vector :i64] :bool] {}]]]
+            [[[:result [:vector :i64] :bool] {}]
+             [[:option [:option :i64]] {}]
+             [[:option [:ref :demo/node]]
+              {:demo/node
+               [:record :demo/node [[:next [:ref :demo/node]]]]}]]]
       (let [kir {:format :kotoba.kir/v4 :exports ['echo]
                  :schemas schemas :effects #{}
                  :functions
