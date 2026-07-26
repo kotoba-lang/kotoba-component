@@ -399,16 +399,18 @@
 
 (defn- record-get-path
   "Return a nested keyword path when form is a record-get chain rooted at
-  binder, otherwise nil."
+  binder, otherwise nil. Accept both the compact backend KIR form and the
+  frontend's descriptor-bearing public KIR form."
   [form binder]
   (cond
     (= form binder) []
     (and (seq? form)
          (= 'record-get (first form))
-         (= 3 (count form))
-         (keyword? (nth form 2)))
-    (when-let [parent (record-get-path (second form) binder)]
-      (conj parent (nth form 2)))
+         (contains? #{3 4} (count form))
+         (keyword? (last form)))
+    (let [value-index (if (= 4 (count form)) 2 1)]
+      (when-let [parent (record-get-path (nth form value-index) binder)]
+        (conj parent (last form))))
     :else nil))
 
 (defn- aggregate-branch-valid?

@@ -58,16 +58,32 @@
      :result :i64 :effects #{}
      :body '(option-match
              [:option [:ref :demo/point]] value fallback point
-             (if (record-get (record-get point :state) :visible)
-               (+ (record-get point :x) 1)
-               (record-get point :x)))}
+             (if (record-get
+                  [:record :demo/state [[:visible :bool]]]
+                  (record-get
+                   [:record :demo/point
+                    [[:x :i64] [:state [:ref :demo/state]]]]
+                   point :state)
+                  :visible)
+               (+ (record-get
+                   [:record :demo/point
+                    [[:x :i64] [:state [:ref :demo/state]]]]
+                   point :x)
+                  1)
+               (record-get
+                [:record :demo/point
+                 [[:x :i64] [:state [:ref :demo/state]]]]
+                point :x)))}
     {:name 'point-x
      :params ['value 'fallback]
      :param-types [[:option [:ref :demo/point]] :i64]
      :result :i64 :effects #{}
      :body '(option-match
              [:option [:ref :demo/point]] value fallback point
-             (record-get point :x))}]})
+             (record-get
+              [:record :demo/point
+               [[:x :i64] [:state [:ref :demo/state]]]]
+              point :x))}]})
 
 (deftest aggregate-union-match-decodes-only-the-selected-record
   (let [world (wit/emit aggregate-match-kir)
