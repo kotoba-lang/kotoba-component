@@ -91,6 +91,7 @@
         option-outer [:option outer]
         option-string [:option :string]
         option-list [:option :vector-i64]
+        option-f64-list [:option :vector-f64]
         result-message [:result message :bool]
         schemas {:demo/point
                  [:record :demo/point [[:x :i64] [:visible :bool]]]
@@ -121,6 +122,12 @@
                {:descriptor option-list
                 :calls [["echo(none)" "none"]
                         ["echo(some([1, -2, 3]))" "some([1, -2, 3])"]]
+                :core-check {:inactive ["0" "1" "16385"]
+                             :active ["1" "1" "16385"]}}
+               {:descriptor option-f64-list
+                :calls [["echo(none)" "none"]
+                        ["echo(some([1.5, -2.25]))"
+                         "some([1.5, -2.25])"]]
                 :core-check {:inactive ["0" "1" "16385"]
                              :active ["1" "1" "16385"]}}
                {:descriptor result-message
@@ -163,16 +170,16 @@
                   (apply shell/sh "wasmtime" "run" "--invoke" "cm32p2||echo"
                          (str core-path) (:active core-check))]
               (is (zero? (:exit inactive-malformed))
-                  "inactive record bool storage must not be inspected")
+                  "inactive joined payload storage must not be inspected")
               (is (not (zero? (:exit active-malformed)))
-                  "the selected record case must validate bool leaves")))
+                  "the selected case must validate its payload leaves")))
           (finally
             (Files/deleteIfExists path)
             (Files/deleteIfExists core-path)))))
     (doseq [[descriptor schemas]
             [[[:result [:vector :i64] :bool] {}]
              [[:option [:option :i64]] {}]
-             [[:option :vector-f64] {}]
+             [[:option [:list :bool]] {}]
              [[:option [:list [:list :i64]]] {}]
              [[:option [:ref :demo/node]]
               {:demo/node

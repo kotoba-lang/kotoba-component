@@ -240,9 +240,9 @@
   sealed variant, so they deliberately share `variant-wat`. Payloads are
   admitted only when that emitter can recursively validate and store every
   active-case leaf: a Canonical scalar/string/keyword or a finite sealed record
-  recursively containing those leaves, plus a bounded `list<s64>`. Other list
-  item types, nested option/result, and recursive record identities remain
-  fail-closed."
+  recursively containing those leaves, plus bounded `list<s64>` and
+  `list<float64>`. Other list item types, nested option/result, and recursive
+  record identities remain fail-closed."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         descriptor (first param-types)
@@ -253,7 +253,7 @@
                       (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
                       true
 
-                      (= :vector-i64 value)
+                      (contains? #{:vector-i64 :vector-f64} value)
                       true
 
                       (and (vector? value)
