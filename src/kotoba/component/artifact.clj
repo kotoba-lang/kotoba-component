@@ -23,6 +23,7 @@
                                   :variant-capability-call
                                   :structural-union-capability-call
                                   :different-variant-capability-call
+                                  :structural-union-match-module
                                   ;; ADR 0076 increment 1: the general lowering
                                   ;; now emits per-capability typed imports, so
                                   ;; it may carry WIT imports too.

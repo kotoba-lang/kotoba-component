@@ -682,10 +682,16 @@
                            (when (= :i32 core-type) (inc index))))
            joined-core-types)}))
 
+(declare scalar-capability-imports)
+
 (defn- structural-union-match-module
   [kir]
   (let [functions (:functions kir)
         exports (exported-functions kir)
+        capability-calls? (boolean
+                           (some #(uses-operation? % 'typed-cap-call)
+                                 functions))
+        capability-imports (scalar-capability-imports kir)
         plans (into {}
                     (keep (fn [function]
                             (when-let [plan (structural-union-match
@@ -695,7 +701,9 @@
     (when (and (or (> (count exports) 1)
                    (> (count functions) 1))
                (seq plans)
-               (empty? (:effects kir))
+               (if capability-calls?
+                 (some? capability-imports)
+                 (empty? (:effects kir)))
                (every? (fn [function]
                          (or (contains? plans (:name function))
                              (canonical-scalar-function? function)))
@@ -729,6 +737,7 @@
      (assoc opts
             :component-canonical-scalars? true
             :component-unchecked-bool-params unchecked
+            :capability-imports (scalar-capability-imports kir)
             :core-param-types core-param-types))))
 
 (defn- scalar-record-projection [function schemas]
