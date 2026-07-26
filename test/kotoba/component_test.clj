@@ -607,7 +607,11 @@
                  [:result :vector-f64 :vector-f64] value
                  values (vector-f64-drop values index)
                  errors
-                 (vector-f64-assoc (vector-f64-new 4.5 5.5) index item))}]}
+                 (vector-f64-assoc
+                  (vector-f64-new
+                   (f64-from-bits 4616752568008179712)
+                   (f64-from-bits 4617878467915022336))
+                  index item))}]}
         path (Files/createTempFile "kotoba-component-owned-result-" ".wasm"
                                    (make-array FileAttribute 0))]
     (try

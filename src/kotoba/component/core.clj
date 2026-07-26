@@ -677,11 +677,17 @@
         union-layout (when (and payload-leaves (every? some? payload-leaves))
                        (canonical/layout descriptor schemas))
         param-types-by-name (zipmap params param-types)
+        f64-literal?
+        (fn [form]
+          (or (number? form)
+              (and (seq? form) (= 'f64-from-bits (first form))
+                   (= 2 (count form)) (integer? (second form)))))
         scalar-operand
         (fn [form expected]
           (cond
             (and (= expected :i64) (integer? form)) {:kind :literal :value form}
-            (and (= expected :f64) (number? form)) {:kind :literal :value form}
+            (and (= expected :f64) (f64-literal? form))
+            {:kind :literal :value form}
             (= expected (get param-types-by-name form))
             {:kind :parameter :index (.indexOf params form) :type expected}
             :else nil))
@@ -693,7 +699,8 @@
                       'vector-new 'vector-f64-new)
                     (first form))
                  (<= (count (rest form)) value/vector-item-limit)
-                 (every? (if (= :vector-i64 vector-type) integer? number?)
+                 (every? (if (= :vector-i64 vector-type)
+                           integer? f64-literal?)
                          (rest form)))
             {:kind :literal :items (vec (rest form))}
 
@@ -1886,7 +1893,9 @@
         operand
         (fn [{:keys [kind value index]}]
           (if (= :literal kind)
-            (str type-name ".const " value)
+            (if (and (= :f64 element-type) (seq? value))
+              (str "i64.const " (second value) " f64.reinterpret_i64")
+              (str type-name ".const " value))
             (str "local.get $p" index)))
         i64-operand
         (fn [{:keys [kind value index]}]
@@ -1911,7 +1920,12 @@
              (apply str
                     (map-indexed
                      (fn [item-index item]
-                       (str "    local.get $out " type-name ".const " item " "
+                       (str "    local.get $out "
+                            (if (and (= :f64 element-type) (seq? item))
+                              (str "i64.const " (second item)
+                                   " f64.reinterpret_i64")
+                              (str type-name ".const " item))
+                            " "
                             store-name " offset=" (* 8 item-index) "\n"))
                      items))
              "    i32.const " (count items) " local.set $source-len\n")))
