@@ -679,6 +679,8 @@
         option-string [:option :string]
         option-list [:option :vector-i64]
         option-f64-list [:option :vector-f64]
+        option-bool-list [:option [:list :bool]]
+        option-point-list [:option [:list point]]
         option-option [:option [:option :i64]]
         option-result [:option [:result :string :bool]]
         result-message [:result message :bool]
@@ -719,6 +721,17 @@
                          "some([1.5, -2.25])"]]
                 :core-check {:inactive ["0" "1" "16385"]
                              :active ["1" "1" "16385"]}}
+               {:descriptor option-bool-list
+                :calls [["echo(none)" "none"]
+                        ["echo(some([]))" "some([])"]
+                        ["echo(some([true, false, true]))"
+                         "some([true, false, true])"]]}
+               {:descriptor option-point-list
+                :calls
+                [["echo(none)" "none"]
+                 ["echo(some([]))" "some([])"]
+                 ["echo(some([{x: 7, visible: true}, {x: -2, visible: false}]))"
+                  "some([{x: 7, visible: true}, {x: -2, visible: false}])"]]}
                {:descriptor option-option
                 :calls [["echo(none)" "none"]
                         ["echo(some(none))" "some(none)"]
@@ -793,7 +806,6 @@
             (Files/deleteIfExists core-path)))))
     (doseq [[descriptor schemas]
             [[[:result [:vector :i64] :bool] {}]
-             [[:option [:list :bool]] {}]
              [[:option [:list [:list :i64]]] {}]
              [[:option [:ref :demo/node]]
               {:demo/node
@@ -806,6 +818,41 @@
         (is (thrown-with-msg?
              clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
              (core/emit kir :wasm32-wasi-kotoba-v1)))))))
+
+(deftest structural-list-record-validates-every-active-item
+  (let [point [:ref :demo/point]
+        descriptor [:option [:list point]]
+        kir {:format :kotoba.kir/v4
+             :exports ['echo]
+             :schemas
+             {:demo/point
+              [:record :demo/point [[:x :i64] [:visible :bool]]]}
+             :effects #{}
+             :functions
+             [{:name 'echo :params ['value] :param-types [descriptor]
+               :result descriptor :effects #{} :body 'value}]}
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+        path (Files/createTempFile
+              "kotoba-component-list-record-validation-" ".wasm"
+              (make-array FileAttribute 0))
+        script
+        "const fs=require('node:fs');
+         WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
+           const e=instance.exports;
+           const p=e.cm32p2_realloc(0,0,8,16);
+           new DataView(e.cm32p2_memory.buffer).setUint8(p+8,2);
+           e['cm32p2||echo'](0,p,1);
+           let trapped=false;
+           try { e['cm32p2||echo'](1,p,1); } catch (_) { trapped=true; }
+           if (!trapped) process.exit(2);
+         }).catch(error=>{ console.error(error); process.exit(3); });"]
+    (try
+      (Files/write path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run (shell/sh "node" "-e" script (str path))]
+        (is (zero? (:exit run)) (:err run)))
+      (finally
+        (Files/deleteIfExists path)))))
 
 (deftest wit-canonical-name-collisions-fail-before-packaging
   (is (thrown-with-msg?

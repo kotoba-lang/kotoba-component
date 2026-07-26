@@ -50,6 +50,8 @@
     (str "option<" (type-text (second descriptor)) ">")
     (and (vector? descriptor) (= :result (first descriptor)))
     (str "result<" (type-text (second descriptor)) ", " (type-text (nth descriptor 2)) ">")
+    (and (vector? descriptor) (= :list (first descriptor)))
+    (str "list<" (type-text (second descriptor)) ">")
     (and (vector? descriptor) (= :vector (first descriptor)))
     (str "tuple<" (str/join ", " (map type-text (second descriptor))) ">")
     (and (vector? descriptor) (= :set (first descriptor)))

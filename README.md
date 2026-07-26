@@ -35,14 +35,18 @@ scalars, bounded strings/keywords, or finite sealed records recursively
 containing those leaves. Validation is case-dependent: malformed inactive
 joined slots are ignored, while malformed leaves in the selected case trap.
 
-Bounded `list<s64>` and `list<f64>` payloads additionally validate item
-count, alignment, pointer overflow, and arena range in the selected case, then
-alias the admitted input buffer until canonical post-return resets the arena.
+Bounded lists of `s64`, `float64`, `bool`, or finite scalar records additionally
+validate item count, alignment, pointer overflow, and arena range in the
+selected case. Bool fields are checked for every active item before the list
+is exposed. Identity lowering borrows the complete fixed-size item buffer
+through Canonical lift; it neither frees nor mutates that buffer, and
+post-return resets the arena only after lift has finished.
 
 Nested `option`/`result` payloads recursively validate each inner
 discriminant and only the selected inner case before storing the same nested
-in-memory union shape. Other list item types and recursive records remain
-fail-closed pending per-element validation and linearity analysis.
+in-memory union shape. Lists whose items contain indirect values or unions,
+list-of-list, and recursive records remain fail-closed pending recursive
+per-element graph validation and ownership.
 
 Non-identity `option`/`result` matches can consume scalar payloads and finite
 records whose recursive leaves are `s64`, `float32`, `float64`, or `bool`.
