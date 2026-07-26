@@ -319,7 +319,7 @@
         (doseq [path [component embedded core world]] (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
-(defn- structural-union-provider-wit [entry descriptor]
+(defn- structural-union-provider-wit [entry descriptor schemas]
   (let [payloads (when (vector? descriptor)
                    (case (first descriptor)
                      :option [(second descriptor)]
@@ -341,8 +341,42 @@
             (and (supported? (second payload))
                  (supported? (nth payload 2)))
 
+            (and (vector? payload)
+                 (contains? #{:ref :record} (first payload)))
+            (let [schema (if (= :ref (first payload))
+                           (get schemas (second payload))
+                           payload)]
+              (and (vector? schema)
+                   (= :record (first schema))
+                   (every? (fn [[_ field-type]]
+                             (contains? #{:i64 :f32 :f64 :bool}
+                                        field-type))
+                           (nth schema 2))))
+
             :else false))
-        interface (:interface entry)]
+        interface (:interface entry)
+        record-schemas
+        (->> payloads
+             (keep (fn [payload]
+                     (cond
+                       (and (vector? payload) (= :ref (first payload)))
+                       (get schemas (second payload))
+                       (and (vector? payload) (= :record (first payload)))
+                       payload)))
+             distinct)
+        declarations
+        (apply str
+               (map
+                (fn [[_ identity fields]]
+                  (str "  record " (wit-name identity) " {\n"
+                       (apply str
+                              (map (fn [[field-name field-type]]
+                                     (str "    " (wit-name field-name) ": "
+                                          (record-field-wit-type field-type)
+                                          ",\n"))
+                                   fields))
+                       "  }\n"))
+                record-schemas))]
     (when-not (and (seq payloads)
                    (every? supported? payloads))
       (reject "structural union provider requires bounded structural payloads"
@@ -350,6 +384,7 @@
     (let [type-name (component-wit/type-text descriptor)]
       (str "package kotoba:application@1.0.0;\n\n"
            "interface " interface " {\n"
+           declarations
            "  " (:function entry) ": func(request: " type-name
            ") -> " type-name ";\n"
            "}\n\n"
@@ -359,10 +394,13 @@
 
 (defn package-structural-union-identity-provider
   "Build a named WIT provider that echoes one bounded option/result value."
-  [capability-name descriptor]
+  ([capability-name descriptor]
+   (package-structural-union-identity-provider
+    capability-name descriptor {}))
+  ([capability-name descriptor schemas]
   (let [entry (capability capability-name)
-        _ (canonical/layout descriptor {})
-        wit (structural-union-provider-wit entry descriptor)
+        _ (canonical/layout descriptor schemas)
+        wit (structural-union-provider-wit entry descriptor schemas)
         dir (Files/createTempDirectory
              "kotoba-structural-union-provider-" (make-array FileAttribute 0))
         world (.resolve dir "provider.wit")
@@ -374,7 +412,7 @@
       (Files/write core
                    (wasm-tools/parse-wat
                     (component-core/variant-capability-provider-wat
-                     entry descriptor {}))
+                     entry descriptor schemas))
                    (make-array java.nio.file.OpenOption 0))
       (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
                                 "--encoding" "utf8" "-o" (str embedded)])
@@ -383,11 +421,11 @@
       {:format :wasm-component-provider/v1
        :capability capability-name
        :descriptor descriptor
-       :schemas {}
+       :schemas schemas
        :bytes (Files/readAllBytes component)}
       (finally
         (doseq [path [component embedded core world]] (Files/deleteIfExists path))
-        (Files/deleteIfExists dir)))))
+        (Files/deleteIfExists dir))))))
 
 (defn- asymmetric-variant-record-case-schema
   "Schema of `payload-type` when it is `[:ref name]` to a sealed all-scalar

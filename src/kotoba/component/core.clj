@@ -566,10 +566,38 @@
                      (symbol? err-binder)
                      (= ok-body (list count-op ok-binder))
                      (= err-body (list count-op err-binder))))))
+          (option-record-capability-projection? [node]
+            (when (and (seq? node)
+                       (= 6 (count node))
+                       (= 'option-match (first node)))
+              (let [[_ descriptor call fallback result-binder result-body] node
+                    payload (when (and (vector? descriptor)
+                                       (= :option (first descriptor)))
+                              (second descriptor))
+                    result-path (when (symbol? result-binder)
+                                  (record-get-path result-body result-binder))
+                    leaves (vals leaves-by-path)]
+                (and (vector? payload)
+                     (contains? #{:record :ref} (first payload))
+                     (seq leaves)
+                     (every? #(contains? #{:i64 :f32 :f64 :bool}
+                                          (:descriptor %))
+                             leaves)
+                     (contains? leaves-by-path result-path)
+                     (seq? call)
+                     (= 5 (count call))
+                     (= 'typed-cap-call (first call))
+                     (let [[_ _ request-type result-type request] call]
+                       (and (= request-type descriptor)
+                            (= result-type descriptor)
+                            (= (list 'option-some-of descriptor binder)
+                               request)))
+                     (valid? fallback)))))
           (valid? [node]
             (cond
               (option-list-capability-count? node) true
               (result-list-capability-count? node) true
+              (option-record-capability-projection? node) true
 
               (= node binder) scalar?
 
@@ -886,7 +914,7 @@
 (defn- rewrite-aggregate-branch
   "Replace a selected payload binder (scalar) or record-get chain rooted at
   it (aggregate) with its case-specific decoded joined-slot expression."
-  [form binder replacements scalar?]
+  [form binder replacements scalar? schemas]
   (letfn [(option-list-capability-count [node]
             (when (and (seq? node)
                        (= 6 (count node))
@@ -908,7 +936,7 @@
                                (= 'option-some-of (first request)))
                       (let [[_ constructor-type request-value] request
                             request-leaf (get replacements [])
-                            result-layout (canonical/layout descriptor {})
+                            result-layout (canonical/layout descriptor schemas)
                             count-op
                             (cond
                               (contains? #{:string :keyword}
@@ -961,7 +989,7 @@
                                           (first request)))
                       (let [[constructor constructor-type request-value] request
                             request-leaf (get replacements [])
-                            result-layout (canonical/layout descriptor {})
+                            result-layout (canonical/layout descriptor schemas)
                             count-op
                             (cond
                               (contains? #{:string :keyword}
@@ -992,6 +1020,67 @@
                                 (:size result-layout)
                                 (:payload-offset result-layout)
                                 (:alignment result-layout))))))))))
+          (option-record-capability-projection [node]
+            (when (and (seq? node)
+                       (= 6 (count node))
+                       (= 'option-match (first node)))
+              (let [[_ descriptor call fallback result-binder result-body] node
+                    payload (when (and (vector? descriptor)
+                                       (= :option (first descriptor)))
+                              (second descriptor))]
+                (when (and (vector? payload)
+                           (contains? #{:record :ref} (first payload))
+                           (seq? call)
+                           (= 5 (count call))
+                           (= 'typed-cap-call (first call))
+                           (symbol? result-binder))
+                  (let [[_ capability-id request-type result-type request] call
+                        result-path (record-get-path result-body result-binder)]
+                    (when (and (= request-type descriptor)
+                               (= result-type descriptor)
+                               (= (list 'option-some-of descriptor binder)
+                                  request)
+                               result-path)
+                      (let [result-layout (canonical/layout descriptor schemas)
+                            record-layout (:item-layout result-layout)
+                            walk
+                            (fn walk [layout path base]
+                              (if-let [fields (:fields layout)]
+                                (mapcat
+                                 (fn [{:keys [name layout] :as field}]
+                                   (walk layout (conj path name)
+                                         (+ base (:offset field))))
+                                 fields)
+                                [{:path path
+                                  :descriptor (:descriptor layout)
+                                  :offset base}]))
+                            leaves (vec (walk record-layout []
+                                              (:payload-offset result-layout)))
+                            selected (first (filter #(= result-path (:path %))
+                                                    leaves))
+                            request-values
+                            (mapv #(get replacements (:path %)) leaves)
+                            bool-offsets
+                            (mapv :offset
+                                  (filter #(= :bool (:descriptor %)) leaves))
+                            result-type (:descriptor selected)
+                            op ({:i64 'component-option-record-capability-project-i64
+                                 :f32 'component-option-record-capability-project-f32
+                                 :f64 'component-option-record-capability-project-f64
+                                 :bool 'component-option-record-capability-project-bool}
+                                result-type)]
+                        (when (and selected op
+                                   (every? some? request-values)
+                                   (every? #(contains? #{:i64 :f32 :f64 :bool}
+                                                       (:descriptor %))
+                                           leaves))
+                          (list op capability-id request-values
+                                (rewrite fallback)
+                                (:size result-layout)
+                                (:alignment result-layout)
+                                (:payload-offset result-layout)
+                                bool-offsets
+                                (:offset selected))))))))))
           (rewrite [node]
             (cond
               (and (seq? node)
@@ -1001,6 +1090,10 @@
               (and (seq? node)
                    (result-list-capability-count node))
               (result-list-capability-count node)
+
+              (and (seq? node)
+                   (option-record-capability-projection node))
+              (option-record-capability-projection node)
 
               (and (seq? node)
                    (= 'string-byte-length (first node))
@@ -1106,7 +1199,7 @@
             :core-param-types {(:name function) core-param-types}))))
 
 (defn- structural-union-match-adapter
-  [function _schemas plan]
+  [function schemas plan]
   (let [used (set (:params function))
         fresh (fn [base]
                 (first (remove used
@@ -1213,7 +1306,8 @@
            (rewrite-aggregate-branch
             (:case-0-body plan) binder
             (nth decoded-replacements case-0-index)
-            (nth scalar-payload? case-0-index)))
+            (nth scalar-payload? case-0-index)
+            schemas))
           (:case-0-body plan))
         case-1
         (validate-case-leaves
@@ -1221,7 +1315,8 @@
          (rewrite-aggregate-branch
           (:case-1-body plan) (:case-1-binder plan)
           (nth decoded-replacements case-1-index)
-          (nth scalar-payload? case-1-index)))
+          (nth scalar-payload? case-1-index)
+          schemas))
         branch (list 'if disc64 case-1 case-0)
         checked
         (list 'let [disc64 (list 'i64-extend-i32-u disc32)]
@@ -1263,7 +1358,14 @@
         scalar-type {:i64 0x7e :f32 0x7d :f64 0x7c}
         import-for
         (fn [{:keys [id request-type result-type]}]
-          (let [entry (get by-id id)]
+          (let [entry (get by-id id)
+                request-layout
+                (when (and (vector? request-type)
+                           (= :option (first request-type)))
+                  (canonical/layout request-type (:schemas kir)))
+                record-payload
+                (when request-layout (:item-layout request-layout))
+                flat-byte {:i32 0x7f :i64 0x7e :f32 0x7d :f64 0x7c}]
             (when entry
               (cond
                 (and (scalar-type request-type) (scalar-type result-type))
@@ -1273,6 +1375,19 @@
                  :field (:function entry)
                  :type [0x60 1 (scalar-type request-type)
                         1 (scalar-type result-type)]}
+
+                (and (= result-type request-type)
+                     (:fields record-payload)
+                     (every? flat-byte (:flat request-layout)))
+                {:id id
+                 :module (str "cm32p2|kotoba:application/"
+                              (name (:interface entry)) "@1")
+                 :field (:function entry)
+                 :type
+                 (vec
+                  (concat [0x60 (inc (count (:flat request-layout)))]
+                          (map flat-byte (:flat request-layout))
+                          [0x7f 0]))}
 
                 (and (contains? #{[:option :vector-i64]
                                   [:option :vector-f64]

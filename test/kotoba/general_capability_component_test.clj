@@ -428,6 +428,65 @@
         (finally
           (Files/deleteIfExists path))))))
 
+(deftest structural-option-record-match-calls-a-named-capability
+  (let [record-type
+        [:record :demo/cap-record
+         [[:x :i64] [:enabled :bool] [:weight :f32]]]
+        schemas {:demo/cap-record record-type}
+        descriptor [:option [:ref :demo/cap-record]]
+        kir {:format :kotoba.kir/v4
+             :exports ['choose 'echo]
+             :schemas schemas
+             :effects #{:clock/read}
+             :functions
+             [{:name 'choose
+               :params ['value 'fallback]
+               :param-types [descriptor :i64]
+               :result :i64
+               :effects #{:clock/read}
+               :body
+               (list 'option-match descriptor 'value 'fallback 'selected
+                     (list 'option-match descriptor
+                           (list 'typed-cap-call
+                                 clock-now descriptor descriptor
+                                 (list 'option-some-of descriptor 'selected))
+                           'fallback 'returned
+                           (list 'record-get record-type
+                                 'returned :x)))}
+              {:name 'echo
+               :params ['value]
+               :param-types [:i64]
+               :result :i64
+               :effects #{}
+               :body 'value}]}
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir (wit/emit kir))
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor schemas)
+        closed (composition/compose-closed application [provider])
+        path (Files/createTempFile
+              "kotoba-option-record-match-capability-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-match-module
+             (component-core/assert-supported! kir)))
+      (is (= [:clock/now] (:imports application)))
+      (doseq [[invoke expected]
+              [["choose(none, 9)" "9"]
+               ["choose(some({x: 7, enabled: true, weight: 1.5}), 9)" "7"]
+               ["echo(11)" "11"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke"
+                            invoke (str path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      (finally
+        (Files/deleteIfExists path)))))
+
 (deftest structural-union-capability-transports-bounded-lists
   (let [descriptor [:option :vector-i64]
         kir {:format :kotoba.kir/v4
