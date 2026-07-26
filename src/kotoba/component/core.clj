@@ -241,7 +241,7 @@
   admitted only when that emitter can recursively validate and store every
   active-case leaf: a Canonical scalar/string/keyword or a finite sealed record
   recursively containing those leaves, plus bounded `list<s64>` and
-  `list<float64>`. Other list item types, nested option/result, and recursive
+  `list<f64>`. Other list item types, nested option/result, and recursive
   record identities remain fail-closed."
   [function schemas]
   (let [{:keys [params param-types result body]} function
