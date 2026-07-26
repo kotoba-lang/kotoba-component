@@ -90,6 +90,7 @@
         option-point [:option point]
         option-outer [:option outer]
         option-string [:option :string]
+        option-list [:option :vector-i64]
         result-message [:result message :bool]
         schemas {:demo/point
                  [:record :demo/point [[:x :i64] [:visible :bool]]]
@@ -117,6 +118,11 @@
                         ["echo(some(\"hello\"))" "some(\"hello\")"]]
                 :core-check {:inactive ["0" "0" "65537"]
                              :active ["1" "0" "65537"]}}
+               {:descriptor option-list
+                :calls [["echo(none)" "none"]
+                        ["echo(some([1, -2, 3]))" "some([1, -2, 3])"]]
+                :core-check {:inactive ["0" "1" "16385"]
+                             :active ["1" "1" "16385"]}}
                {:descriptor result-message
                 :calls [["echo(ok({topic: \"demo\", text: \"hello\"}))"
                          "ok({topic: \"demo\", text: \"hello\"})"]
@@ -166,6 +172,8 @@
     (doseq [[descriptor schemas]
             [[[:result [:vector :i64] :bool] {}]
              [[:option [:option :i64]] {}]
+             [[:option :vector-f64] {}]
+             [[:option [:list [:list :i64]]] {}]
              [[:option [:ref :demo/node]]
               {:demo/node
                [:record :demo/node [[:next [:ref :demo/node]]]]}]]]
