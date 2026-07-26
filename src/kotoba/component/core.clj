@@ -299,13 +299,39 @@
         descriptor (first param-types)
         supported-payload?
         (fn supported-payload? [payload]
-          (letfn [(supported? [value seen]
+          (letfn [(fixed-list-item? [value seen]
+                    (cond
+                      (contains? #{:i64 :f32 :f64 :bool} value)
+                      true
+
+                      (and (vector? value)
+                           (contains? #{:ref :record} (first value)))
+                      (let [identity (second value)
+                            schema (if (= :ref (first value))
+                                     (get schemas identity)
+                                     value)]
+                        (and (keyword? identity)
+                             (not (contains? seen identity))
+                             (vector? schema)
+                             (= :record (first schema))
+                             (every? (fn [[_ field-type]]
+                                       (fixed-list-item?
+                                        field-type (conj seen identity)))
+                                     (nth schema 2))))
+
+                      :else false))
+                  (supported? [value seen]
                     (cond
                       (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
                       true
 
                       (contains? #{:vector-i64 :vector-f64} value)
                       true
+
+                      (and (vector? value)
+                           (= :list (first value))
+                           (= 2 (count value)))
+                      (fixed-list-item? (second value) seen)
 
                       (and (vector? value)
                            (= :option (first value))
@@ -2562,6 +2588,48 @@
   [(variant-flat-value-expr joined-types (:flat-index leaf) :i32)
    (variant-flat-value-expr joined-types (inc (:flat-index leaf)) :i32)])
 
+(defn- fixed-list-item-bool-offsets
+  "Absolute bool offsets inside one fixed-size list item.
+  Admission limits these item layouts to scalars and finite records, so this
+  walker never crosses another pointer-bearing or union boundary."
+  [item-layout]
+  (letfn [(walk [layout base]
+            (cond
+              (= :bool (:descriptor layout)) [base]
+              (contains? layout :fields)
+              (mapcat (fn [{:keys [offset layout]}]
+                        (walk layout (+ base offset)))
+                      (:fields layout))
+              :else []))]
+    (vec (walk item-layout 0))))
+
+(defn- fixed-list-item-validation
+  "Validate every bool in every active fixed-size list item.
+  The enclosing list range/alignment checks run first. `$list-index` and
+  `$item-base` are function locals shared by sequential list validations."
+  [pointer length item-layout]
+  (let [bool-offsets (fixed-list-item-bool-offsets item-layout)
+        stride (align-up (:size item-layout) (:alignment item-layout))]
+    (when (seq bool-offsets)
+      (str
+       "      i32.const 0 local.set $list-index\n"
+       "      block $list-done\n"
+       "        loop $list-loop\n"
+       "          local.get $list-index " length
+       " i32.ge_u br_if $list-done\n"
+       "          " pointer " local.get $list-index i32.const " stride
+       " i32.mul i32.add local.set $item-base\n"
+       (apply str
+              (map (fn [offset]
+                     (str "          local.get $item-base i32.load8_u offset="
+                          offset
+                          " i32.const 1 i32.gt_u if unreachable end\n"))
+                   bool-offsets))
+       "          local.get $list-index i32.const 1 i32.add local.set $list-index\n"
+       "          br $list-loop\n"
+       "        end\n"
+       "      end\n"))))
+
 (defn- variant-case-validation
   "Just the validation half of one active variant case's leaves (bool
   range-check, and, since ADR 0054, string/keyword length-against-
@@ -2611,7 +2679,8 @@
                       " i32.mul i32.add\n"
                       "      local.tee $end " pointer " i32.lt_u if unreachable end\n"
                       "      local.get $end i32.const " capacity
-                      " i32.gt_u if unreachable end\n"))
+                      " i32.gt_u if unreachable end\n"
+                      (fixed-list-item-validation pointer length item-layout)))
                    (= :bool (:descriptor leaf))
                    (str "      " (variant-payload-value-expr joined-types leaf)
                         " i32.const 1 i32.gt_u if unreachable end\n")
@@ -2801,6 +2870,15 @@
          (map #(variant-layout-indirect-headroom (:layout %))
               (:cases variant-layout)))
         needs-indirect-headroom? (pos? indirect-headroom)
+        needs-list-item-validation?
+        (boolean
+         (some (fn [{:keys [layout]}]
+                 (some (fn [leaf]
+                         (and (:max-items leaf)
+                              (seq (fixed-list-item-bool-offsets
+                                    (:item-layout leaf)))))
+                       (variant-case-leaves layout)))
+               (:cases variant-layout)))
         pages (max 1 (quot (+ 8 indirect-headroom
                               (:size variant-layout) 65535)
                            65536))
@@ -2838,7 +2916,10 @@
      "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
      "    end local.get $ptr)\n"
      "  (func (export \"cm32p2||" export "\") (param $disc i32)" params " (result i32)\n"
-     "    (local $ret i32)" (when needs-indirect-headroom? " (local $end i32)") "\n"
+     "    (local $ret i32)" (when needs-indirect-headroom? " (local $end i32)")
+     (when needs-list-item-validation?
+       " (local $list-index i32) (local $item-base i32)")
+     "\n"
      "    local.get $disc i32.const " (count (:cases variant-layout)) " i32.ge_u if unreachable end\n"
      "    i32.const 0 i32.const 0 i32.const " (:alignment variant-layout)
      " i32.const " (:size variant-layout) " call $realloc local.set $ret\n"
