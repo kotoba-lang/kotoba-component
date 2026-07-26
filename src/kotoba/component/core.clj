@@ -370,11 +370,69 @@
         (assoc projection :descriptor descriptor :operation op
                :kind :projection)))))
 
+(defn- match-payload-leaves
+  "Return scalar leaves keyed by record-get path for one match payload.
+  Products may recurse through finite records; indirect values and unions are
+  deliberately not scalar branch operands."
+  [layout]
+  (letfn [(walk [node path flat-index]
+            (cond
+              (contains? #{:i64 :f32 :f64 :bool} (:descriptor node))
+              [{:path path
+                :descriptor (:descriptor node)
+                :flat-index flat-index}]
+
+              (contains? node :fields)
+              (loop [remaining (:fields node)
+                     index flat-index
+                     leaves []]
+                (if-let [{:keys [name layout]} (first remaining)]
+                  (let [nested (walk layout (conj path name) index)]
+                    (when nested
+                      (recur (next remaining)
+                             (+ index (count (:flat layout)))
+                             (into leaves nested))))
+                  leaves))
+
+              :else nil))]
+    (walk layout [] 0)))
+
+(defn- record-get-path
+  "Return a nested keyword path when form is a record-get chain rooted at
+  binder, otherwise nil."
+  [form binder]
+  (cond
+    (= form binder) []
+    (and (seq? form)
+         (= 'record-get (first form))
+         (= 3 (count form))
+         (keyword? (nth form 2)))
+    (when-let [parent (record-get-path (second form) binder)]
+      (conj parent (nth form 2)))
+    :else nil))
+
+(defn- aggregate-branch-valid?
+  "A record binder may only appear under a record-get chain that resolves to
+  one admitted scalar leaf. Scalar binders retain their existing direct use."
+  [form binder leaf-paths scalar?]
+  (letfn [(valid? [node]
+            (cond
+              (= node binder) scalar?
+
+              (and (seq? node) (record-get-path node binder))
+              (contains? leaf-paths (record-get-path node binder))
+
+              (seq? node) (every? valid? node)
+              (vector? node) (every? valid? node)
+              (map? node) (every? valid? (mapcat identity node))
+              :else true))]
+    (valid? form)))
+
 (defn- structural-union-match
-  "Return an exhaustive host-free scalar option/result match plan. Branch
-  bodies are compiled by the shared typed binary Wasm expression emitter, not
-  reimplemented in this namespace. Heterogeneous result payloads use the same
-  joined-flat coercions as the general Canonical variant codec."
+  "Return an exhaustive host-free option/result match plan with a scalar
+  result. Scalar payloads and finite record payloads with recursively scalar
+  leaves are decoded from the shared joined Canonical flat slots. Branch bodies
+  are still compiled by the shared typed binary Wasm expression emitter."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         [op descriptor value & branches] (when (seq? body) body)
@@ -401,21 +459,47 @@
                      :option [(second descriptor)]
                      :result [(second descriptor) (get descriptor 2)]
                      nil))
-        layout (when (and payloads (every? #{:i64 :f32 :f64 :bool} payloads))
+        payload-layouts
+        (when payloads
+          (mapv #(canonical/layout % schemas) payloads))
+        payload-leaves (when payload-layouts
+                         (mapv match-payload-leaves payload-layouts))
+        layout (when (and payload-leaves (every? some? payload-leaves))
                  (canonical/layout descriptor schemas))
-        joined-core-type (second (:flat layout))]
+        joined-core-types (vec (rest (:flat layout)))
+        branch-specs
+        (when plan
+          (cond-> []
+            (:case-0-binder plan)
+            (conj [(:case-0-body plan) (:case-0-binder plan) 0])
+            (:case-1-binder plan)
+            (conj [(:case-1-body plan) (:case-1-binder plan)
+                   (if (= 1 (count payloads)) 0 1)])))
+        branches-valid?
+        (and payload-leaves
+             (every?
+              (fn [[branch binder payload-index]]
+                (let [leaves (nth payload-leaves payload-index)
+                      paths (set (map :path leaves))]
+                  (aggregate-branch-valid?
+                   branch binder paths
+                   (and (= 1 (count leaves))
+                        (empty? (:path (first leaves)))))))
+              branch-specs))]
     (when (and plan
                (:shape-valid? plan)
                (= descriptor union-type)
                (= value (first params))
                (= expected-kind (first descriptor))
-               (every? #{:i64 :f32 :f64 :bool} payloads)
+               branches-valid?
                (contains? #{:i64 :f32 :f64 :bool} result)
                (every? #{:i64 :f32 :f64 :bool} (rest param-types))
-               (contains? #{:i32 :i64 :f32 :f64} joined-core-type))
+               (seq joined-core-types)
+               (every? #{:i32 :i64 :f32 :f64} joined-core-types))
       (assoc plan
              :payload-types payloads
-             :joined-core-type joined-core-type))))
+             :payload-leaves payload-leaves
+             :joined-core-types joined-core-types))))
 
 (defn- joined-core-coercion
   "One authoritative classification of the Component Model's reachable
@@ -457,6 +541,34 @@
       :i64-to-f64
       (list 'component-i64-to-f64 payload))))
 
+(defn- rewrite-aggregate-branch
+  "Replace a selected payload binder (scalar) or record-get chain rooted at
+  it (aggregate) with its case-specific decoded joined-slot expression."
+  [form binder replacements scalar?]
+  (letfn [(rewrite [node]
+            (cond
+              (= node binder)
+              (if scalar?
+                (get replacements [])
+                (reject "aggregate match binder escaped record-get"
+                        {:binder binder :form form}))
+
+              (and (seq? node) (record-get-path node binder))
+              (or (get replacements (record-get-path node binder))
+                  (reject "aggregate match record-get has no scalar leaf"
+                          {:binder binder
+                           :path (record-get-path node binder)
+                           :form node}))
+
+              (seq? node) (apply list (map rewrite node))
+              (vector? node) (mapv rewrite node)
+              (map? node) (into (empty node)
+                                (map (fn [[key value]]
+                                       [(rewrite key) (rewrite value)]))
+                                node)
+              :else node))]
+    (rewrite form)))
+
 (declare structural-union-match-adapter)
 
 (defn- structural-union-match-core
@@ -485,23 +597,64 @@
                                     (range)))))
         disc32 (fresh "__component_disc")
         disc64 (fresh "__component_tag")
-        payload (fresh "__component_payload")
+        payloads
+        (mapv (fn [index]
+                (fresh (str "__component_payload" index)))
+              (range (count (:joined-core-types plan))))
         other-params (vec (rest (:params function)))
         payload-types (:payload-types plan)
-        joined-core-type (:joined-core-type plan)
-        joined-source-type ({:i32 :bool :i64 :i64 :f32 :f32 :f64 :f64}
-                            joined-core-type)
+        payload-leaves (:payload-leaves plan)
+        joined-core-types (:joined-core-types plan)
+        joined-source-types
+        (mapv {:i32 :bool :i64 :i64 :f32 :f32 :f64 :f64}
+              joined-core-types)
         other-types (vec (rest (:param-types function)))
-        case-0-payload (structural-union-decode-form
-                        payload joined-core-type (first payload-types))
-        case-1-payload (structural-union-decode-form
-                        payload joined-core-type (if (= 1 (count payload-types))
-                                                   (first payload-types)
-                                                   (second payload-types)))
-        case-0 (if-let [binder (:case-0-binder plan)]
-                 (list 'let [binder case-0-payload] (:case-0-body plan))
-                 (:case-0-body plan))
-        case-1 (list 'let [(:case-1-binder plan) case-1-payload] (:case-1-body plan))
+        decoded-replacements
+        (mapv
+         (fn [leaves]
+           (into {}
+                 (map (fn [{:keys [path descriptor flat-index]}]
+                        [path
+                         (structural-union-decode-form
+                          (nth payloads flat-index)
+                          (nth joined-core-types flat-index)
+                          descriptor)]))
+                 leaves))
+         payload-leaves)
+        scalar-payload?
+        (mapv #(and (= 1 (count %)) (empty? (:path (first %))))
+              payload-leaves)
+        case-0-index 0
+        case-1-index (if (= 1 (count payload-types)) 0 1)
+        validate-case-bools
+        (fn [case-index body]
+          (reduce
+           (fn [checked [leaf-index {:keys [path descriptor]}]]
+             (if (= :bool descriptor)
+               (list 'let
+                     [(fresh (str "__component_checked_bool_"
+                                  case-index "_" leaf-index))
+                      (get (nth decoded-replacements case-index) path)]
+                     checked)
+               checked))
+           body
+           (map-indexed vector (nth payload-leaves case-index))))
+        case-0
+        (if-let [binder (:case-0-binder plan)]
+          (validate-case-bools
+           case-0-index
+           (rewrite-aggregate-branch
+            (:case-0-body plan) binder
+            (nth decoded-replacements case-0-index)
+            (nth scalar-payload? case-0-index)))
+          (:case-0-body plan))
+        case-1
+        (validate-case-bools
+         case-1-index
+         (rewrite-aggregate-branch
+          (:case-1-body plan) (:case-1-binder plan)
+          (nth decoded-replacements case-1-index)
+          (nth scalar-payload? case-1-index)))
         branch (list 'if disc64 case-1 case-0)
         checked
         (list 'let [disc64 (list 'i64-extend-i32-u disc32)]
@@ -510,18 +663,22 @@
                     (list 'component-unreachable)))
         synthetic-function
         {:name (:name function)
-         :params (vec (concat [disc32 payload] other-params))
-         :param-types (vec (concat [:i64 joined-source-type] other-types))
+         :params (vec (concat [disc32] payloads other-params))
+         :param-types (vec (concat [:i64] joined-source-types other-types))
          :result (:result function)
          :effects #{}
          :body checked}
         core-type {:i64 :i64 :f32 :f32 :f64 :f64 :bool :i32}
-        core-types (vec (concat [:i32 joined-core-type]
+        core-types (vec (concat [:i32] joined-core-types
                                 (map core-type other-types)))
         wasm-types (mapv {:i32 0x7f :i64 0x7e :f32 0x7d :f64 0x7c} core-types)]
     {:function synthetic-function
      :core-param-types wasm-types
-     :unchecked-bool-params (if (= :i32 joined-core-type) #{1} #{})}))
+     :unchecked-bool-params
+     (into #{}
+           (keep-indexed (fn [index core-type]
+                           (when (= :i32 core-type) (inc index))))
+           joined-core-types)}))
 
 (defn- structural-union-match-module
   [kir]

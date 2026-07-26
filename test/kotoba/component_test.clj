@@ -42,6 +42,74 @@
     {:name 'negate :params ['flag] :param-types [:bool] :result :bool
      :effects #{} :body '(bool-not flag)}]})
 
+(def aggregate-match-kir
+  {:format :kotoba.kir/v4
+   :exports ['choose-point 'point-x]
+   :schemas
+   {:demo/point
+    [:record :demo/point [[:x :i64] [:state [:ref :demo/state]]]]
+    :demo/state
+    [:record :demo/state [[:visible :bool]]]}
+   :effects #{}
+   :functions
+   [{:name 'choose-point
+     :params ['value 'fallback]
+     :param-types [[:option [:ref :demo/point]] :i64]
+     :result :i64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/point]] value fallback point
+             (if (record-get (record-get point :state) :visible)
+               (+ (record-get point :x) 1)
+               (record-get point :x)))}
+    {:name 'point-x
+     :params ['value 'fallback]
+     :param-types [[:option [:ref :demo/point]] :i64]
+     :result :i64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/point]] value fallback point
+             (record-get point :x))}]})
+
+(deftest aggregate-union-match-decodes-only-the-selected-record
+  (let [world (wit/emit aggregate-match-kir)
+        core-bytes (core/emit aggregate-match-kir :wasm32-wasi-kotoba-v1)
+        component (artifact/package core-bytes aggregate-match-kir world)
+        component-path (Files/createTempFile
+                        "kotoba-component-aggregate-match-" ".wasm"
+                        (make-array FileAttribute 0))
+        core-path (Files/createTempFile
+                   "kotoba-component-aggregate-match-core-" ".wasm"
+                   (make-array FileAttribute 0))]
+    (try
+      (Files/write component-path ^bytes (:bytes component)
+                   (make-array java.nio.file.OpenOption 0))
+      (Files/write core-path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-match-module (:canonical-lowering component)))
+      (doseq [[invoke expected]
+              [["choose-point(none, 9)" "9"]
+               ["choose-point(some({x: 7, state: {visible: true}}), 9)" "8"]
+               ["choose-point(some({x: 7, state: {visible: false}}), 9)" "7"]
+               ["point-x(some({x: 11, state: {visible: true}}), 9)" "11"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke" invoke
+                            (str component-path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      ;; A non-canonical bool bit pattern in an inactive option payload is
+      ;; ignored. The same bits must trap for the selected record, even when
+      ;; the branch does not read that bool field.
+      (let [inactive (shell/sh "wasmtime" "run" "--invoke"
+                               "cm32p2||point-x" (str core-path)
+                               "0" "0" "2" "9")
+            active (shell/sh "wasmtime" "run" "--invoke"
+                             "cm32p2||point-x" (str core-path)
+                             "1" "11" "2" "9")]
+        (is (zero? (:exit inactive)) (:err inactive))
+        (is (= "9" (str/trim (:out inactive))))
+        (is (not (zero? (:exit active)))))
+      (finally
+        (Files/deleteIfExists component-path)
+        (Files/deleteIfExists core-path)))))
+
 (deftest multi-function-union-component-is-self-contained
   (let [world (wit/emit multi-match-kir)
         core-bytes (core/emit multi-match-kir :wasm32-wasi-kotoba-v1 {:fuel 2})
