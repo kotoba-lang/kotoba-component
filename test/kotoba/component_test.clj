@@ -212,7 +212,8 @@
 
 (def list-record-match-kir
   {:format :kotoba.kir/v4
-   :exports ['item-count 'point-x 'f64-count 'item-at 'f64-at]
+   :exports ['item-count 'point-x 'f64-count 'item-at 'f64-at
+             'item-get 'f64-get]
    :schemas
    {:demo/list-point
     [:record :demo/list-point [[:items :vector-i64] [:x :i64]]]
@@ -270,7 +271,29 @@
               (record-get
                [:record :demo/f64-list [[:items :vector-f64]]]
                point :items)
-              index))}]})
+              index))}
+    {:name 'item-get
+     :params ['value 'index 'missing 'none-value]
+     :param-types [[:option [:ref :demo/list-point]] :i64 :i64 :i64]
+     :result :i64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/list-point]] value none-value point
+             (vector-get
+              (record-get
+               [:record :demo/list-point [[:items :vector-i64] [:x :i64]]]
+               point :items)
+              index missing))}
+    {:name 'f64-get
+     :params ['value 'index 'missing 'none-value]
+     :param-types [[:option [:ref :demo/f64-list]] :i64 :f64 :f64]
+     :result :f64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/f64-list]] value none-value point
+             (vector-f64-get
+              (record-get
+               [:record :demo/f64-list [[:items :vector-f64]]]
+               point :items)
+              index missing))}]})
 
 (deftest aggregate-match-consumes-a-selected-indirect-list-leaf
   (let [world (wit/emit list-record-match-kir)
@@ -294,7 +317,12 @@
                ["point-x(some({items: [4, 5], x: 11}), 9)" "11"]
                ["f64-count(some({items: [1.5, 2.5]}), 9)" "2"]
                ["item-at(some({items: [10, 20, 30], x: 7}), 1, 9)" "20"]
-               ["f64-at(some({items: [1.5, 2.5]}), 1, 9.0)" "2.5"]]]
+               ["f64-at(some({items: [1.5, 2.5]}), 1, 9.0)" "2.5"]
+               ["item-get(some({items: [10, 20], x: 7}), 1, 77, 9)" "20"]
+               ["item-get(some({items: [10, 20], x: 7}), -1, 77, 9)" "77"]
+               ["item-get(some({items: [10, 20], x: 7}), 2, 77, 9)" "77"]
+               ["item-get(none, 0, 77, 9)" "9"]
+               ["f64-get(some({items: [1.5, 2.5]}), 2, 3.5, 9.0)" "3.5"]]]
         (let [run (shell/sh "wasmtime" "run" "--invoke" invoke
                             (str component-path))]
           (is (zero? (:exit run)) (:err run))
@@ -319,14 +347,19 @@
                                      "1" "8" "2" "0" "-1" "9")
             equal-index (shell/sh "wasmtime" "run" "--invoke"
                                   "cm32p2||item-at" (str core-path)
-                                  "1" "8" "2" "0" "2" "9")]
+                                  "1" "8" "2" "0" "2" "9")
+            invalid-list-before-fallback
+            (shell/sh "wasmtime" "run" "--invoke"
+                      "cm32p2||item-get" (str core-path)
+                      "1" "1" "2" "0" "9" "77" "9")]
         (is (zero? (:exit inactive)) (:err inactive))
         (is (= "9" (str/trim (:out inactive))))
         (is (not (zero? (:exit over-bound))))
         (is (not (zero? (:exit unaligned))))
         (is (not (zero? (:exit wrapped))))
         (is (not (zero? (:exit negative-index))))
-        (is (not (zero? (:exit equal-index)))))
+        (is (not (zero? (:exit equal-index))))
+        (is (not (zero? (:exit invalid-list-before-fallback)))))
       (finally
         (Files/deleteIfExists component-path)
         (Files/deleteIfExists core-path))))

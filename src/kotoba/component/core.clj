@@ -479,6 +479,24 @@
                       false)]
                 (and descriptor-valid? (valid? (nth node 2))))
 
+              (and (seq? node)
+                   (contains? #{'vector-get 'vector-f64-get} (first node))
+                   (= 4 (count node)))
+              (let [path (record-get-path (second node) binder)
+                    descriptor (:descriptor (get leaves-by-path path))
+                    descriptor-valid?
+                    (case (first node)
+                      vector-get
+                      (contains? #{:vector-i64 [:list :i64]} descriptor)
+
+                      vector-f64-get
+                      (contains? #{:vector-f64 [:list :f64]} descriptor)
+
+                      false)]
+                (and descriptor-valid?
+                     (valid? (nth node 2))
+                     (valid? (nth node 3))))
+
               (and (seq? node) (record-get-path node binder))
               (let [leaf (get leaves-by-path (record-get-path node binder))]
                 (contains? #{:i64 :f32 :f64 :bool} (:descriptor leaf)))
@@ -646,6 +664,27 @@
                         (:stride replacement)
                         (:alignment replacement))
                   (reject "aggregate match list access has no indirect leaf"
+                          {:binder binder :path path :form node})))
+
+              (and (seq? node)
+                   (contains? #{'vector-get 'vector-f64-get} (first node))
+                   (= 4 (count node)))
+              (let [path (record-get-path (second node) binder)
+                    replacement (get replacements path)
+                    index-form (rewrite (nth node 2))
+                    fallback-form (rewrite (nth node 3))]
+                (if (:indirect-list? replacement)
+                  (list (if (= 'vector-get (first node))
+                          'component-list-get-i64
+                          'component-list-get-f64)
+                        (:pointer replacement)
+                        (:count replacement)
+                        index-form
+                        fallback-form
+                        (:max-items replacement)
+                        (:stride replacement)
+                        (:alignment replacement))
+                  (reject "aggregate match list fallback read has no indirect leaf"
                           {:binder binder :path path :form node})))
 
               (= node binder)

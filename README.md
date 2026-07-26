@@ -74,6 +74,9 @@ Their matching `vector-at`/`vector-f64-at` operation is also admitted. It
 reuses the same checks, validates the unsigned index against the selected
 count, and only then loads one scalar element; other list operations remain
 closed.
+The non-trapping `vector-get`/`vector-f64-get` forms validate the selected
+list just as strictly, then return their explicit fallback for a negative or
+out-of-range index without forming a memory address.
 
 ## Test
 
