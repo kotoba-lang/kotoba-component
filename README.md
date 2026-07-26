@@ -59,6 +59,14 @@ scalar helpers, fuel global, and capability calls remain in one core module,
 so composition does not introduce a second expression compiler or ambient
 WASI authority.
 
+An `option<list<s64>>` match may reconstruct its selected list, pass that
+bounded value to a named capability with the same request/result descriptor,
+and immediately match the returned option. The branch still compiles through
+the shared core-Wasm expression module; the generated standard32 adapter
+validates the request and returned list bounds and uses caller-allocated result
+storage. Other aggregate branch/capability shapes fail closed until their
+Canonical codec is admitted explicitly.
+
 A direct named capability may also transport one bounded structural
 `option`/`result` unchanged. Its leaves may be scalars, strings/keywords,
 `list<s64>`/`list<f64>`, or nested structural unions. Both application and
