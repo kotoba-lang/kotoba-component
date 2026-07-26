@@ -59,6 +59,13 @@ scalar helpers, fuel global, and capability calls remain in one core module,
 so composition does not introduce a second expression compiler or ambient
 WASI authority.
 
+Selected string/keyword leaves may feed `string-byte-length` without becoming
+host objects. The shared core emitter consumes their Canonical `(ptr,len)`
+slots and checks the declared byte bound, unsigned end-pointer overflow, and
+the module's actual memory size. Every selected indirect leaf is validated
+even when branch code ignores it; inactive union slots remain uninterpreted.
+Raw indirect binders and unrelated string operations remain fail-closed.
+
 ## Test
 
 ```bash
