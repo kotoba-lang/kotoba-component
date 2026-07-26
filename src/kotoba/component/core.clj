@@ -18,6 +18,11 @@
   (and (every? #{:i64 :f32 :f64} param-types)
        (contains? #{:i64 :f32 :f64} result)))
 
+(defn- canonical-scalar-function? [{:keys [params param-types result]}]
+  (and (= (count params) (count param-types))
+       (every? #{:i64 :f32 :f64 :bool} param-types)
+       (contains? #{:i64 :f32 :f64 :bool} result)))
+
 (defn- string-leaves [form parameters]
   (cond
     (and (symbol? form) (contains? parameters form)) [{:kind :parameter :name form}]
@@ -411,8 +416,27 @@
       :i64-to-f64
       (list 'component-i64-to-f64 payload))))
 
+(declare structural-union-match-adapter)
+
 (defn- structural-union-match-core
   [function schemas plan target opts]
+  (let [{:keys [function core-param-types unchecked-bool-params]}
+        (structural-union-match-adapter function schemas plan)]
+    (wasm/emit-component-core
+     {:format :kotoba.kir/v4
+      :exports [(:name function)]
+      :schemas {}
+      :effects #{}
+      :functions [function]}
+     target
+     (assoc opts
+            :component-canonical-scalars? true
+            :component-unchecked-bool-params
+            {(:name function) unchecked-bool-params}
+            :core-param-types {(:name function) core-param-types}))))
+
+(defn- structural-union-match-adapter
+  [function _schemas plan]
   (let [used (set (:params function))
         fresh (fn [base]
                 (first (remove used
@@ -443,35 +467,69 @@
               (list 'if (list '< disc64 2)
                     branch
                     (list 'component-unreachable)))
-        synthetic
-        {:format :kotoba.kir/v4
-         :exports [(:name function)]
-         :schemas {}
+        synthetic-function
+        {:name (:name function)
+         :params (vec (concat [disc32 payload] other-params))
+         :param-types (vec (concat [:i64 joined-source-type] other-types))
+         :result (:result function)
          :effects #{}
-         :functions [{:name (:name function)
-                      :params (vec (concat [disc32 payload] other-params))
-                      ;; The discriminant's source-level type is deliberately
-                      ;; i64 so the shared emitter can widen and range-check
-                      ;; it; :core-param-types below seals its actual ABI type
-                      ;; as i32.
-                      :param-types (vec (concat [:i64 joined-source-type] other-types))
-                      :result (:result function)
-                      :effects #{}
-                      :body checked}]}
+         :body checked}
         core-type {:i64 :i64 :f32 :f32 :f64 :f64 :bool :i32}
         core-types (vec (concat [:i32 joined-core-type]
                                 (map core-type other-types)))
         wasm-types (mapv {:i32 0x7f :i64 0x7e :f32 0x7d :f64 0x7c} core-types)]
+    {:function synthetic-function
+     :core-param-types wasm-types
+     :unchecked-bool-params (if (= :i32 joined-core-type) #{1} #{})}))
+
+(defn- structural-union-match-module
+  [kir]
+  (let [functions (:functions kir)
+        exports (exported-functions kir)
+        plans (into {}
+                    (keep (fn [function]
+                            (when-let [plan (structural-union-match
+                                             function (:schemas kir))]
+                              [(:name function) plan])))
+                    functions)]
+    (when (and (or (> (count exports) 1)
+                   (> (count functions) 1))
+               (seq plans)
+               (empty? (:effects kir))
+               (every? (fn [function]
+                         (or (contains? plans (:name function))
+                             (canonical-scalar-function? function)))
+                       functions))
+      plans)))
+
+(defn- structural-union-match-module-core
+  [kir plans target opts]
+  (let [adapters
+        (mapv (fn [function]
+                (if-let [plan (get plans (:name function))]
+                  (structural-union-match-adapter function (:schemas kir) plan)
+                  {:function function :unchecked-bool-params #{}}))
+              (:functions kir))
+        core-param-types
+        (into {} (keep (fn [{:keys [function core-param-types]}]
+                         (when core-param-types
+                           [(:name function) core-param-types])))
+              adapters)
+        unchecked
+        (into {} (map (fn [{:keys [function unchecked-bool-params]}]
+                        [(:name function) unchecked-bool-params]))
+              adapters)
+        synthetic {:format :kotoba.kir/v4
+                   :exports (:exports kir)
+                   :schemas {}
+                   :effects #{}
+                   :functions (mapv :function adapters)}]
     (wasm/emit-component-core
      synthetic target
      (assoc opts
             :component-canonical-scalars? true
-            ;; A joined option/result payload is meaningful only in its active
-            ;; case. Validate bool after tag dispatch so an inactive slot does
-            ;; not acquire semantics or trap.
-            :component-unchecked-bool-params
-            (if (= :i32 joined-core-type) #{1} #{})
-            :core-param-types {(:name function) wasm-types}))))
+            :component-unchecked-bool-params unchecked
+            :core-param-types core-param-types))))
 
 (defn- scalar-record-projection [function schemas]
   (let [{:keys [params param-types result body]} function
@@ -834,7 +892,8 @@
           descriptors)))))
 
 (defn assert-supported! [kir]
-  (let [exports (exported-functions kir)]
+  (let [exports (exported-functions kir)
+        match-module (structural-union-match-module kir)]
     (cond
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
@@ -865,6 +924,7 @@
            (some? (scalar-capability-imports kir)))
       :scalar-with-capabilities
       (every? scalar-function? exports) :scalar
+      match-module :structural-union-match-module
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (string-expression-function? (first exports))
@@ -3029,7 +3089,8 @@
   only the host can enforce the budget. The admission envelope reports this so
   a declared budget never reads as guest-enforced when it is not."
   [kir]
-  (if (contains? #{:scalar :scalar-with-capabilities :structural-union-match}
+  (if (contains? #{:scalar :scalar-with-capabilities :structural-union-match
+                   :structural-union-match-module}
                  (assert-supported! kir))
     :module-global
     :host-only))
@@ -3050,6 +3111,9 @@
     :scalar-with-capabilities
     (wasm/emit-component-core
      kir target (assoc opts :capability-imports (scalar-capability-imports kir)))
+    :structural-union-match-module
+    (structural-union-match-module-core
+     kir (structural-union-match-module kir) target opts)
     :string-expression (wasm-tools/parse-wat
                         (string-expression-wat (first (exported-functions kir))))
     :vector-i64-identity
