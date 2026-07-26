@@ -327,8 +327,8 @@
 (defn- structural-union-match
   "Return an exhaustive host-free scalar option/result match plan. Branch
   bodies are compiled by the shared typed binary Wasm expression emitter, not
-  reimplemented in this namespace. A result's two cases must currently share
-  one scalar payload representation; heterogeneous joins remain fail-closed."
+  reimplemented in this namespace. Heterogeneous result payloads use the same
+  joined-flat coercions as the general Canonical variant codec."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         [op descriptor value & branches] (when (seq? body) body)
@@ -354,18 +354,62 @@
                    (case (first descriptor)
                      :option [(second descriptor)]
                      :result [(second descriptor) (get descriptor 2)]
-                     nil))]
+                     nil))
+        layout (when (and payloads (every? #{:i64 :f32 :f64 :bool} payloads))
+                 (canonical/layout descriptor schemas))
+        joined-core-type (second (:flat layout))]
     (when (and plan
                (:shape-valid? plan)
                (= descriptor union-type)
                (= value (first params))
                (= expected-kind (first descriptor))
                (every? #{:i64 :f32 :f64 :bool} payloads)
-               (apply = payloads)
                (contains? #{:i64 :f32 :f64 :bool} result)
                (every? #{:i64 :f32 :f64 :bool} (rest param-types))
-               (canonical/layout descriptor schemas))
-      (assoc plan :payload-type (first payloads)))))
+               (contains? #{:i32 :i64 :f32 :f64} joined-core-type))
+      (assoc plan
+             :payload-types payloads
+             :joined-core-type joined-core-type))))
+
+(defn- joined-core-coercion
+  "One authoritative classification of the Component Model's reachable
+  joined-flat scalar coercions. Both binary match adapters and the general
+  variant WAT codec render this classification into their own instruction
+  representation."
+  [have want]
+  (cond
+    (= have want) :identity
+    (and (= have :i32) (= want :f32)) :i32-to-f32
+    (and (= have :i64) (= want :i32)) :i64-to-i32
+    (and (= have :i64) (= want :f32)) :i64-to-f32
+    (and (= have :i64) (= want :f64)) :i64-to-f64
+    :else (reject "variant flat join has no defined coercion"
+                  {:have have :want want})))
+
+(defn- structural-union-decode-form
+  "Decode one joined Canonical payload slot for its selected scalar case.
+  These are expression forms for the binary emitter equivalent of
+  `variant-coerce-ops`; no conversion is allowed outside the Component
+  Model's reachable join table."
+  [payload joined-core-type payload-type]
+  (let [wanted ({:i64 :i64 :f32 :f32 :f64 :f64 :bool :i32} payload-type)]
+    (case (joined-core-coercion joined-core-type wanted)
+      :identity
+      (if (= :bool payload-type)
+        (list 'component-assert-bool payload)
+        payload)
+
+      :i32-to-f32
+      (list 'component-i32-to-f32 payload)
+
+      :i64-to-i32
+      (list 'component-assert-bool (list 'component-i64-to-i32 payload))
+
+      :i64-to-f32
+      (list 'component-i64-to-f32 payload)
+
+      :i64-to-f64
+      (list 'component-i64-to-f64 payload))))
 
 (defn- structural-union-match-core
   [function schemas plan target opts]
@@ -378,15 +422,21 @@
         disc64 (fresh "__component_tag")
         payload (fresh "__component_payload")
         other-params (vec (rest (:params function)))
-        payload-type (:payload-type plan)
+        payload-types (:payload-types plan)
+        joined-core-type (:joined-core-type plan)
+        joined-source-type ({:i32 :bool :i64 :i64 :f32 :f32 :f64 :f64}
+                            joined-core-type)
         other-types (vec (rest (:param-types function)))
-        selected-payload (if (= :bool payload-type)
-                           (list 'component-assert-bool payload)
-                           payload)
+        case-0-payload (structural-union-decode-form
+                        payload joined-core-type (first payload-types))
+        case-1-payload (structural-union-decode-form
+                        payload joined-core-type (if (= 1 (count payload-types))
+                                                   (first payload-types)
+                                                   (second payload-types)))
         case-0 (if-let [binder (:case-0-binder plan)]
-                 (list 'let [binder selected-payload] (:case-0-body plan))
+                 (list 'let [binder case-0-payload] (:case-0-body plan))
                  (:case-0-body plan))
-        case-1 (list 'let [(:case-1-binder plan) selected-payload] (:case-1-body plan))
+        case-1 (list 'let [(:case-1-binder plan) case-1-payload] (:case-1-body plan))
         branch (list 'if disc64 case-1 case-0)
         checked
         (list 'let [disc64 (list 'i64-extend-i32-u disc32)]
@@ -404,12 +454,12 @@
                       ;; i64 so the shared emitter can widen and range-check
                       ;; it; :core-param-types below seals its actual ABI type
                       ;; as i32.
-                      :param-types (vec (concat [:i64 payload-type] other-types))
+                      :param-types (vec (concat [:i64 joined-source-type] other-types))
                       :result (:result function)
                       :effects #{}
                       :body checked}]}
         core-type {:i64 :i64 :f32 :f32 :f64 :f64 :bool :i32}
-        core-types (vec (concat [:i32 (core-type payload-type)]
+        core-types (vec (concat [:i32 joined-core-type]
                                 (map core-type other-types)))
         wasm-types (mapv {:i32 0x7f :i64 0x7e :f32 0x7d :f64 0x7c} core-types)]
     (wasm/emit-component-core
@@ -420,7 +470,7 @@
             ;; case. Validate bool after tag dispatch so an inactive slot does
             ;; not acquire semantics or trap.
             :component-unchecked-bool-params
-            (if (= :bool payload-type) #{1} #{})
+            (if (= :i32 joined-core-type) #{1} #{})
             :core-param-types {(:name function) wasm-types}))))
 
 (defn- scalar-record-projection [function schemas]
@@ -1113,13 +1163,12 @@
   this table is exhaustive over what this codebase's own join can produce,
   not a hand-picked subset of the spec's."
   [have want]
-  (cond
-    (= have want) []
-    (and (= have :i32) (= want :f32)) ["f32.reinterpret_i32"]
-    (and (= have :i64) (= want :i32)) ["i32.wrap_i64"]
-    (and (= have :i64) (= want :f32)) ["i32.wrap_i64" "f32.reinterpret_i32"]
-    (and (= have :i64) (= want :f64)) ["f64.reinterpret_i64"]
-    :else (reject "variant flat join has no defined coercion" {:have have :want want})))
+  (case (joined-core-coercion have want)
+    :identity []
+    :i32-to-f32 ["f32.reinterpret_i32"]
+    :i64-to-i32 ["i32.wrap_i64"]
+    :i64-to-f32 ["i32.wrap_i64" "f32.reinterpret_i32"]
+    :i64-to-f64 ["f64.reinterpret_i64"]))
 
 (defn- variant-case-leaves
   "The ordered `{:relative-offset :descriptor :flat-index}` (plus
