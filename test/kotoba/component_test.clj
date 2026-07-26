@@ -210,6 +210,107 @@
          (core/assert-supported! escaped))
         "an indirect leaf cannot escape through an unrelated scalar context")))
 
+(def list-record-match-kir
+  {:format :kotoba.kir/v4
+   :exports ['item-count 'point-x 'f64-count]
+   :schemas
+   {:demo/list-point
+    [:record :demo/list-point [[:items :vector-i64] [:x :i64]]]
+    :demo/f64-list
+    [:record :demo/f64-list [[:items :vector-f64]]]}
+   :effects #{}
+   :functions
+   [{:name 'item-count
+     :params ['value 'fallback]
+     :param-types [[:option [:ref :demo/list-point]] :i64]
+     :result :i64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/list-point]] value fallback point
+             (vector-count
+              (record-get
+               [:record :demo/list-point [[:items :vector-i64] [:x :i64]]]
+               point :items)))}
+    {:name 'point-x
+     :params ['value 'fallback]
+     :param-types [[:option [:ref :demo/list-point]] :i64]
+     :result :i64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/list-point]] value fallback point
+             (record-get
+              [:record :demo/list-point [[:items :vector-i64] [:x :i64]]]
+              point :x))}
+    {:name 'f64-count
+     :params ['value 'fallback]
+     :param-types [[:option [:ref :demo/f64-list]] :i64]
+     :result :i64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/f64-list]] value fallback point
+             (vector-f64-count
+              (record-get
+               [:record :demo/f64-list [[:items :vector-f64]]]
+               point :items)))}]})
+
+(deftest aggregate-match-consumes-a-selected-indirect-list-leaf
+  (let [world (wit/emit list-record-match-kir)
+        core-bytes (core/emit list-record-match-kir :wasm32-wasi-kotoba-v1)
+        component (artifact/package core-bytes list-record-match-kir world)
+        component-path (Files/createTempFile
+                        "kotoba-component-indirect-list-match-" ".wasm"
+                        (make-array FileAttribute 0))
+        core-path (Files/createTempFile
+                   "kotoba-component-indirect-list-match-core-" ".wasm"
+                   (make-array FileAttribute 0))]
+    (try
+      (Files/write component-path ^bytes (:bytes component)
+                   (make-array java.nio.file.OpenOption 0))
+      (Files/write core-path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-match-module (:canonical-lowering component)))
+      (doseq [[invoke expected]
+              [["item-count(none, 9)" "9"]
+               ["item-count(some({items: [1, 2, 3], x: 7}), 9)" "3"]
+               ["point-x(some({items: [4, 5], x: 11}), 9)" "11"]
+               ["f64-count(some({items: [1.5, 2.5]}), 9)" "2"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke" invoke
+                            (str component-path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      ;; Core shape: disc, items.ptr, items.count, x, fallback. The inactive
+      ;; option is lazy; selecting it validates the list even when point-x
+      ;; does not read items.
+      (let [inactive (shell/sh "wasmtime" "run" "--invoke"
+                               "cm32p2||point-x" (str core-path)
+                               "0" "1" "-1" "0" "9")
+            over-bound (shell/sh "wasmtime" "run" "--invoke"
+                                 "cm32p2||point-x" (str core-path)
+                                 "1" "8" "16385" "11" "9")
+            unaligned (shell/sh "wasmtime" "run" "--invoke"
+                                "cm32p2||point-x" (str core-path)
+                                "1" "1" "1" "11" "9")
+            wrapped (shell/sh "wasmtime" "run" "--invoke"
+                              "cm32p2||point-x" (str core-path)
+                              "1" "-8" "2" "11" "9")]
+        (is (zero? (:exit inactive)) (:err inactive))
+        (is (= "9" (str/trim (:out inactive))))
+        (is (not (zero? (:exit over-bound))))
+        (is (not (zero? (:exit unaligned))))
+        (is (not (zero? (:exit wrapped)))))
+      (finally
+        (Files/deleteIfExists component-path)
+        (Files/deleteIfExists core-path))))
+  (let [escaped
+        (assoc-in
+         list-record-match-kir [:functions 0 :body]
+         '(option-match
+           [:option [:ref :demo/list-point]] value fallback point
+           (record-get
+            [:record :demo/list-point [[:items :vector-i64] [:x :i64]]]
+            point :items)))]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
+         (core/assert-supported! escaped))
+        "an indirect list cannot escape through an unrelated context")))
+
 (deftest multi-function-union-component-is-self-contained
   (let [world (wit/emit multi-match-kir)
         core-bytes (core/emit multi-match-kir :wasm32-wasi-kotoba-v1 {:fuel 2})

@@ -372,9 +372,9 @@
 
 (defn- match-payload-leaves
   "Return admitted leaves keyed by record-get path for one match payload.
-  Products may recurse through finite records. Strings remain indirect and
-  may only feed their dedicated bounded operations; unions and other
-  indirect values remain fail-closed."
+  Products may recurse through finite records. Strings and scalar-item lists
+  remain indirect and may only feed their dedicated bounded operations;
+  unions and other indirect values remain fail-closed."
   [layout]
   (letfn [(walk [node path flat-index]
             (cond
@@ -389,6 +389,17 @@
                 :descriptor (:descriptor node)
                 :flat-index flat-index
                 :max-bytes (:max-bytes node)}]
+
+              (and (contains? #{:vector-i64 :vector-f64
+                                [:list :i64] [:list :f64]}
+                              (:descriptor node))
+                   (integer? (:max-items node))
+                   (map? (:item-layout node)))
+              [{:path path
+                :descriptor (:descriptor node)
+                :flat-index flat-index
+                :max-items (:max-items node)
+                :item-layout (:item-layout node)}]
 
               (contains? node :fields)
               (loop [remaining (:fields node)
@@ -423,8 +434,8 @@
 
 (defn- aggregate-branch-valid?
   "A record binder may only appear under a record-get chain that resolves to
-  one admitted leaf. Indirect string leaves may only feed
-  string-byte-length; scalar binders retain their existing direct use."
+  one admitted leaf. Indirect string/list leaves may only feed their bounded
+  count operation; scalar binders retain their existing direct use."
   [form binder leaves-by-path scalar?]
   (letfn [(valid? [node]
             (cond
@@ -437,6 +448,20 @@
                     leaf (get leaves-by-path path)]
                 (and path (contains? #{:string :keyword}
                                      (:descriptor leaf))))
+
+              (and (seq? node)
+                   (contains? #{'vector-count 'vector-f64-count} (first node))
+                   (= 2 (count node)))
+              (let [path (record-get-path (second node) binder)
+                    descriptor (:descriptor (get leaves-by-path path))]
+                (case (first node)
+                  vector-count
+                  (contains? #{:vector-i64 [:list :i64]} descriptor)
+
+                  vector-f64-count
+                  (contains? #{:vector-f64 [:list :f64]} descriptor)
+
+                  false))
 
               (and (seq? node) (record-get-path node binder))
               (let [leaf (get leaves-by-path (record-get-path node binder))]
@@ -577,6 +602,14 @@
                     (reject "aggregate match string length has no indirect leaf"
                             {:binder binder :path path :form node})))
 
+              (and (seq? node)
+                   (contains? #{'vector-count 'vector-f64-count} (first node))
+                   (= 2 (count node)))
+              (let [path (record-get-path (second node) binder)]
+                (or (get replacements path)
+                    (reject "aggregate match list count has no indirect leaf"
+                            {:binder binder :path path :form node})))
+
               (= node binder)
               (if scalar?
                 (get replacements [])
@@ -643,9 +676,10 @@
         (mapv
          (fn [leaves]
            (into {}
-                 (map (fn [{:keys [path descriptor flat-index max-bytes]}]
+                 (map (fn [{:keys [path descriptor flat-index max-bytes
+                                   max-items item-layout]}]
                         [path
-                         (if max-bytes
+                         (if (or max-bytes max-items)
                            (let [i32-slot
                                  (fn [index]
                                    (let [payload (nth payloads index)
@@ -654,13 +688,23 @@
                                        :i32 payload
                                        :i64 (list 'component-i64-to-i32 payload)
                                        (reject
-                                        "indirect string slot has invalid join"
+                                        "indirect leaf slot has invalid join"
                                         {:path path :slot index
                                          :joined joined}))))]
+                             (if max-bytes
                              (list 'component-string-byte-length
                                    (i32-slot flat-index)
                                    (i32-slot (inc flat-index))
-                                   max-bytes))
+                                   max-bytes)
+                             (let [alignment (:alignment item-layout)
+                                   stride (* alignment
+                                             (quot (+ (:size item-layout)
+                                                      (dec alignment))
+                                                   alignment))]
+                               (list 'component-list-count
+                                     (i32-slot flat-index)
+                                     (i32-slot (inc flat-index))
+                                     max-items stride alignment))))
                            (structural-union-decode-form
                             (nth payloads flat-index)
                             (nth joined-core-types flat-index)
@@ -668,16 +712,20 @@
                  leaves))
          payload-leaves)
         scalar-payload?
-        (mapv #(and (= 1 (count %)) (empty? (:path (first %))))
+        (mapv #(and (= 1 (count %))
+                    (empty? (:path (first %)))
+                    (contains? #{:i64 :f32 :f64 :bool}
+                               (:descriptor (first %))))
               payload-leaves)
         case-0-index 0
         case-1-index (if (= 1 (count payload-types)) 0 1)
         validate-case-leaves
         (fn [case-index body]
           (reduce
-           (fn [checked [leaf-index {:keys [path descriptor]}]]
+           (fn [checked [leaf-index {:keys [path descriptor max-items]}]]
              (if (or (= :bool descriptor)
-                     (contains? #{:string :keyword} descriptor))
+                     (contains? #{:string :keyword} descriptor)
+                     max-items)
                (list 'let
                      [(fresh (str "__component_checked_leaf_"
                                   case-index "_" leaf-index))

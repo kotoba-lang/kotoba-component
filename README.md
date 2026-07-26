@@ -66,6 +66,11 @@ the module's actual memory size. Every selected indirect leaf is validated
 even when branch code ignores it; inactive union slots remain uninterpreted.
 Raw indirect binders and unrelated string operations remain fail-closed.
 
+Selected `list<s64>`/`list<f64>` leaves may likewise feed only their matching
+count operation. The shared core emitter checks pointer alignment, item
+bounds, unsigned byte-size/range overflow, and actual memory size. Selected
+but unread lists are still validated; inactive union slots stay lazy.
+
 ## Test
 
 ```bash
