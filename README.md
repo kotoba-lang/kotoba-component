@@ -27,6 +27,17 @@ checkable from outside.
 - `kotoba-lang/kotoba-kir`
 - `kotoba-lang/kotoba-wasm`
 
+## Structural union boundary
+
+`option<T>` and `result<T, E>` identity exports use the same active-case
+Canonical ABI validation as sealed variants. Payloads may be canonical
+scalars, sealed flat scalar records, or sealed flat records containing bounded
+string/keyword leaves. Validation is case-dependent: malformed inactive joined
+slots are ignored, while malformed leaves in the selected case trap.
+
+Nested records and list payloads remain fail-closed until the case-leaf walker,
+ownership cleanup, and linearity analysis recurse into those shapes.
+
 ## Test
 
 ```bash

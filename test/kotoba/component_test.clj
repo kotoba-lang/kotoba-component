@@ -83,6 +83,80 @@
         (Files/deleteIfExists component-path)
         (Files/deleteIfExists core-path)))))
 
+(deftest structural-union-record-payloads-round-trip
+  (let [point [:ref :demo/point]
+        message [:ref :demo/message]
+        option-point [:option point]
+        result-message [:result message :bool]
+        schemas {:demo/point
+                 [:record :demo/point [[:x :i64] [:visible :bool]]]
+                 :demo/message
+                 [:record :demo/message [[:topic :keyword] [:text :string]]]}
+        cases [{:descriptor option-point
+                :calls [["echo(none)" "none"]
+                        ["echo(some({x: 7, visible: true}))"
+                         "some({x: 7, visible: true})"]]}
+               {:descriptor result-message
+                :calls [["echo(ok({topic: \"demo\", text: \"hello\"}))"
+                         "ok({topic: \"demo\", text: \"hello\"})"]
+                        ["echo(err(true))" "err(true)"]]}]]
+    (doseq [{:keys [descriptor calls]} cases]
+      (let [kir {:format :kotoba.kir/v4
+                 :exports ['echo]
+                 :schemas schemas
+                 :effects #{}
+                 :functions
+                 [{:name 'echo :params ['value] :param-types [descriptor]
+                   :result descriptor :effects #{} :body 'value}]}
+            world (wit/emit kir)
+            core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+            component (artifact/package core-bytes kir world)
+            path (Files/createTempFile
+                  "kotoba-component-union-record-" ".wasm"
+                  (make-array FileAttribute 0))
+            core-path (Files/createTempFile
+                       "kotoba-component-union-record-core-" ".wasm"
+                       (make-array FileAttribute 0))]
+        (try
+          (is (= :structural-union-identity
+                 (:canonical-lowering component)))
+          (Files/write path ^bytes (:bytes component)
+                       (make-array java.nio.file.OpenOption 0))
+          (Files/write core-path ^bytes core-bytes
+                       (make-array java.nio.file.OpenOption 0))
+          (doseq [[invoke expected] calls]
+            (let [run (shell/sh "wasmtime" "run" "--invoke" invoke (str path))]
+              (is (zero? (:exit run)) (:err run))
+              (is (= expected (str/trim (:out run))) invoke)))
+          (when (= descriptor option-point)
+            (let [inactive-malformed
+                  (shell/sh "wasmtime" "run" "--invoke" "cm32p2||echo"
+                            (str core-path) "0" "0" "2")
+                  active-malformed
+                  (shell/sh "wasmtime" "run" "--invoke" "cm32p2||echo"
+                            (str core-path) "1" "7" "2")]
+              (is (zero? (:exit inactive-malformed))
+                  "inactive record bool storage must not be inspected")
+              (is (not (zero? (:exit active-malformed)))
+                  "the selected record case must validate bool leaves")))
+          (finally
+            (Files/deleteIfExists path)
+            (Files/deleteIfExists core-path)))))
+    (doseq [[descriptor schemas]
+            [[[:option [:ref :demo/outer]]
+              {:demo/inner [:record :demo/inner [[:value :i64]]]
+               :demo/outer
+               [:record :demo/outer [[:inner [:ref :demo/inner]]]]}]
+             [[:result [:vector :i64] :bool] {}]]]
+      (let [kir {:format :kotoba.kir/v4 :exports ['echo]
+                 :schemas schemas :effects #{}
+                 :functions
+                 [{:name 'echo :params ['value] :param-types [descriptor]
+                   :result descriptor :effects #{} :body 'value}]}]
+        (is (thrown-with-msg?
+             clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
+             (core/emit kir :wasm32-wasi-kotoba-v1)))))))
+
 (deftest wit-canonical-name-collisions-fail-before-packaging
   (is (thrown-with-msg?
        clojure.lang.ExceptionInfo #"export names collide"
