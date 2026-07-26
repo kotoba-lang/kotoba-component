@@ -35,7 +35,7 @@ scalars, bounded strings/keywords, or finite sealed records recursively
 containing those leaves. Validation is case-dependent: malformed inactive
 joined slots are ignored, while malformed leaves in the selected case trap.
 
-Bounded `list<s64>` and `list<float64>` payloads additionally validate item
+Bounded `list<s64>` and `list<f64>` payloads additionally validate item
 count, alignment, pointer overflow, and arena range in the selected case, then
 alias the admitted input buffer until canonical post-return resets the arena.
 
