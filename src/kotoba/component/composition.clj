@@ -319,6 +319,59 @@
         (doseq [path [component embedded core world]] (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+(defn- structural-union-provider-wit [entry descriptor]
+  (let [payloads (when (vector? descriptor)
+                   (case (first descriptor)
+                     :option [(second descriptor)]
+                     :result [(second descriptor) (get descriptor 2)]
+                     nil))
+        interface (:interface entry)]
+    (when-not (and (seq payloads)
+                   (every? #{:i64 :f32 :f64 :bool} payloads))
+      (reject "structural union provider requires scalar option/result payloads"
+              {:descriptor descriptor}))
+    (let [type-name (component-wit/type-text descriptor)]
+      (str "package kotoba:application@1.0.0;\n\n"
+           "interface " interface " {\n"
+           "  " (:function entry) ": func(request: " type-name
+           ") -> " type-name ";\n"
+           "}\n\n"
+           "world " interface "-provider {\n"
+           "  export " interface ";\n"
+           "}\n"))))
+
+(defn package-structural-union-identity-provider
+  "Build a named WIT provider that echoes one scalar option/result value."
+  [capability-name descriptor]
+  (let [entry (capability capability-name)
+        _ (canonical/layout descriptor {})
+        wit (structural-union-provider-wit entry descriptor)
+        dir (Files/createTempDirectory
+             "kotoba-structural-union-provider-" (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/variant-capability-provider-wat
+                     entry descriptor {}))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
+                                "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability capability-name
+       :descriptor descriptor
+       :schemas {}
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]] (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn- asymmetric-variant-record-case-schema
   "Schema of `payload-type` when it is `[:ref name]` to a sealed all-scalar
   record (the ADR 0052 shape) or a bounded `string`/`keyword` leaf (the ADR

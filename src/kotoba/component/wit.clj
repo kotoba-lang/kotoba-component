@@ -31,13 +31,16 @@
 
 (declare type-text)
 
-(defn- type-text [descriptor]
+(defn type-text
+  "Return the canonical WIT spelling for an admitted Kotoba descriptor.
+  Public so provider packaging derives its side of an interface from the
+  same renderer as the application world."
+  [descriptor]
   (cond
     (= descriptor :i64) "s64"
     (= descriptor :f32) "f32"
     (= descriptor :f64) "f64"
     (= descriptor :bool) "bool"
-    (= descriptor :bytes) "list<u8>"
     (contains? #{:string :keyword} descriptor) "string"
     (= descriptor :vector-i64) "list<s64>"
     (= descriptor :vector-f64) "list<f64>"
@@ -54,9 +57,6 @@
     (and (vector? descriptor) (= :map (first descriptor)))
     (str "list<tuple<" (type-text (second descriptor)) ", "
          (type-text (nth descriptor 2)) ">>")
-    (and (vector? descriptor) (= :task (first descriptor)))
-    (str "future<" (type-text (second descriptor)) ">")
-    (= descriptor [:stream :bytes]) "stream<u8>"
     :else (reject "descriptor is not representable as a WIT value type"
                   {:descriptor descriptor})))
 

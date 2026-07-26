@@ -21,13 +21,15 @@
     (when (and (seq (:imports wit))
                (not (contains? #{:scalar-capability-call :record-capability-call
                                   :variant-capability-call
+                                  :structural-union-capability-call
                                   :different-variant-capability-call
                                   ;; ADR 0076 increment 1: the general lowering
                                   ;; now emits per-capability typed imports, so
                                   ;; it may carry WIT imports too.
                                   :scalar-with-capabilities
                                   :scalar-literal-capability-call
-                                  :task-stream-capability-call}
+                                  :vector-i64-identity
+                                  :vector-i64-literal}
                                 lowering)))
       (reject "component capability imports require Canonical provider lowering"
               {:imports (:imports wit)}))
