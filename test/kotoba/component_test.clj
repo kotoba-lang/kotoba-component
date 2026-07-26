@@ -126,6 +126,90 @@
         (Files/deleteIfExists component-path)
         (Files/deleteIfExists core-path)))))
 
+(def string-record-match-kir
+  {:format :kotoba.kir/v4
+   :exports ['label-size 'point-x]
+   :schemas
+   {:demo/labeled-point
+    [:record :demo/labeled-point [[:label :string] [:x :i64]]]}
+   :effects #{}
+   :functions
+   [{:name 'label-size
+     :params ['value 'fallback]
+     :param-types [[:option [:ref :demo/labeled-point]] :i64]
+     :result :i64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/labeled-point]] value fallback point
+             (string-byte-length
+              (record-get
+               [:record :demo/labeled-point [[:label :string] [:x :i64]]]
+               point :label)))}
+    {:name 'point-x
+     :params ['value 'fallback]
+     :param-types [[:option [:ref :demo/labeled-point]] :i64]
+     :result :i64 :effects #{}
+     :body '(option-match
+             [:option [:ref :demo/labeled-point]] value fallback point
+             (record-get
+              [:record :demo/labeled-point [[:label :string] [:x :i64]]]
+              point :x))}]})
+
+(deftest aggregate-match-consumes-a-selected-indirect-string-leaf
+  (let [world (wit/emit string-record-match-kir)
+        core-bytes (core/emit string-record-match-kir :wasm32-wasi-kotoba-v1)
+        component (artifact/package core-bytes string-record-match-kir world)
+        component-path (Files/createTempFile
+                        "kotoba-component-indirect-string-match-" ".wasm"
+                        (make-array FileAttribute 0))
+        core-path (Files/createTempFile
+                   "kotoba-component-indirect-string-match-core-" ".wasm"
+                   (make-array FileAttribute 0))]
+    (try
+      (Files/write component-path ^bytes (:bytes component)
+                   (make-array java.nio.file.OpenOption 0))
+      (Files/write core-path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-match-module (:canonical-lowering component)))
+      (doseq [[invoke expected]
+              [["label-size(none, 9)" "9"]
+               ["label-size(some({label: \"安全\", x: 7}), 9)" "6"]
+               ["point-x(some({label: \"ignored\", x: 11}), 9)" "11"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke" invoke
+                            (str component-path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      ;; Core shape: disc, label.ptr, label.len, x, fallback. The inactive
+      ;; option must not inspect malformed joined slots. Selecting the record
+      ;; validates its string even when point-x never reads the label.
+      (let [inactive (shell/sh "wasmtime" "run" "--invoke"
+                               "cm32p2||point-x" (str core-path)
+                               "0" "-1" "2" "0" "9")
+            over-bound (shell/sh "wasmtime" "run" "--invoke"
+                                 "cm32p2||point-x" (str core-path)
+                                 "1" "0" "65537" "11" "9")
+            wrapped (shell/sh "wasmtime" "run" "--invoke"
+                              "cm32p2||point-x" (str core-path)
+                              "1" "-1" "2" "11" "9")]
+        (is (zero? (:exit inactive)) (:err inactive))
+        (is (= "9" (str/trim (:out inactive))))
+        (is (not (zero? (:exit over-bound))))
+        (is (not (zero? (:exit wrapped)))))
+      (finally
+        (Files/deleteIfExists component-path)
+        (Files/deleteIfExists core-path))))
+  (let [escaped
+        (assoc-in
+         string-record-match-kir [:functions 0 :body]
+         '(option-match
+           [:option [:ref :demo/labeled-point]] value fallback point
+           (record-get
+            [:record :demo/labeled-point [[:label :string] [:x :i64]]]
+            point :label)))]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
+         (core/assert-supported! escaped))
+        "an indirect leaf cannot escape through an unrelated scalar context")))
+
 (deftest multi-function-union-component-is-self-contained
   (let [world (wit/emit multi-match-kir)
         core-bytes (core/emit multi-match-kir :wasm32-wasi-kotoba-v1 {:fuel 2})

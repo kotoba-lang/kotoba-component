@@ -371,9 +371,10 @@
                :kind :projection)))))
 
 (defn- match-payload-leaves
-  "Return scalar leaves keyed by record-get path for one match payload.
-  Products may recurse through finite records; indirect values and unions are
-  deliberately not scalar branch operands."
+  "Return admitted leaves keyed by record-get path for one match payload.
+  Products may recurse through finite records. Strings remain indirect and
+  may only feed their dedicated bounded operations; unions and other
+  indirect values remain fail-closed."
   [layout]
   (letfn [(walk [node path flat-index]
             (cond
@@ -381,6 +382,13 @@
               [{:path path
                 :descriptor (:descriptor node)
                 :flat-index flat-index}]
+
+              (and (contains? #{:string :keyword} (:descriptor node))
+                   (integer? (:max-bytes node)))
+              [{:path path
+                :descriptor (:descriptor node)
+                :flat-index flat-index
+                :max-bytes (:max-bytes node)}]
 
               (contains? node :fields)
               (loop [remaining (:fields node)
@@ -415,14 +423,24 @@
 
 (defn- aggregate-branch-valid?
   "A record binder may only appear under a record-get chain that resolves to
-  one admitted scalar leaf. Scalar binders retain their existing direct use."
-  [form binder leaf-paths scalar?]
+  one admitted leaf. Indirect string leaves may only feed
+  string-byte-length; scalar binders retain their existing direct use."
+  [form binder leaves-by-path scalar?]
   (letfn [(valid? [node]
             (cond
               (= node binder) scalar?
 
+              (and (seq? node)
+                   (= 'string-byte-length (first node))
+                   (= 2 (count node)))
+              (let [path (record-get-path (second node) binder)
+                    leaf (get leaves-by-path path)]
+                (and path (contains? #{:string :keyword}
+                                     (:descriptor leaf))))
+
               (and (seq? node) (record-get-path node binder))
-              (contains? leaf-paths (record-get-path node binder))
+              (let [leaf (get leaves-by-path (record-get-path node binder))]
+                (contains? #{:i64 :f32 :f64 :bool} (:descriptor leaf)))
 
               (seq? node) (every? valid? node)
               (vector? node) (every? valid? node)
@@ -482,11 +500,13 @@
              (every?
               (fn [[branch binder payload-index]]
                 (let [leaves (nth payload-leaves payload-index)
-                      paths (set (map :path leaves))]
+                      leaves-by-path (into {} (map (juxt :path identity)) leaves)]
                   (aggregate-branch-valid?
-                   branch binder paths
+                   branch binder leaves-by-path
                    (and (= 1 (count leaves))
-                        (empty? (:path (first leaves)))))))
+                        (empty? (:path (first leaves)))
+                        (contains? #{:i64 :f32 :f64 :bool}
+                                   (:descriptor (first leaves)))))))
               branch-specs))]
     (when (and plan
                (:shape-valid? plan)
@@ -549,6 +569,14 @@
   [form binder replacements scalar?]
   (letfn [(rewrite [node]
             (cond
+              (and (seq? node)
+                   (= 'string-byte-length (first node))
+                   (= 2 (count node)))
+              (let [path (record-get-path (second node) binder)]
+                (or (get replacements path)
+                    (reject "aggregate match string length has no indirect leaf"
+                            {:binder binder :path path :form node})))
+
               (= node binder)
               (if scalar?
                 (get replacements [])
@@ -615,12 +643,28 @@
         (mapv
          (fn [leaves]
            (into {}
-                 (map (fn [{:keys [path descriptor flat-index]}]
+                 (map (fn [{:keys [path descriptor flat-index max-bytes]}]
                         [path
-                         (structural-union-decode-form
-                          (nth payloads flat-index)
-                          (nth joined-core-types flat-index)
-                          descriptor)]))
+                         (if max-bytes
+                           (let [i32-slot
+                                 (fn [index]
+                                   (let [payload (nth payloads index)
+                                         joined (nth joined-core-types index)]
+                                     (case joined
+                                       :i32 payload
+                                       :i64 (list 'component-i64-to-i32 payload)
+                                       (reject
+                                        "indirect string slot has invalid join"
+                                        {:path path :slot index
+                                         :joined joined}))))]
+                             (list 'component-string-byte-length
+                                   (i32-slot flat-index)
+                                   (i32-slot (inc flat-index))
+                                   max-bytes))
+                           (structural-union-decode-form
+                            (nth payloads flat-index)
+                            (nth joined-core-types flat-index)
+                            descriptor))]))
                  leaves))
          payload-leaves)
         scalar-payload?
@@ -628,13 +672,14 @@
               payload-leaves)
         case-0-index 0
         case-1-index (if (= 1 (count payload-types)) 0 1)
-        validate-case-bools
+        validate-case-leaves
         (fn [case-index body]
           (reduce
            (fn [checked [leaf-index {:keys [path descriptor]}]]
-             (if (= :bool descriptor)
+             (if (or (= :bool descriptor)
+                     (contains? #{:string :keyword} descriptor))
                (list 'let
-                     [(fresh (str "__component_checked_bool_"
+                     [(fresh (str "__component_checked_leaf_"
                                   case-index "_" leaf-index))
                       (get (nth decoded-replacements case-index) path)]
                      checked)
@@ -643,7 +688,7 @@
            (map-indexed vector (nth payload-leaves case-index))))
         case-0
         (if-let [binder (:case-0-binder plan)]
-          (validate-case-bools
+          (validate-case-leaves
            case-0-index
            (rewrite-aggregate-branch
             (:case-0-body plan) binder
@@ -651,7 +696,7 @@
             (nth scalar-payload? case-0-index)))
           (:case-0-body plan))
         case-1
-        (validate-case-bools
+        (validate-case-leaves
          case-1-index
          (rewrite-aggregate-branch
           (:case-1-body plan) (:case-1-binder plan)
