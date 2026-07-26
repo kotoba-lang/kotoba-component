@@ -240,8 +240,9 @@
   sealed variant, so they deliberately share `variant-wat`. Payloads are
   admitted only when that emitter can recursively validate and store every
   active-case leaf: a Canonical scalar/string/keyword or a finite sealed record
-  recursively containing those leaves. Lists, nested option/result, and
-  recursive record identities remain fail-closed."
+  recursively containing those leaves, plus a bounded `list<s64>`. Other list
+  item types, nested option/result, and recursive record identities remain
+  fail-closed."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         descriptor (first param-types)
@@ -250,6 +251,9 @@
           (letfn [(supported? [value seen]
                     (cond
                       (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
+                      true
+
+                      (= :vector-i64 value)
                       true
 
                       (and (vector? value)
@@ -1260,9 +1264,10 @@
   "Recursively return the ordered Canonical leaves of one active case.
   Relative offsets accumulate through nested record layouts and flat indices
   advance by each field layout's exact flattened width. String/keyword leaves
-  retain their byte bound and pointer/length pair; scalar leaves retain one
-  joined position. Admission excludes layouts with cases or lists before this
-  walker runs."
+  retain their byte bound and pointer/length pair; list leaves retain their
+  item bound/layout and pointer/length pair; scalar leaves retain one joined
+  position. Admission excludes nested layouts with cases before this walker
+  runs."
   [layout]
   (letfn [(walk [node base-offset base-flat-index]
             (cond
@@ -1274,6 +1279,13 @@
                 :descriptor (:descriptor node)
                 :flat-index base-flat-index
                 :max-bytes (:max-bytes node)}]
+
+              (:max-items node)
+              [{:relative-offset base-offset
+                :descriptor (:descriptor node)
+                :flat-index base-flat-index
+                :max-items (:max-items node)
+                :item-layout (:item-layout node)}]
 
               (contains? node :fields)
               (loop [remaining (:fields node)
@@ -1311,8 +1323,8 @@
 (defn- variant-payload-value-expr [joined-types leaf]
   (variant-flat-value-expr joined-types (:flat-index leaf) (core-type-of (:descriptor leaf))))
 
-(defn- variant-string-leaf-value-exprs
-  "The `[pointer-expr length-expr]` pair for one string/keyword leaf: its
+(defn- variant-indirect-leaf-value-exprs
+  "The `[pointer-expr length-expr]` pair for one string/keyword/list leaf: its
   pointer sits at `flat-index`, its length at `flat-index`+1, both always
   joined as (or coerced back to) `:i32` -- the identical pointer+length
   linear-memory shape ADR 0040/0041/0053 already gave a bare string
@@ -1345,13 +1357,32 @@
          (keep (fn [leaf]
                  (cond
                    (:max-bytes leaf)
-                   (let [[pointer length] (variant-string-leaf-value-exprs joined-types leaf)]
+                   (let [[pointer length] (variant-indirect-leaf-value-exprs joined-types leaf)]
                      (str
                       "      " length " i32.const " (:max-bytes leaf)
                       " i32.gt_u if unreachable end\n"
                       "      " pointer " " length " i32.add\n"
                       "      local.tee $end " pointer " i32.lt_u if unreachable end\n"
                       "      local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"))
+                   (:max-items leaf)
+                   (let [[pointer length]
+                         (variant-indirect-leaf-value-exprs joined-types leaf)
+                         item-layout (:item-layout leaf)
+                         stride (align-up (:size item-layout)
+                                          (:alignment item-layout))]
+                     (str
+                      "      " length " i32.const " (:max-items leaf)
+                      " i32.gt_u if unreachable end\n"
+                      "      " length " i32.eqz if else\n"
+                      "        " pointer " i32.const " (:alignment item-layout)
+                      " i32.const 1 i32.sub i32.and if unreachable end\n"
+                      "        " pointer " i32.const 8 i32.lt_u if unreachable end\n"
+                      "      end\n"
+                      "      " pointer " " length " i32.const " stride
+                      " i32.mul i32.add\n"
+                      "      local.tee $end " pointer " i32.lt_u if unreachable end\n"
+                      "      local.get $end i32.const " capacity
+                      " i32.gt_u if unreachable end\n"))
                    (= :bool (:descriptor leaf))
                    (str "      " (variant-payload-value-expr joined-types leaf)
                         " i32.const 1 i32.gt_u if unreachable end\n")
@@ -1377,8 +1408,8 @@
         stores
         (apply str
                (map (fn [leaf]
-                      (if (:max-bytes leaf)
-                        (let [[pointer length] (variant-string-leaf-value-exprs joined-types leaf)
+                      (if (or (:max-bytes leaf) (:max-items leaf))
+                        (let [[pointer length] (variant-indirect-leaf-value-exprs joined-types leaf)
                               offset (+ payload-offset (:relative-offset leaf))]
                           (str "      local.get $ret " pointer " i32.store offset=" offset "\n"
                                "      local.get $ret " length " i32.store offset=" (+ offset 4) "\n"))
@@ -1444,13 +1475,26 @@
         variant-layout (canonical/layout (first (:param-types function)) schemas)
         joined-types (vec (rest (:flat variant-layout)))
         case-leaves (mapv (fn [case] (variant-case-leaves (:layout case))) (:cases variant-layout))
-        max-string-leaves-per-case (reduce max 0 (map #(count (filter :max-bytes %)) case-leaves))
-        needs-string-headroom? (pos? max-string-leaves-per-case)
-        pages (if needs-string-headroom?
-                (max 1 (quot (+ 8 (* (inc max-string-leaves-per-case) 65536)
-                                (:size variant-layout) 65535)
-                             65536))
-                1)
+        indirect-headroom
+        (reduce
+         max 0
+         (map (fn [leaves]
+                (reduce
+                 +
+                 (map (fn [leaf]
+                        (cond
+                          (:max-bytes leaf) (:max-bytes leaf)
+                          (:max-items leaf)
+                          (* (:max-items leaf)
+                             (align-up (get-in leaf [:item-layout :size])
+                                       (get-in leaf [:item-layout :alignment])))
+                          :else 0))
+                      leaves)))
+              case-leaves))
+        needs-indirect-headroom? (pos? indirect-headroom)
+        pages (max 1 (quot (+ 8 indirect-headroom
+                              (:size variant-layout) 65535)
+                           65536))
         capacity (* pages 65536)
         params (apply str
                       (map-indexed
@@ -1485,7 +1529,7 @@
      "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
      "    end local.get $ptr)\n"
      "  (func (export \"cm32p2||" export "\") (param $disc i32)" params " (result i32)\n"
-     "    (local $ret i32)" (when needs-string-headroom? " (local $end i32)") "\n"
+     "    (local $ret i32)" (when needs-indirect-headroom? " (local $end i32)") "\n"
      "    local.get $disc i32.const " (count (:cases variant-layout)) " i32.ge_u if unreachable end\n"
      "    i32.const 0 i32.const 0 i32.const " (:alignment variant-layout)
      " i32.const " (:size variant-layout) " call $realloc local.set $ret\n"
