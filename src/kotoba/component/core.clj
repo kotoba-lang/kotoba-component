@@ -1287,8 +1287,10 @@
       {:capability capability :request request-type :result result})))
 
 (defn- structural-union-capability-call
-  "Admission for a direct named capability call that transports one scalar
-  structural option/result type unchanged."
+  "Admission for a direct named capability call that transports one bounded
+  structural option/result type unchanged. Payloads recurse through structural
+  unions and admit Canonical scalar, string, keyword, and scalar-item list
+  leaves. Nominal records remain on the separately schema-aware variant path."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         request-type (first param-types)
@@ -1298,7 +1300,24 @@
                    (case (first request-type)
                      :option [(second request-type)]
                      :result [(second request-type) (get request-type 2)]
-                     nil))]
+                     nil))
+        supported-payload?
+        (fn supported-payload? [payload]
+          (cond
+            (contains? #{:i64 :f32 :f64 :bool :string :keyword
+                         :vector-i64 :vector-f64} payload)
+            true
+
+            (and (vector? payload) (= :option (first payload))
+                 (= 2 (count payload)))
+            (supported-payload? (second payload))
+
+            (and (vector? payload) (= :result (first payload))
+                 (= 3 (count payload)))
+            (and (supported-payload? (second payload))
+                 (supported-payload? (nth payload 2)))
+
+            :else false))]
     (when (and (= 1 (count params))
                (= 1 (count param-types))
                (seq? body)
@@ -1308,7 +1327,7 @@
                (= body-result-type result)
                (= request-type result)
                (seq payloads)
-               (every? #{:i64 :f32 :f64 :bool} payloads)
+               (every? supported-payload? payloads)
                (canonical/layout request-type schemas)
                capability)
       {:capability capability :request request-type :result result})))
@@ -2917,36 +2936,28 @@
   (let [case-leaves (mapv (fn [case] (variant-case-leaves (:layout case))) (:cases variant-layout))]
     (reduce max 0 (map #(count (filter :max-bytes %)) case-leaves))))
 
-(defn- variant-capability-string-headroom
-  "`[pages capacity needs-string-headroom?]` for a capability-crossing
-  variant layout, the capability-call twin of `variant-wat`'s own generous-
-  not-tight sizing formula (same `max-string-leaves-per-case` computation,
-  keyed off the *widest single case*, since only one case's own payload is
-  ever active per call). New in ADR 0057: every capability-crossing variant
-  WAT module before this ADR (`variant-capability-wat`/
-  `variant-capability-provider-wat`) fixed its memory at exactly one page
-  and never needed headroom, because `variant-capability-case?` admitted no
-  string/keyword-bearing leaf. Now that it does, both the application module
-  (which must hold a copy of the result's string bytes once the provider's
-  result crosses back) and the provider module (which must hold a copy of
-  the request's string bytes once they cross in, *and* leave room for its
-  own result struct) need the same string-aware sizing `string-field-record-
-  wat`/`variant-wat` already established, reused here rather than
-  re-derived. Unchanged by ADR 0059 -- still used as-is by the SAME-identity
-  path (`variant-capability-provider-wat`), where request-layout and
-  result-layout are structurally identical so a single shared measurement is
-  correct by construction; the DIFFERENT-identity path now uses
-  `string-headroom-bytes` below instead, precisely because that coincidence
-  no longer holds there."
+(defn- variant-capability-indirect-headroom
+  "`[pages capacity needs-indirect-headroom?]` for a same-identity
+  capability-crossing variant. The widest active case determines the bounded
+  indirect allocation: strings/keywords contribute their byte bounds and
+  lists contribute `max-items * stride`; nested options/results recurse.
+  One additional page is reserved for Canonical cross-instance realloc/copy
+  glue and the returned variant struct. Only one union case is active, so
+  summing mutually exclusive cases would waste memory without adding safety."
   [variant-layout]
-  (let [leaves-per-case (max-string-leaves-per-case variant-layout)
-        needs-string-headroom? (pos? leaves-per-case)
-        pages (if needs-string-headroom?
-                (max 1 (quot (+ 8 (* (inc leaves-per-case) 65536)
+  (let [indirect-headroom
+        (reduce max 0
+                (map #(variant-layout-indirect-headroom (:layout %))
+                     (:cases variant-layout)))
+        needs-indirect-headroom? (pos? indirect-headroom)
+        ;; Keep one extra page for Canonical cross-instance realloc/copy glue,
+        ;; in addition to the maximum selected payload's own indirect bytes.
+        pages (if needs-indirect-headroom?
+                (max 1 (quot (+ 8 indirect-headroom 65536
                                 (:size variant-layout) 65535)
                              65536))
                 1)]
-    [pages (* pages 65536) needs-string-headroom?]))
+    [pages (* pages 65536) needs-indirect-headroom?]))
 
 (defn- string-headroom-bytes
   "Generous-not-tight extra byte headroom one side (request OR result) of a
@@ -2954,7 +2965,7 @@
   copied through the Canonical ABI's cross-instance string-lowering glue --
   `(inc (max-string-leaves-per-case layout)) * 65536` if that side ever
   carries a string/keyword leaf in any case, `0` otherwise. New in ADR 0059:
-  factored out of `variant-capability-string-headroom`'s own combined
+  factored out of `variant-capability-indirect-headroom`'s own combined
   `[pages capacity needs?]` formula so REQUEST-side and RESULT-side headroom
   can be computed independently. `variant-capability-wat` (application side)
   sums BOTH sides' amounts, because its own memory arena is shared, in one
@@ -3129,7 +3140,7 @@
   is only that this module's own memory/`$realloc` must now tolerate the
   *additional* realloc calls the Canonical ABI's own cross-instance string
   lowering makes when copying a result string's bytes back into this
-  module's memory (`variant-capability-string-headroom`/
+  module's memory (`variant-capability-indirect-headroom`/
   `bounded-bump-realloc-wat`, the same string-aware sizing and bounded
   allocator `variant-wat` already uses for its own single-module string
   leaves); the WAT emitted for a case with no string-like leaf at all is
@@ -3186,8 +3197,14 @@
         request-layout (canonical/layout (:request plan) schemas)
         result-layout (canonical/layout (:result plan) schemas)
         joined-types (vec (rest (:flat request-layout)))
-        request-headroom-bytes (string-headroom-bytes request-layout)
-        result-headroom-bytes (string-headroom-bytes result-layout)
+        request-headroom-bytes
+        (reduce max 0
+                (map #(variant-layout-indirect-headroom (:layout %))
+                     (:cases request-layout)))
+        result-headroom-bytes
+        (reduce max 0
+                (map #(variant-layout-indirect-headroom (:layout %))
+                     (:cases result-layout)))
         needs-headroom? (or (pos? request-headroom-bytes) (pos? result-headroom-bytes))
         pages (if needs-headroom?
                 (max 1 (quot (+ 8 request-headroom-bytes result-headroom-bytes
@@ -3273,7 +3290,7 @@
   (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|" (:function entry))
         variant-layout (canonical/layout descriptor schemas)
         joined-types (vec (rest (:flat variant-layout)))
-        [pages capacity needs-string-headroom?] (variant-capability-string-headroom variant-layout)
+        [pages capacity needs-indirect-headroom?] (variant-capability-indirect-headroom variant-layout)
         params (apply str
                       (cons " (param $disc i32)"
                             (map-indexed
@@ -3289,7 +3306,7 @@
      "  (global $next (mut i32) (i32.const 8))\n"
      (bounded-bump-realloc-wat capacity)
      "  (func (export \"" export "\")" params " (result i32)\n"
-     "    (local $ret i32)" (when needs-string-headroom? " (local $end i32)") "\n"
+     "    (local $ret i32)" (when needs-indirect-headroom? " (local $end i32)") "\n"
      "    i32.const 0 i32.const 0 i32.const " (:alignment variant-layout)
      " i32.const " (:size variant-layout) " call $realloc local.set $ret\n"
      "    local.get $disc i32.const " (count (:cases variant-layout)) " i32.ge_u if unreachable end\n"

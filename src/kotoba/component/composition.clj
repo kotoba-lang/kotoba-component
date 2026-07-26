@@ -325,10 +325,27 @@
                      :option [(second descriptor)]
                      :result [(second descriptor) (get descriptor 2)]
                      nil))
+        supported?
+        (fn supported? [payload]
+          (cond
+            (contains? #{:i64 :f32 :f64 :bool :string :keyword
+                         :vector-i64 :vector-f64} payload)
+            true
+
+            (and (vector? payload) (= :option (first payload))
+                 (= 2 (count payload)))
+            (supported? (second payload))
+
+            (and (vector? payload) (= :result (first payload))
+                 (= 3 (count payload)))
+            (and (supported? (second payload))
+                 (supported? (nth payload 2)))
+
+            :else false))
         interface (:interface entry)]
     (when-not (and (seq payloads)
-                   (every? #{:i64 :f32 :f64 :bool} payloads))
-      (reject "structural union provider requires scalar option/result payloads"
+                   (every? supported? payloads))
+      (reject "structural union provider requires bounded structural payloads"
               {:descriptor descriptor}))
     (let [type-name (component-wit/type-text descriptor)]
       (str "package kotoba:application@1.0.0;\n\n"
@@ -341,7 +358,7 @@
            "}\n"))))
 
 (defn package-structural-union-identity-provider
-  "Build a named WIT provider that echoes one scalar option/result value."
+  "Build a named WIT provider that echoes one bounded option/result value."
   [capability-name descriptor]
   (let [entry (capability capability-name)
         _ (canonical/layout descriptor {})
