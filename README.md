@@ -70,6 +70,10 @@ Selected `list<s64>`/`list<f64>` leaves may likewise feed only their matching
 count operation. The shared core emitter checks pointer alignment, item
 bounds, unsigned byte-size/range overflow, and actual memory size. Selected
 but unread lists are still validated; inactive union slots stay lazy.
+Their matching `vector-at`/`vector-f64-at` operation is also admitted. It
+reuses the same checks, validates the unsigned index against the selected
+count, and only then loads one scalar element; other list operations remain
+closed.
 
 ## Test
 

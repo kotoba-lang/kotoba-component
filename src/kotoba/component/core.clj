@@ -435,7 +435,7 @@
 (defn- aggregate-branch-valid?
   "A record binder may only appear under a record-get chain that resolves to
   one admitted leaf. Indirect string/list leaves may only feed their bounded
-  count operation; scalar binders retain their existing direct use."
+  count/item-read operation; scalar binders retain their existing direct use."
   [form binder leaves-by-path scalar?]
   (letfn [(valid? [node]
             (cond
@@ -462,6 +462,22 @@
                   (contains? #{:vector-f64 [:list :f64]} descriptor)
 
                   false))
+
+              (and (seq? node)
+                   (contains? #{'vector-at 'vector-f64-at} (first node))
+                   (= 3 (count node)))
+              (let [path (record-get-path (second node) binder)
+                    descriptor (:descriptor (get leaves-by-path path))
+                    descriptor-valid?
+                    (case (first node)
+                      vector-at
+                      (contains? #{:vector-i64 [:list :i64]} descriptor)
+
+                      vector-f64-at
+                      (contains? #{:vector-f64 [:list :f64]} descriptor)
+
+                      false)]
+                (and descriptor-valid? (valid? (nth node 2))))
 
               (and (seq? node) (record-get-path node binder))
               (let [leaf (get leaves-by-path (record-get-path node binder))]
@@ -606,9 +622,31 @@
                    (contains? #{'vector-count 'vector-f64-count} (first node))
                    (= 2 (count node)))
               (let [path (record-get-path (second node) binder)]
-                (or (get replacements path)
+                (let [replacement (get replacements path)]
+                  (or (if (map? replacement)
+                        (:count-form replacement)
+                        replacement)
                     (reject "aggregate match list count has no indirect leaf"
-                            {:binder binder :path path :form node})))
+                            {:binder binder :path path :form node}))))
+
+              (and (seq? node)
+                   (contains? #{'vector-at 'vector-f64-at} (first node))
+                   (= 3 (count node)))
+              (let [path (record-get-path (second node) binder)
+                    replacement (get replacements path)
+                    index-form (rewrite (nth node 2))]
+                (if (:indirect-list? replacement)
+                  (list (if (= 'vector-at (first node))
+                          'component-list-at-i64
+                          'component-list-at-f64)
+                        (:pointer replacement)
+                        (:count replacement)
+                        index-form
+                        (:max-items replacement)
+                        (:stride replacement)
+                        (:alignment replacement))
+                  (reject "aggregate match list access has no indirect leaf"
+                          {:binder binder :path path :form node})))
 
               (= node binder)
               (if scalar?
@@ -701,10 +739,17 @@
                                              (quot (+ (:size item-layout)
                                                       (dec alignment))
                                                    alignment))]
-                               (list 'component-list-count
-                                     (i32-slot flat-index)
-                                     (i32-slot (inc flat-index))
-                                     max-items stride alignment))))
+                               {:indirect-list? true
+                                :pointer (i32-slot flat-index)
+                                :count (i32-slot (inc flat-index))
+                                :max-items max-items
+                                :stride stride
+                                :alignment alignment
+                                :count-form
+                                (list 'component-list-count
+                                      (i32-slot flat-index)
+                                      (i32-slot (inc flat-index))
+                                      max-items stride alignment)})))
                            (structural-union-decode-form
                             (nth payloads flat-index)
                             (nth joined-core-types flat-index)
@@ -729,7 +774,11 @@
                (list 'let
                      [(fresh (str "__component_checked_leaf_"
                                   case-index "_" leaf-index))
-                      (get (nth decoded-replacements case-index) path)]
+                      (let [replacement
+                            (get (nth decoded-replacements case-index) path)]
+                        (if (map? replacement)
+                          (:count-form replacement)
+                          replacement))]
                      checked)
                checked))
            body
