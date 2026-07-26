@@ -72,6 +72,11 @@ A symmetric `result<list<T>, list<T>>` match has the same property for both
 and active list range are validated before either branch can observe its
 count.
 
+The same bounded indirect codec handles `string` and `keyword` payloads for
+option and symmetric result matches. UTF-8 byte bounds use payload alignment
+1 while the enclosing union result area retains its independent Canonical
+alignment; both are checked before `string-byte-length` is exposed.
+
 A direct named capability may also transport one bounded structural
 `option`/`result` unchanged. Its leaves may be scalars, strings/keywords,
 `list<s64>`/`list<f64>`, or nested structural unions. Both application and

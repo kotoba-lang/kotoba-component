@@ -495,16 +495,21 @@
                        (contains? #{[:option :vector-i64]
                                     [:option :vector-f64]
                                     [:option [:list :i64]]
-                                    [:option [:list :f64]]}
+                                    [:option [:list :f64]]
+                                    [:option :string]
+                                    [:option :keyword]}
                                   (second node)))
               (let [[_ descriptor call fallback result-binder result-body] node]
                 (let [leaf-descriptor
                       (:descriptor (get leaves-by-path []))
                       count-op
-                      (if (contains? #{:vector-f64 [:list :f64]}
-                                     leaf-descriptor)
+                      (cond
+                        (contains? #{:string :keyword} leaf-descriptor)
+                        'string-byte-length
+                        (contains? #{:vector-f64 [:list :f64]}
+                                   leaf-descriptor)
                         'vector-f64-count
-                        'vector-count)]
+                        :else 'vector-count)]
                   (and (seq? call)
                      (= 5 (count call))
                      (= 'typed-cap-call (first call))
@@ -517,7 +522,8 @@
                      (symbol? result-binder)
                      (= result-body (list count-op result-binder))
                      (contains? #{:vector-i64 :vector-f64
-                                  [:list :i64] [:list :f64]}
+                                  [:list :i64] [:list :f64]
+                                  :string :keyword}
                                 leaf-descriptor)
                      (valid? fallback))))))
           (result-list-capability-count? [node]
@@ -529,15 +535,19 @@
                     leaf-descriptor
                     (:descriptor (get leaves-by-path []))
                     count-op
-                    (if (contains? #{:vector-f64 [:list :f64]}
-                                   leaf-descriptor)
+                    (cond
+                      (contains? #{:string :keyword} leaf-descriptor)
+                      'string-byte-length
+                      (contains? #{:vector-f64 [:list :f64]}
+                                 leaf-descriptor)
                       'vector-f64-count
-                      'vector-count)]
+                      :else 'vector-count)]
                 (and (vector? descriptor)
                      (= :result (first descriptor))
                      (= (second descriptor) (nth descriptor 2))
                      (contains? #{:vector-i64 :vector-f64
-                                  [:list :i64] [:list :f64]}
+                                  [:list :i64] [:list :f64]
+                                  :string :keyword}
                                 leaf-descriptor)
                      (= leaf-descriptor (second descriptor))
                      (seq? call)
@@ -884,7 +894,9 @@
                        (contains? #{[:option :vector-i64]
                                     [:option :vector-f64]
                                     [:option [:list :i64]]
-                                    [:option [:list :f64]]}
+                                    [:option [:list :f64]]
+                                    [:option :string]
+                                    [:option :keyword]}
                                   (second node)))
               (let [[_ descriptor call fallback result-binder result-body] node]
                 (when (and (seq? call)
@@ -898,10 +910,16 @@
                             request-leaf (get replacements [])
                             result-layout (canonical/layout descriptor {})
                             count-op
-                            (if (contains? #{:vector-f64 [:list :f64]}
-                                           (second descriptor))
+                            (cond
+                              (contains? #{:string :keyword}
+                                         (second descriptor))
+                              'string-byte-length
+                              (contains? #{:vector-f64 [:list :f64]}
+                                         (second descriptor))
                               'vector-f64-count
-                              'vector-count)]
+                              :else 'vector-count)
+                            maximum (or (:max-bytes request-leaf)
+                                        (:max-items request-leaf))]
                         (when (and (= request-type descriptor)
                                    (= result-type descriptor)
                                    (= constructor-type descriptor)
@@ -909,17 +927,19 @@
                                    (symbol? result-binder)
                                    (= result-body
                                       (list count-op result-binder))
-                                   (:indirect-list? request-leaf))
+                                   (or (:indirect-list? request-leaf)
+                                       (:indirect-string? request-leaf)))
                           (list 'component-option-list-capability-count
                                 capability-id
                                 (:pointer request-leaf)
                                 (:count request-leaf)
                                 (rewrite fallback)
-                                (:max-items request-leaf)
+                                maximum
                                 (:stride request-leaf)
                                 (:alignment request-leaf)
                                 (:size result-layout)
-                                (:payload-offset result-layout))))))))))
+                                (:payload-offset result-layout)
+                                (:alignment result-layout))))))))))
           (result-list-capability-count [node]
             (when (and (seq? node)
                        (= 7 (count node))
@@ -943,27 +963,35 @@
                             request-leaf (get replacements [])
                             result-layout (canonical/layout descriptor {})
                             count-op
-                            (if (contains? #{:vector-f64 [:list :f64]}
-                                           (second descriptor))
+                            (cond
+                              (contains? #{:string :keyword}
+                                         (second descriptor))
+                              'string-byte-length
+                              (contains? #{:vector-f64 [:list :f64]}
+                                         (second descriptor))
                               'vector-f64-count
-                              'vector-count)]
+                              :else 'vector-count)
+                            maximum (or (:max-bytes request-leaf)
+                                        (:max-items request-leaf))]
                         (when (and (= constructor-type descriptor)
                                    (= request-value binder)
                                    (symbol? ok-binder)
                                    (symbol? err-binder)
                                    (= ok-body (list count-op ok-binder))
                                    (= err-body (list count-op err-binder))
-                                   (:indirect-list? request-leaf))
+                                   (or (:indirect-list? request-leaf)
+                                       (:indirect-string? request-leaf)))
                           (list 'component-result-list-capability-count
                                 capability-id
                                 (if (= constructor 'result-ok-of) 0 1)
                                 (:pointer request-leaf)
                                 (:count request-leaf)
-                                (:max-items request-leaf)
+                                maximum
                                 (:stride request-leaf)
                                 (:alignment request-leaf)
                                 (:size result-layout)
-                                (:payload-offset result-layout))))))))))
+                                (:payload-offset result-layout)
+                                (:alignment result-layout))))))))))
           (rewrite [node]
             (cond
               (and (seq? node)
@@ -978,9 +1006,12 @@
                    (= 'string-byte-length (first node))
                    (= 2 (count node)))
               (let [path (record-get-path (second node) binder)]
-                (or (get replacements path)
+                (let [replacement (get replacements path)]
+                  (or (if (map? replacement)
+                        (:count-form replacement)
+                        replacement)
                     (reject "aggregate match string length has no indirect leaf"
-                            {:binder binder :path path :form node})))
+                            {:binder binder :path path :form node}))))
 
               (and (seq? node)
                    (contains? #{'vector-count 'vector-f64-count} (first node))
@@ -1115,10 +1146,17 @@
                                         {:path path :slot index
                                          :joined joined}))))]
                              (if max-bytes
-                             (list 'component-string-byte-length
-                                   (i32-slot flat-index)
-                                   (i32-slot (inc flat-index))
-                                   max-bytes)
+                               {:indirect-string? true
+                                :pointer (i32-slot flat-index)
+                                :count (i32-slot (inc flat-index))
+                                :max-bytes max-bytes
+                                :stride 1
+                                :alignment 1
+                                :count-form
+                                (list 'component-string-byte-length
+                                      (i32-slot flat-index)
+                                      (i32-slot (inc flat-index))
+                                      max-bytes)}
                              (let [alignment (:alignment item-layout)
                                    stride (* alignment
                                              (quot (+ (:size item-layout)
@@ -1214,7 +1252,8 @@
 (defn- structural-match-capability-imports
   "Named imports admitted inside a shared structural-union match module.
   Scalar calls retain ADR 0076's direct signature. The aggregate slice lowers
-  option<list<s64|f64>> to its standard32 flat request and indirect result pointer;
+  option/result with one bounded string or scalar-list payload to its
+  standard32 flat request and indirect result pointer;
   the adapter rewrites the only admitted use into the matching backend
   primitive, so no host-reference aggregate can reach this signature."
   [kir]
@@ -1239,10 +1278,14 @@
                                   [:option :vector-f64]
                                   [:option [:list :i64]]
                                   [:option [:list :f64]]
+                                  [:option :string]
+                                  [:option :keyword]
                                   [:result :vector-i64 :vector-i64]
                                   [:result :vector-f64 :vector-f64]
                                   [:result [:list :i64] [:list :i64]]
-                                  [:result [:list :f64] [:list :f64]]}
+                                  [:result [:list :f64] [:list :f64]]
+                                  [:result :string :string]
+                                  [:result :keyword :keyword]}
                                 request-type)
                      (= result-type request-type))
                 {:id id
