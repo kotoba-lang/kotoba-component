@@ -77,6 +77,12 @@ option and symmetric result matches. UTF-8 byte bounds use payload alignment
 1 while the enclosing union result area retains its independent Canonical
 alignment; both are checked before `string-byte-length` is exposed.
 
+An `option` carrying a sealed finite scalar record may likewise reconstruct
+the selected record, call a named capability, and project one scalar field
+from the returned `some`. The request uses the record's canonical flat slots;
+the returned option result area, discriminant, and every active bool field are
+validated even when the projected field is different.
+
 A direct named capability may also transport one bounded structural
 `option`/`result` unchanged. Its leaves may be scalars, strings/keywords,
 `list<s64>`/`list<f64>`, or nested structural unions. Both application and
