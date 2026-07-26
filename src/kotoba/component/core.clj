@@ -237,9 +237,11 @@
 (defn- structural-union-identity-function?
   "An identity export over a structural Component Model option/result.
   These layouts have the same discriminant-plus-joined-payload shape as a
-  sealed variant, so they deliberately share `variant-wat`.  Keep this first
-  executable slice to scalar payloads; admitting nested/string/list payloads
-  requires the corresponding recursive validation proof."
+  sealed variant, so they deliberately share `variant-wat`. Payloads are
+  admitted only when that emitter can recursively validate and store every
+  active-case leaf: a Canonical scalar, a sealed flat scalar record, or a
+  sealed flat string/keyword-bearing record. Lists and nested records remain
+  fail-closed because `variant-case-leaves` does not yet recurse into them."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         descriptor (first param-types)
@@ -253,7 +255,7 @@
          (= descriptor result)
          (= (first params) body)
          (seq payloads)
-         (every? #{:i64 :f32 :f64 :bool} payloads)
+         (every? #(record-or-scalar-variant-case? % schemas) payloads)
          (canonical/layout descriptor schemas))))
 
 (defn- structural-union-construction
