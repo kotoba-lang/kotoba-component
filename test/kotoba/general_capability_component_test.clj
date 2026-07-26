@@ -165,6 +165,73 @@
          (component-core/assert-supported! unsupported))
         "a non-scalar capability cannot fall back to a generic ambient import")))
 
+(deftest structural-union-match-module-calls-an-aggregate-capability
+  (let [descriptor [:option :vector-i64]
+        kir {:format :kotoba.kir/v4
+             :exports ['choose 'echo]
+             :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'choose
+               :params ['value 'fallback]
+               :param-types [descriptor :i64]
+               :result :i64
+               :effects #{:clock/read}
+               :body
+               (list 'option-match descriptor 'value 'fallback 'items
+                     (list 'option-match descriptor
+                           (list 'typed-cap-call
+                                 clock-now descriptor descriptor
+                                 (list 'option-some-of descriptor 'items))
+                           'fallback 'returned
+                           (list 'vector-count 'returned)))}
+              {:name 'echo
+               :params ['value]
+               :param-types [:i64]
+               :result :i64
+               :effects #{}
+               :body 'value}]}
+        world (wit/emit kir)
+        core (component-core/emit kir :wasm32-wasi-kotoba-v1)
+        application (artifact/package core kir world)
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor)
+        closed (composition/compose-closed application [provider])
+        path (Files/createTempFile
+              "kotoba-match-aggregate-capability-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-match-module
+             (component-core/assert-supported! kir)))
+      (is (= [:clock/now] (:imports application)))
+      (doseq [[invoke expected]
+              [["choose(none, 9)" "9"]
+               ["choose(some([]), 9)" "0"]
+               ["choose(some([1, -2, 3]), 9)" "3"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke"
+                            invoke (str path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      (let [maximum-values (str/join "," (repeat 16384 "0"))
+            maximum (shell/sh
+                     "wasmtime" "run" "--invoke"
+                     (str "choose(some([" maximum-values "]), 9)")
+                     (str path))
+            over-values (str maximum-values ",0")
+            over (shell/sh
+                  "wasmtime" "run" "--invoke"
+                  (str "choose(some([" over-values "]), 9)")
+                  (str path))]
+        (is (zero? (:exit maximum)) (:err maximum))
+        (is (= "16384" (str/trim (:out maximum))))
+        (is (not (zero? (:exit over)))
+            "the Canonical boundary rejects 16,385 list elements"))
+      (finally
+        (Files/deleteIfExists path)))))
+
 (deftest structural-union-capability-transports-bounded-lists
   (let [descriptor [:option :vector-i64]
         kir {:format :kotoba.kir/v4

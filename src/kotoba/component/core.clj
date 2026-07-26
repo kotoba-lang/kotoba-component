@@ -488,8 +488,30 @@
   one admitted leaf. Indirect string/list leaves may only feed their bounded
   count/item-read operation; scalar binders retain their existing direct use."
   [form binder leaves-by-path scalar?]
-  (letfn [(valid? [node]
+  (letfn [(option-list-capability-count? [node]
+            (when (and (seq? node)
+                       (= 6 (count node))
+                       (= 'option-match (first node))
+                       (= [:option :vector-i64] (second node)))
+              (let [[_ descriptor call fallback result-binder result-body] node]
+                (and (seq? call)
+                     (= 5 (count call))
+                     (= 'typed-cap-call (first call))
+                     (let [[_ _ request-type result-type request] call]
+                       (and (= request-type descriptor)
+                            (= result-type descriptor)
+                            (seq? request)
+                            (= (list 'option-some-of descriptor binder)
+                               request)))
+                     (symbol? result-binder)
+                     (= result-body (list 'vector-count result-binder))
+                     (contains? #{:vector-i64 [:list :i64]}
+                                (:descriptor (get leaves-by-path [])))
+                     (valid? fallback)))))
+          (valid? [node]
             (cond
+              (option-list-capability-count? node) true
+
               (= node binder) scalar?
 
               (and (seq? node)
@@ -806,8 +828,46 @@
   "Replace a selected payload binder (scalar) or record-get chain rooted at
   it (aggregate) with its case-specific decoded joined-slot expression."
   [form binder replacements scalar?]
-  (letfn [(rewrite [node]
+  (letfn [(option-list-capability-count [node]
+            (when (and (seq? node)
+                       (= 6 (count node))
+                       (= 'option-match (first node))
+                       (= [:option :vector-i64] (second node)))
+              (let [[_ descriptor call fallback result-binder result-body] node]
+                (when (and (seq? call)
+                           (= 5 (count call))
+                           (= 'typed-cap-call (first call)))
+                  (let [[_ capability-id request-type result-type request] call]
+                    (when (and (seq? request)
+                               (= 3 (count request))
+                               (= 'option-some-of (first request)))
+                      (let [[_ constructor-type request-value] request
+                            request-leaf (get replacements [])
+                            result-layout (canonical/layout descriptor {})]
+                        (when (and (= request-type descriptor)
+                                   (= result-type descriptor)
+                                   (= constructor-type descriptor)
+                                   (= request-value binder)
+                                   (symbol? result-binder)
+                                   (= result-body
+                                      (list 'vector-count result-binder))
+                                   (:indirect-list? request-leaf))
+                          (list 'component-option-list-capability-count
+                                capability-id
+                                (:pointer request-leaf)
+                                (:count request-leaf)
+                                (rewrite fallback)
+                                (:max-items request-leaf)
+                                (:stride request-leaf)
+                                (:alignment request-leaf)
+                                (:size result-layout)
+                                (:payload-offset result-layout))))))))))
+          (rewrite [node]
             (cond
+              (and (seq? node)
+                   (option-list-capability-count node))
+              (option-list-capability-count node)
+
               (and (seq? node)
                    (= 'string-byte-length (first node))
                    (= 2 (count node)))
@@ -1043,7 +1103,48 @@
                            (when (= :i32 core-type) (inc index))))
            joined-core-types)}))
 
-(declare scalar-capability-imports)
+(declare scalar-capability-imports typed-cap-calls)
+
+(defn- structural-match-capability-imports
+  "Named imports admitted inside a shared structural-union match module.
+  Scalar calls retain ADR 0076's direct signature. The aggregate slice lowers
+  option<list<s64>> to its standard32 flat request and indirect result pointer;
+  the adapter rewrites the only admitted use into the matching backend
+  primitive, so no host-reference aggregate can reach this signature."
+  [kir]
+  (let [calls (typed-cap-calls kir)
+        by-id (into {} (map (juxt :id identity))
+                    (:capabilities component-wit/contract))
+        scalar-type {:i64 0x7e :f32 0x7d :f64 0x7c}
+        import-for
+        (fn [{:keys [id request-type result-type]}]
+          (let [entry (get by-id id)]
+            (when entry
+              (cond
+                (and (scalar-type request-type) (scalar-type result-type))
+                {:id id
+                 :module (str "cm32p2|kotoba:application/"
+                              (name (:interface entry)) "@1")
+                 :field (:function entry)
+                 :type [0x60 1 (scalar-type request-type)
+                        1 (scalar-type result-type)]}
+
+                (and (= request-type [:option :vector-i64])
+                     (= result-type request-type))
+                {:id id
+                 :module (str "cm32p2|kotoba:application/"
+                              (name (:interface entry)) "@1")
+                 :field (:function entry)
+                 ;; option<list<s64>>: disc, pointer, count, retptr -> ().
+                 :type [0x60 4 0x7f 0x7f 0x7f 0x7f 0]}
+
+                :else nil))))]
+    (when (seq calls)
+      (let [imports (mapv import-for calls)]
+        (when (and (every? some? imports)
+                   (= (count imports)
+                      (count (distinct (map :id imports)))))
+          imports)))))
 
 (defn- structural-union-match-module
   [kir]
@@ -1052,7 +1153,7 @@
         capability-calls? (boolean
                            (some #(uses-operation? % 'typed-cap-call)
                                  functions))
-        capability-imports (scalar-capability-imports kir)
+        capability-imports (structural-match-capability-imports kir)
         plans (into {}
                     (keep (fn [function]
                             (when-let [plan (structural-union-match
@@ -1098,7 +1199,7 @@
      (assoc opts
             :component-canonical-scalars? true
             :component-unchecked-bool-params unchecked
-            :capability-imports (scalar-capability-imports kir)
+            :capability-imports (structural-match-capability-imports kir)
             :core-param-types core-param-types))))
 
 (defn- scalar-record-projection [function schemas]
