@@ -44,6 +44,14 @@ discriminant and only the selected inner case before storing the same nested
 in-memory union shape. Other list item types and recursive records remain
 fail-closed pending per-element validation and linearity analysis.
 
+Non-identity `option`/`result` matches can consume scalar payloads and finite
+records whose recursive leaves are `s64`, `float32`, `float64`, or `bool`.
+Record binders remain sealed: branch code may access them only through a
+statically resolved `record-get` chain to an admitted scalar leaf. Every bool
+leaf in the selected case is validated even when the branch does not read it;
+inactive joined slots are never interpreted. Branch expressions still use the
+shared typed core-Wasm emitter rather than a Component-specific compiler.
+
 ## Test
 
 ```bash
