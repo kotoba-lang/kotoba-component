@@ -633,6 +633,128 @@
              :payload-leaves payload-leaves
              :joined-core-types joined-core-types))))
 
+(defn- owned-vector-match
+  "Recognize an option/result match whose branches return one owned scalar
+  list. A branch may copy a vector parameter or the selected payload's list
+  leaf, and may apply one drop/assoc/conj operation to that source. Keeping
+  this as a separate plan from `structural-union-match` is intentional: its
+  result is an indirect Canonical value and therefore needs a result area,
+  fresh guest allocation, and post-return reset."
+  [function schemas]
+  (let [{:keys [params param-types result body]} function
+        [op descriptor value & branches] (when (seq? body) body)
+        vector-type result
+        element-type ({:vector-i64 :i64 :vector-f64 :f64} vector-type)
+        operation-family
+        (if (= :vector-i64 vector-type)
+          {'vector-drop :drop 'vector-assoc :assoc 'vector-conj :conj}
+          {'vector-f64-drop :drop 'vector-f64-assoc :assoc
+           'vector-f64-conj :conj})
+        raw-cases
+        (case op
+          option-match
+          (let [[none-body binder some-body] branches]
+            (when (and (= 3 (count branches)) (symbol? binder))
+              [{:body none-body}
+               {:binder binder :body some-body :payload-index 0}]))
+          result-match-of
+          (let [[ok-binder ok-body err-binder err-body] branches]
+            (when (and (= 4 (count branches))
+                       (symbol? ok-binder) (symbol? err-binder))
+              [{:binder ok-binder :body ok-body :payload-index 0}
+               {:binder err-binder :body err-body :payload-index 1}]))
+          nil)
+        payload-types
+        (when (vector? descriptor)
+          (case (first descriptor)
+            :option [(second descriptor)]
+            :result [(second descriptor) (nth descriptor 2)]
+            nil))
+        payload-layouts (when payload-types
+                          (mapv #(canonical/layout % schemas) payload-types))
+        payload-leaves (when (and payload-layouts (every? some? payload-layouts))
+                         (mapv match-payload-leaves payload-layouts))
+        union-layout (when (and payload-leaves (every? some? payload-leaves))
+                       (canonical/layout descriptor schemas))
+        param-types-by-name (zipmap params param-types)
+        scalar-operand
+        (fn [form expected]
+          (cond
+            (and (= expected :i64) (integer? form)) {:kind :literal :value form}
+            (and (= expected :f64) (number? form)) {:kind :literal :value form}
+            (= expected (get param-types-by-name form))
+            {:kind :parameter :index (.indexOf params form) :type expected}
+            :else nil))
+        source-plan
+        (fn [form binder payload-index]
+          (cond
+            (and (seq? form)
+                 (= (if (= :vector-i64 vector-type)
+                      'vector-new 'vector-f64-new)
+                    (first form))
+                 (<= (count (rest form)) value/vector-item-limit)
+                 (every? (if (= :vector-i64 vector-type) integer? number?)
+                         (rest form)))
+            {:kind :literal :items (vec (rest form))}
+
+            (= vector-type (get param-types-by-name form))
+            {:kind :parameter :index (.indexOf params form)}
+
+            binder
+            (let [path (record-get-path form binder)
+                  leaf (when (some? path)
+                         (some #(when (= path (:path %)) %)
+                               (nth payload-leaves payload-index)))]
+              (when (contains? (if (= :vector-i64 vector-type)
+                                 #{:vector-i64 [:list :i64]}
+                                 #{:vector-f64 [:list :f64]})
+                               (:descriptor leaf))
+                {:kind :payload :leaf leaf}))
+
+            :else nil))
+        branch-plan
+        (fn [{:keys [body binder payload-index] :as branch}]
+          (let [[operation source operands]
+                (if (and (seq? body) (contains? operation-family (first body)))
+                  [(get operation-family (first body)) (second body)
+                   (drop 2 body)]
+                  [:copy body []])
+                source (source-plan source binder payload-index)
+                extras
+                (case operation
+                  :copy (when (empty? operands) {})
+                  :drop (when (= 1 (count operands))
+                          (when-let [amount (scalar-operand (first operands) :i64)]
+                            {:amount amount}))
+                  :assoc (when (= 2 (count operands))
+                           (let [index (scalar-operand (first operands) :i64)
+                                 item (scalar-operand (second operands) element-type)]
+                             (when (and index item) {:index index :item item})))
+                  :conj (when (= 1 (count operands))
+                          (when-let [item (scalar-operand (first operands) element-type)]
+                            {:item item}))
+                  nil)]
+            (when (and source extras)
+              (assoc branch :operation operation :source source :extras extras))))
+        cases (when raw-cases (mapv branch-plan raw-cases))]
+    (when (and element-type raw-cases (every? some? cases)
+               (= descriptor (first param-types))
+               (= value (first params))
+               (= ({'option-match :option 'result-match-of :result} op)
+                  (first descriptor))
+               (every? #(or (contains? #{:i64 :f64} %)
+                            (= vector-type %))
+                       (rest param-types))
+               union-layout
+               (seq (rest (:flat union-layout)))
+               (every? #{:i32 :i64 :f32 :f64} (rest (:flat union-layout))))
+      {:descriptor descriptor
+       :vector-type vector-type
+       :element-type element-type
+       :payload-leaves payload-leaves
+       :joined-core-types (vec (rest (:flat union-layout)))
+       :cases cases})))
+
 (defn- joined-core-coercion
   "One authoritative classification of the Component Model's reachable
   joined-flat scalar coercions. Both binary match adapters and the general
@@ -1384,6 +1506,10 @@
            (empty? (:effects kir))) :owned-vector-transform
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
+           (owned-vector-match (first exports) (:schemas kir))
+           (empty? (:effects kir))) :owned-vector-match
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
            (scalar-record-identity-function? (first exports) (:schemas kir))
            (empty? (:effects kir))) :scalar-record-identity
       (and (= 1 (count (:functions kir)))
@@ -1716,6 +1842,201 @@
      "    local.get $ret)\n"
      "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
      "    i32.const 8 global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const 8 global.set $next)\n"
+     ")\n")))
+
+(defn- owned-vector-match-wat [function plan]
+  (let [export (wit-name (:name function))
+        params (:params function)
+        param-types (:param-types function)
+        joined (:joined-core-types plan)
+        element-type (:element-type plan)
+        item-limit value/vector-item-limit
+        capacity wasm/component-arena-capacity
+        type-name (if (= :i64 element-type) "i64" "f64")
+        store-name (if (= :i64 element-type) "i64.store" "f64.store")
+        param-decls
+        (apply str
+               (map-indexed
+                (fn [index type]
+                  (cond
+                    (zero? index) ""
+                    (= type (:vector-type plan))
+                    (str " (param $p" index "-ptr i32)"
+                         " (param $p" index "-len i32)")
+                    :else
+                    (str " (param $p" index " "
+                         ({:i64 "i64" :f64 "f64"} type) ")")))
+                param-types))
+        joined-decls
+        (apply str
+               (map-indexed
+                (fn [index type]
+                  (str " (param $slot" index " "
+                       ({:i32 "i32" :i64 "i64" :f32 "f32" :f64 "f64"} type)
+                       ")"))
+                joined))
+        i32-slot
+        (fn [index]
+          (case (nth joined index)
+            :i32 (str "local.get $slot" index)
+            :i64 (str "local.get $slot" index " i32.wrap_i64")
+            (reject "owned vector match indirect slot has invalid join"
+                    {:slot index :joined (nth joined index)})))
+        operand
+        (fn [{:keys [kind value index]}]
+          (if (= :literal kind)
+            (str type-name ".const " value)
+            (str "local.get $p" index)))
+        i64-operand
+        (fn [{:keys [kind value index]}]
+          (if (= :literal kind)
+            (str "i64.const " value)
+            (str "local.get $p" index)))
+        source-code
+        (fn [{:keys [kind index leaf items]}]
+          (case kind
+            :parameter
+            (str "    local.get $p" index "-ptr local.set $source\n"
+                 "    local.get $p" index "-len local.set $source-len\n")
+            :payload
+            (str "    " (i32-slot (:flat-index leaf)) " local.set $source\n"
+                 "    " (i32-slot (inc (:flat-index leaf)))
+                 " local.set $source-len\n")
+            :literal
+            (str
+             "    i32.const 0 i32.const 0 i32.const 8 i32.const "
+             (* 8 (count items)) " call $realloc local.tee $source"
+             " local.set $out\n"
+             (apply str
+                    (map-indexed
+                     (fn [item-index item]
+                       (str "    local.get $out " type-name ".const " item " "
+                            store-name " offset=" (* 8 item-index) "\n"))
+                     items))
+             "    i32.const " (count items) " local.set $source-len\n")))
+        branch-code
+        (fn [{:keys [source operation extras]}]
+          (str
+           (source-code source)
+           "    local.get $source-len local.set $new-len\n"
+           "    local.get $source-len local.set $copy-len\n"
+           "    i32.const 0 local.set $operation\n"
+           (case operation
+             :copy ""
+             :drop
+             (str "    " (i64-operand (:amount extras))
+                  " local.get $source-len i64.extend_i32_u i64.gt_u"
+                  " if unreachable end\n"
+                  "    local.get $source " (i64-operand (:amount extras))
+                  " i32.wrap_i64 i32.const 3 i32.shl i32.add"
+                  " local.set $source\n"
+                  "    local.get $source-len " (i64-operand (:amount extras))
+                  " i32.wrap_i64 i32.sub local.tee $new-len"
+                  " local.set $copy-len\n")
+             :assoc
+             (str "    " (i64-operand (:index extras))
+                  " local.get $source-len i64.extend_i32_u i64.ge_u"
+                  " if unreachable end\n"
+                  "    i32.const 1 local.set $operation\n"
+                  "    " (i64-operand (:index extras))
+                  " i32.wrap_i64 local.set $write-index\n"
+                  "    " (operand (:item extras)) " local.set $item\n")
+             :conj
+             (str "    local.get $source-len i32.const " item-limit
+                  " i32.ge_u if unreachable end\n"
+                  "    i32.const 2 local.set $operation\n"
+                  "    local.get $source-len local.set $write-index\n"
+                  "    local.get $source-len i32.const 1 i32.add"
+                  " local.set $new-len\n"
+                  "    " (operand (:item extras)) " local.set $item\n"))))
+        validate-list
+        (fn [ptr len max-items]
+          (str
+           "    " len " i32.const " max-items " i32.gt_u if unreachable end\n"
+           "    " ptr " i32.const 7 i32.and if unreachable end\n"
+           "    " ptr " " len " i32.const 3 i32.shl i32.add"
+           " local.tee $input-end\n"
+           "    " ptr " i32.lt_u if unreachable end\n"
+           "    local.get $input-end i32.const " capacity
+           " i32.gt_u if unreachable end\n"))
+        validate-selected
+        (fn [case-index]
+          (apply str
+                 (map
+                  (fn [{:keys [descriptor flat-index max-bytes max-items]}]
+                    (cond
+                      (= :bool descriptor)
+                      (str "    " (i32-slot flat-index)
+                           " i32.const 1 i32.gt_u if unreachable end\n")
+                      (contains? #{:string :keyword} descriptor)
+                      (str "    " (i32-slot (inc flat-index))
+                           " i32.const " max-bytes
+                           " i32.gt_u if unreachable end\n"
+                           "    " (i32-slot flat-index) " "
+                           (i32-slot (inc flat-index)) " i32.add"
+                           " local.tee $input-end\n"
+                           "    " (i32-slot flat-index)
+                           " i32.lt_u if unreachable end\n"
+                           "    local.get $input-end i32.const " capacity
+                           " i32.gt_u if unreachable end\n")
+                      max-items
+                      (validate-list (i32-slot flat-index)
+                                     (i32-slot (inc flat-index))
+                                     max-items)
+                      :else ""))
+                  (nth (:payload-leaves plan) case-index))))
+        validate-vector-params
+        (apply str
+               (keep-indexed
+                (fn [index type]
+                  (when (= type (:vector-type plan))
+                    (validate-list (str "local.get $p" index "-ptr")
+                                   (str "local.get $p" index "-len")
+                                   item-limit)))
+                param-types))
+        cases (:cases plan)
+        case-0-index (or (:payload-index (first cases)) 0)
+        case-1-index (or (:payload-index (second cases)) 0)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " wasm/component-memory-pages
+     " " wasm/component-memory-pages ")\n"
+     "  (global $next (mut i32) (i32.const 8))\n"
+     (bounded-bump-realloc-wat capacity)
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $disc i32)" joined-decls param-decls " (result i32)\n"
+     "    (local $source i32) (local $source-len i32) (local $copy-len i32)"
+     " (local $input-end i32)\n"
+     "    (local $new-len i32) (local $new-bytes i32)"
+     " (local $out i32) (local $ret i32)\n"
+     "    (local $operation i32) (local $write-index i32)"
+     " (local $item " type-name ")\n"
+     "    local.get $disc i32.const 2 i32.ge_u if unreachable end\n"
+     validate-vector-params
+     "    local.get $disc if\n"
+     (validate-selected case-1-index)
+     (branch-code (second cases))
+     "    else\n"
+     (when (:binder (first cases)) (validate-selected case-0-index))
+     (branch-code (first cases))
+     "    end\n"
+     "    local.get $new-len i32.const 3 i32.shl local.set $new-bytes\n"
+     "    i32.const 0 i32.const 0 i32.const 8 local.get $new-bytes"
+     " call $realloc local.set $out\n"
+     "    local.get $out local.get $source"
+     " local.get $copy-len i32.const 3 i32.shl memory.copy\n"
+     "    local.get $operation i32.eqz if else\n"
+     "      local.get $out local.get $write-index i32.const 3 i32.shl i32.add"
+     " local.get $item " store-name "\n"
+     "    end\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8"
+     " call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $new-len i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)"
+     " i32.const 8 global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const 8 global.set $next)\n"
      ")\n")))
 
@@ -3779,6 +4100,11 @@
     (let [function (first (exported-functions kir))]
       (wasm-tools/parse-wat
        (owned-vector-transform-wat function (owned-vector-transform function))))
+    :owned-vector-match
+    (let [function (first (exported-functions kir))]
+      (wasm-tools/parse-wat
+       (owned-vector-match-wat
+        function (owned-vector-match function (:schemas kir)))))
     :scalar-record-identity
     (wasm-tools/parse-wat
      (scalar-record-wat (first (exported-functions kir)) (:schemas kir)))

@@ -84,6 +84,15 @@ input, allocate and copy a fresh output buffer, apply the bounded transform,
 write the standard pointer/count result area, and release transient storage
 through post-return. No transform mutates or aliases the input buffer.
 
+`option`/`result` matches may also return an owned `list<s64>` or
+`list<float64>`. Each branch can copy a selected payload list, another vector
+parameter, or a bounded vector literal, optionally applying the corresponding
+`drop`, `assoc`, or `conj`. All ordinary vector parameters are validated at
+entry; payload validation remains selected-case-only and covers every bool,
+string, and list leaf even when the branch does not read it. Both paths then
+share the same fresh-buffer, result-area, and post-return ownership contract
+as the top-level transforms.
+
 ## Test
 
 ```bash
