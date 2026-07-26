@@ -376,6 +376,142 @@
          (core/assert-supported! escaped))
         "an indirect list cannot escape through an unrelated context")))
 
+(deftest owned-vector-transforms-return-independent-canonical-lists
+  (doseq [{:keys [name params param-types result body invoke expected]}
+          [{:name 'drop
+            :params ['items 'amount]
+            :param-types [:vector-i64 :i64]
+            :result :vector-i64
+            :body '(vector-drop items amount)
+            :invoke "drop([1, 2, 3], 1)"
+            :expected "[2, 3]"}
+           {:name 'assoc-item
+            :params ['items 'index 'item]
+            :param-types [:vector-i64 :i64 :i64]
+            :result :vector-i64
+            :body '(vector-assoc items index item)
+            :invoke "assoc-item([1, 2, 3], 1, 9)"
+            :expected "[1, 9, 3]"}
+           {:name 'append
+            :params ['items 'item]
+            :param-types [:vector-i64 :i64]
+            :result :vector-i64
+            :body '(vector-conj items item)
+            :invoke "append([1, 2], 3)"
+            :expected "[1, 2, 3]"}
+           {:name 'drop-f64
+            :params ['items 'amount]
+            :param-types [:vector-f64 :i64]
+            :result :vector-f64
+            :body '(vector-f64-drop items amount)
+            :invoke "drop-f64([1.5, 2.5, 3.5], 1)"
+            :expected "[2.5, 3.5]"}
+           {:name 'assoc-f64
+            :params ['items 'index 'item]
+            :param-types [:vector-f64 :i64 :f64]
+            :result :vector-f64
+            :body '(vector-f64-assoc items index item)
+            :invoke "assoc-f64([1.5, 2.5], 0, 9.5)"
+            :expected "[9.5, 2.5]"}
+           {:name 'append-f64
+            :params ['items 'item]
+            :param-types [:vector-f64 :f64]
+            :result :vector-f64
+            :body '(vector-f64-conj items item)
+            :invoke "append-f64([1.5], 2.5)"
+            :expected "[1.5, 2.5]"}]]
+    (let [kir {:format :kotoba.kir/v4
+               :exports [name] :schemas {} :effects #{}
+               :functions [{:name name :params params :param-types param-types
+                            :result result :effects #{} :body body}]}
+          world (wit/emit kir)
+          core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+          component (artifact/package core-bytes kir world)
+          path (Files/createTempFile
+                "kotoba-component-owned-vector-transform-" ".wasm"
+                (make-array FileAttribute 0))]
+      (try
+        (Files/write path ^bytes (:bytes component)
+                     (make-array java.nio.file.OpenOption 0))
+        (let [run (shell/sh "wasmtime" "run" "--invoke" invoke (str path))]
+          (is (= :owned-vector-transform (:canonical-lowering component)))
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke))
+        (finally
+          (Files/deleteIfExists path)))))
+  ;; Direct core calls cannot populate input elements conveniently, but they
+  ;; prove bounds are checked before copy/store and that maximum-size append
+  ;; cannot exceed the public item ceiling.
+  (doseq [{:keys [function args]}
+          [{:function 'drop :args ["8" "3" "4"]}
+           {:function 'assoc-item :args ["8" "3" "3" "9"]}
+           {:function 'append :args ["8" "16384" "9"]}
+           {:function 'append :args ["1" "1" "9"]}]]
+    (let [kir (case function
+                drop {:format :kotoba.kir/v4 :exports ['drop] :schemas {} :effects #{}
+                      :functions [{:name 'drop :params ['items 'amount]
+                                   :param-types [:vector-i64 :i64]
+                                   :result :vector-i64
+                                   :body '(vector-drop items amount)}]}
+                assoc-item
+                {:format :kotoba.kir/v4 :exports ['assoc-item] :schemas {} :effects #{}
+                 :functions [{:name 'assoc-item :params ['items 'index 'item]
+                              :param-types [:vector-i64 :i64 :i64]
+                              :result :vector-i64
+                              :body '(vector-assoc items index item)}]}
+                append
+                {:format :kotoba.kir/v4 :exports ['append] :schemas {} :effects #{}
+                 :functions [{:name 'append :params ['items 'item]
+                              :param-types [:vector-i64 :i64]
+                              :result :vector-i64
+                              :body '(vector-conj items item)}]})
+          core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+          path (Files/createTempFile
+                "kotoba-component-owned-vector-transform-core-" ".wasm"
+                (make-array FileAttribute 0))]
+      (try
+        (Files/write path ^bytes core-bytes
+                     (make-array java.nio.file.OpenOption 0))
+        (let [run (apply shell/sh "wasmtime" "run" "--invoke"
+                         (str "cm32p2||" (name function)) (str path) args)]
+          (is (not (zero? (:exit run)))))
+        (finally
+          (Files/deleteIfExists path)))))
+  (let [kir {:format :kotoba.kir/v4 :exports ['append] :schemas {} :effects #{}
+             :functions [{:name 'append :params ['items 'item]
+                          :param-types [:vector-i64 :i64]
+                          :result :vector-i64
+                          :body '(vector-conj items item)}]}
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+        path (Files/createTempFile
+              "kotoba-component-owned-vector-repeated-" ".wasm"
+              (make-array FileAttribute 0))
+        script
+        (str
+         "const fs=require('fs');"
+         "WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{"
+         "const e=instance.exports,m=e.cm32p2_memory;"
+         "e.cm32p2_initialize();"
+         "for(let n=0;n<20000;n++){"
+         "const p=e.cm32p2_realloc(0,0,8,16);"
+         "const input=new BigInt64Array(m.buffer,p,2);input[0]=1n;input[1]=2n;"
+         "const r=e['cm32p2||append'](p,2,3n);"
+         "const area=new DataView(m.buffer);"
+         "const q=area.getUint32(r,true),len=area.getUint32(r+4,true);"
+         "const out=new BigInt64Array(m.buffer,q,len);"
+         "if(len!==3||out[0]!==1n||out[1]!==2n||out[2]!==3n)throw Error('result');"
+         "if(input[0]!==1n||input[1]!==2n)throw Error('aliased');"
+         "e['cm32p2||append_post'](r);"
+         "}"
+         "}).catch(e=>{console.error(e);process.exit(1)})")]
+    (try
+      (Files/write path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run (shell/sh "node" "-e" script (str path))]
+        (is (zero? (:exit run)) (:err run)))
+      (finally
+        (Files/deleteIfExists path)))))
+
 (deftest multi-function-union-component-is-self-contained
   (let [world (wit/emit multi-match-kir)
         core-bytes (core/emit multi-match-kir :wasm32-wasi-kotoba-v1 {:fuel 2})

@@ -56,6 +56,57 @@
        (<= (count (rest body)) value/vector-item-limit)
        (every? integer? (rest body))))
 
+(defn- owned-vector-transform
+  "Recognize one public scalar-vector operation whose result needs a fresh
+  Canonical list buffer. The exact parameter symbols must appear in the body
+  so this plan cannot silently discard or duplicate another expression."
+  [{:keys [params param-types result body]}]
+  (let [[op & args] (when (seq? body) body)
+        vector-type (first param-types)
+        element-type ({:vector-i64 :i64 :vector-f64 :f64} vector-type)
+        operation-vector-type
+        (if (contains? #{'vector-f64-drop 'vector-f64-assoc
+                         'vector-f64-conj} op)
+          :vector-f64
+          (when (contains? #{'vector-drop 'vector-assoc 'vector-conj} op)
+            :vector-i64))
+        expected
+        (case op
+          vector-drop
+          {:param-types [vector-type :i64]
+           :args params}
+
+          vector-f64-drop
+          {:param-types [vector-type :i64]
+           :args params}
+
+          vector-assoc
+          {:param-types [vector-type :i64 element-type]
+           :args params}
+
+          vector-f64-assoc
+          {:param-types [vector-type :i64 element-type]
+           :args params}
+
+          vector-conj
+          {:param-types [vector-type element-type]
+           :args params}
+
+          vector-f64-conj
+          {:param-types [vector-type element-type]
+           :args params}
+
+          nil)]
+    (when (and element-type
+               (= vector-type operation-vector-type)
+               expected
+               (= vector-type result)
+               (= (:param-types expected) param-types)
+               (= (:args expected) args))
+      {:operation op
+       :vector-type vector-type
+       :element-type element-type})))
+
 (defn- uses-operation? [function operation]
   (boolean
    (some #(and (seq? %) (= operation (first %)))
@@ -1329,6 +1380,10 @@
            (empty? (:effects kir))) :vector-i64-literal
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
+           (owned-vector-transform (first exports))
+           (empty? (:effects kir))) :owned-vector-transform
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
            (scalar-record-identity-function? (first exports) (:schemas kir))
            (empty? (:effects kir))) :scalar-record-identity
       (and (= 1 (count (:functions kir)))
@@ -1571,6 +1626,93 @@
      "    call $realloc local.tee $ret\n"
      "    local.get $out i32.const 8 i32.add i32.store\n"
      "    local.get $ret i32.const " (count items) " i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const 8 global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const 8 global.set $next)\n"
+     ")\n")))
+
+(defn- owned-vector-transform-wat [function plan]
+  (let [export (wit-name (:name function))
+        operation (:operation plan)
+        element-type (:element-type plan)
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        item-limit value/vector-item-limit
+        drop? (contains? #{'vector-drop 'vector-f64-drop} operation)
+        assoc? (contains? #{'vector-assoc 'vector-f64-assoc} operation)
+        conj? (contains? #{'vector-conj 'vector-f64-conj} operation)
+        extra-params
+        (cond
+          drop? " (param $amount i64)"
+          assoc? (str " (param $index i64) (param $item "
+                      (if (= :i64 element-type) "i64" "f64") ")")
+          conj? (str " (param $item "
+                     (if (= :i64 element-type) "i64" "f64") ")"))
+        plan-result
+        (cond
+          drop?
+          (str
+           "    local.get $amount local.get $len i64.extend_i32_u i64.gt_u"
+           " if unreachable end\n"
+           "    local.get $len local.get $amount i32.wrap_i64 i32.sub"
+           " local.set $new-len\n"
+           "    local.get $ptr local.get $amount i32.wrap_i64 i32.const 3"
+           " i32.shl i32.add local.set $source\n")
+
+          assoc?
+          (str
+           "    local.get $index local.get $len i64.extend_i32_u i64.ge_u"
+           " if unreachable end\n"
+           "    local.get $len local.set $new-len\n"
+           "    local.get $ptr local.set $source\n")
+
+          conj?
+          (str
+           "    local.get $len i32.const " item-limit
+           " i32.ge_u if unreachable end\n"
+           "    local.get $len i32.const 1 i32.add local.set $new-len\n"
+           "    local.get $ptr local.set $source\n"))
+        item-store
+        (cond
+          assoc?
+          (str
+           "    local.get $out local.get $index i32.wrap_i64 i32.const 3"
+           " i32.shl i32.add local.get $item "
+           (if (= :i64 element-type) "i64.store" "f64.store") "\n")
+
+          conj?
+          (str
+           "    local.get $out local.get $len i32.const 3 i32.shl i32.add"
+           " local.get $item "
+           (if (= :i64 element-type) "i64.store" "f64.store") "\n"))]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const 8))\n"
+     (bounded-bump-realloc-wat capacity)
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $ptr i32) (param $len i32)" extra-params " (result i32)\n"
+     "    (local $input-bytes i32) (local $input-end i32)\n"
+     "    (local $new-len i32) (local $new-bytes i32)\n"
+     "    (local $source i32) (local $out i32) (local $ret i32)\n"
+     "    local.get $len i32.const " item-limit " i32.gt_u if unreachable end\n"
+     "    local.get $ptr i32.const 7 i32.and if unreachable end\n"
+     "    local.get $len i32.const 3 i32.shl local.set $input-bytes\n"
+     "    local.get $ptr local.get $input-bytes i32.add local.tee $input-end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $input-end i32.const " capacity " i32.gt_u if unreachable end\n"
+     plan-result
+     "    local.get $new-len i32.const 3 i32.shl local.set $new-bytes\n"
+     "    i32.const 0 i32.const 0 i32.const 8 local.get $new-bytes\n"
+     "    call $realloc local.set $out\n"
+     "    local.get $out local.get $source local.get "
+     (if conj? "$input-bytes" "$new-bytes") " memory.copy\n"
+     item-store
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8\n"
+     "    call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $new-len i32.store offset=4\n"
      "    local.get $ret)\n"
      "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
      "    i32.const 8 global.set $next)\n"
@@ -3633,6 +3775,10 @@
     :vector-i64-literal
     (wasm-tools/parse-wat
      (vector-i64-literal-wat (first (exported-functions kir))))
+    :owned-vector-transform
+    (let [function (first (exported-functions kir))]
+      (wasm-tools/parse-wat
+       (owned-vector-transform-wat function (owned-vector-transform function))))
     :scalar-record-identity
     (wasm-tools/parse-wat
      (scalar-record-wat (first (exported-functions kir)) (:schemas kir)))
