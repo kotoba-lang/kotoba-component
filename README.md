@@ -59,6 +59,15 @@ scalar helpers, fuel global, and capability calls remain in one core module,
 so composition does not introduce a second expression compiler or ambient
 WASI authority.
 
+A direct named capability may also transport one bounded structural
+`option`/`result` unchanged. Its leaves may be scalars, strings/keywords,
+`list<s64>`/`list<f64>`, or nested structural unions. Both application and
+provider use the same recursive Canonical ABI layout, validate the selected
+case and every active indirect bound, and allocate from a bounded arena sized
+for the widest possible active payload. Nominal records remain on the
+schema-aware variant path; unsupported aggregate shapes fail closed instead
+of falling back to an ambient host ABI.
+
 Selected string/keyword leaves may feed `string-byte-length` without becoming
 host objects. The shared core emitter consumes their Canonical `(ptr,len)`
 slots and checks the declared byte bound, unsigned end-pointer overflow, and

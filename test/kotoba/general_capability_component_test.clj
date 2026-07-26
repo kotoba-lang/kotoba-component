@@ -9,11 +9,15 @@
 
   `typed-cap-call` is a KIR form, not source syntax, so these fixtures build
   KIR directly -- the same way `component-artifact-test` does."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [clojure.java.shell :as shell]
+            [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
             [kotoba.component.artifact :as artifact]
+            [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
-            [kotoba.component.wit :as wit]))
+            [kotoba.component.wit :as wit])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
 
 ;; clock/now, id 7 in the component-model contract: interface "clock",
 ;; function "now".
@@ -160,6 +164,126 @@
          clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
          (component-core/assert-supported! unsupported))
         "a non-scalar capability cannot fall back to a generic ambient import")))
+
+(deftest structural-union-capability-transports-bounded-lists
+  (let [descriptor [:option :vector-i64]
+        kir {:format :kotoba.kir/v4
+             :exports ['echo]
+             :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'echo
+               :params ['request]
+               :param-types [descriptor]
+               :result descriptor
+               :effects #{:clock/read}
+               :body (list 'typed-cap-call clock-now
+                           descriptor descriptor 'request)}]}
+        world (wit/emit kir)
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir world)
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor)
+        closed (composition/compose-closed application [provider])
+        path (Files/createTempFile
+              "kotoba-aggregate-capability-list-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-capability-call
+             (component-core/assert-supported! kir)))
+      (is (= [:clock/now] (:imports application)))
+      (doseq [[invoke expected]
+              [["echo(none)" "none"]
+               ["echo(some([]))" "some([])"]
+               ["echo(some([1, -2, 3]))" "some([1, -2, 3])"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke"
+                            invoke (str path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest structural-union-capability-transports-nested-indirect-values
+  (let [descriptor [:result [:option :vector-f64] :string]
+        kir {:format :kotoba.kir/v4
+             :exports ['echo]
+             :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'echo
+               :params ['request]
+               :param-types [descriptor]
+               :result descriptor
+               :effects #{:clock/read}
+               :body (list 'typed-cap-call clock-now
+                           descriptor descriptor 'request)}]}
+        world (wit/emit kir)
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir world)
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor)
+        closed (composition/compose-closed application [provider])
+        path (Files/createTempFile
+              "kotoba-aggregate-capability-nested-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (doseq [[invoke expected]
+              [["echo(ok(none))" "ok(none)"]
+               ["echo(ok(some([1.5, -2.25])))" "ok(some([1.5, -2.25]))"]
+               ["echo(err(\"denied\"))" "err(\"denied\")"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke"
+                            invoke (str path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest structural-union-capability-transports-maximum-list
+  (let [descriptor [:option :vector-i64]
+        kir {:format :kotoba.kir/v4
+             :exports ['echo]
+             :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'echo
+               :params ['request]
+               :param-types [descriptor]
+               :result descriptor
+               :effects #{:clock/read}
+               :body (list 'typed-cap-call clock-now
+                           descriptor descriptor 'request)}]}
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir (wit/emit kir))
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor)
+        closed (composition/compose-closed application [provider])
+        path (Files/createTempFile
+              "kotoba-aggregate-capability-max-list-" ".wasm"
+              (make-array FileAttribute 0))
+        values (str/join "," (repeat 16384 "0"))
+        invoke (str "echo(some([" values "]))")]
+    (try
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run (shell/sh "wasmtime" "run" "--invoke" invoke (str path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= (str "some([" values "])")
+               (str/replace (str/trim (:out run)) " " ""))))
+      (finally
+        (Files/deleteIfExists path)))))
 
 (deftest declared-fuel-still-reaches-a-capability-component
   ;; The new lowering goes through the real backend, so it must keep the
