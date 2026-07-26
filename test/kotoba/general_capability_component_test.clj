@@ -348,6 +348,86 @@
         (finally
           (Files/deleteIfExists path))))))
 
+(deftest structural-string-like-match-calls-a-named-capability
+  (doseq [[descriptor body calls]
+          (for [leaf [:string :keyword]
+                kind [:option :result]
+                :let [descriptor (if (= kind :option)
+                                   [:option leaf]
+                                   [:result leaf leaf])
+                      inner
+                      (fn [constructor binder]
+                        (if (= kind :option)
+                          (list 'option-match descriptor
+                                (list 'typed-cap-call
+                                      clock-now descriptor descriptor
+                                      (list constructor descriptor binder))
+                                9 'returned
+                                (list 'string-byte-length 'returned))
+                          (list 'result-match-of descriptor
+                                (list 'typed-cap-call
+                                      clock-now descriptor descriptor
+                                      (list constructor descriptor binder))
+                                'returned-ok
+                                (list 'string-byte-length 'returned-ok)
+                                'returned-err
+                                (list 'string-byte-length 'returned-err))))
+                      body (if (= kind :option)
+                             (list 'option-match descriptor 'value 9 'selected
+                                   (inner 'option-some-of 'selected))
+                             (list 'result-match-of descriptor 'value
+                                   'selected-ok
+                                   (inner 'result-ok-of 'selected-ok)
+                                   'selected-err
+                                   (inner 'result-err-of 'selected-err)))
+                      calls (if (= kind :option)
+                              [["choose(none)" "9"]
+                               ["choose(some(\"安全\"))" "6"]]
+                              [["choose(ok(\"安全\"))" "6"]
+                               ["choose(err(\"abc\"))" "3"]])]]
+            [descriptor body calls])]
+    (let [kir {:format :kotoba.kir/v4
+               :exports ['choose 'echo]
+               :schemas {}
+               :effects #{:clock/read}
+               :functions
+               [{:name 'choose
+                 :params ['value]
+                 :param-types [descriptor]
+                 :result :i64
+                 :effects #{:clock/read}
+                 :body body}
+                {:name 'echo
+                 :params ['value]
+                 :param-types [:i64]
+                 :result :i64
+                 :effects #{}
+                 :body 'value}]}
+          application
+          (artifact/package
+           (component-core/emit kir :wasm32-wasi-kotoba-v1)
+           kir (wit/emit kir))
+          provider
+          (composition/package-structural-union-identity-provider
+           :clock/now descriptor)
+          closed (composition/compose-closed application [provider])
+          path (Files/createTempFile
+                "kotoba-string-like-match-capability-" ".wasm"
+                (make-array FileAttribute 0))]
+      (try
+        (Files/write path ^bytes (:bytes closed)
+                     (make-array java.nio.file.OpenOption 0))
+        (is (= :structural-union-match-module
+               (component-core/assert-supported! kir)))
+        (is (= [:clock/now] (:imports application)))
+        (doseq [[invoke expected] calls]
+          (let [run (shell/sh "wasmtime" "run" "--invoke"
+                              invoke (str path))]
+            (is (zero? (:exit run)) (:err run))
+            (is (= expected (str/trim (:out run))) invoke)))
+        (finally
+          (Files/deleteIfExists path))))))
+
 (deftest structural-union-capability-transports-bounded-lists
   (let [descriptor [:option :vector-i64]
         kir {:format :kotoba.kir/v4
