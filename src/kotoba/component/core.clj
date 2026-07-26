@@ -520,9 +520,46 @@
                                   [:list :i64] [:list :f64]}
                                 leaf-descriptor)
                      (valid? fallback))))))
+          (result-list-capability-count? [node]
+            (when (and (seq? node)
+                       (= 7 (count node))
+                       (= 'result-match-of (first node)))
+              (let [[_ descriptor call ok-binder ok-body
+                     err-binder err-body] node
+                    leaf-descriptor
+                    (:descriptor (get leaves-by-path []))
+                    count-op
+                    (if (contains? #{:vector-f64 [:list :f64]}
+                                   leaf-descriptor)
+                      'vector-f64-count
+                      'vector-count)]
+                (and (vector? descriptor)
+                     (= :result (first descriptor))
+                     (= (second descriptor) (nth descriptor 2))
+                     (contains? #{:vector-i64 :vector-f64
+                                  [:list :i64] [:list :f64]}
+                                leaf-descriptor)
+                     (= leaf-descriptor (second descriptor))
+                     (seq? call)
+                     (= 5 (count call))
+                     (= 'typed-cap-call (first call))
+                     (let [[_ _ request-type result-type request] call]
+                       (and (= request-type descriptor)
+                            (= result-type descriptor)
+                            (seq? request)
+                            (= 3 (count request))
+                            (contains? #{'result-ok-of 'result-err-of}
+                                       (first request))
+                            (= descriptor (second request))
+                            (= binder (nth request 2))))
+                     (symbol? ok-binder)
+                     (symbol? err-binder)
+                     (= ok-body (list count-op ok-binder))
+                     (= err-body (list count-op err-binder))))))
           (valid? [node]
             (cond
               (option-list-capability-count? node) true
+              (result-list-capability-count? node) true
 
               (= node binder) scalar?
 
@@ -883,11 +920,59 @@
                                 (:alignment request-leaf)
                                 (:size result-layout)
                                 (:payload-offset result-layout))))))))))
+          (result-list-capability-count [node]
+            (when (and (seq? node)
+                       (= 7 (count node))
+                       (= 'result-match-of (first node)))
+              (let [[_ descriptor call ok-binder ok-body
+                     err-binder err-body] node]
+                (when (and (vector? descriptor)
+                           (= :result (first descriptor))
+                           (= (second descriptor) (nth descriptor 2))
+                           (seq? call)
+                           (= 5 (count call))
+                           (= 'typed-cap-call (first call)))
+                  (let [[_ capability-id request-type result-type request] call]
+                    (when (and (= request-type descriptor)
+                               (= result-type descriptor)
+                               (seq? request)
+                               (= 3 (count request))
+                               (contains? #{'result-ok-of 'result-err-of}
+                                          (first request)))
+                      (let [[constructor constructor-type request-value] request
+                            request-leaf (get replacements [])
+                            result-layout (canonical/layout descriptor {})
+                            count-op
+                            (if (contains? #{:vector-f64 [:list :f64]}
+                                           (second descriptor))
+                              'vector-f64-count
+                              'vector-count)]
+                        (when (and (= constructor-type descriptor)
+                                   (= request-value binder)
+                                   (symbol? ok-binder)
+                                   (symbol? err-binder)
+                                   (= ok-body (list count-op ok-binder))
+                                   (= err-body (list count-op err-binder))
+                                   (:indirect-list? request-leaf))
+                          (list 'component-result-list-capability-count
+                                capability-id
+                                (if (= constructor 'result-ok-of) 0 1)
+                                (:pointer request-leaf)
+                                (:count request-leaf)
+                                (:max-items request-leaf)
+                                (:stride request-leaf)
+                                (:alignment request-leaf)
+                                (:size result-layout)
+                                (:payload-offset result-layout))))))))))
           (rewrite [node]
             (cond
               (and (seq? node)
                    (option-list-capability-count node))
               (option-list-capability-count node)
+
+              (and (seq? node)
+                   (result-list-capability-count node))
+              (result-list-capability-count node)
 
               (and (seq? node)
                    (= 'string-byte-length (first node))
@@ -1153,7 +1238,11 @@
                 (and (contains? #{[:option :vector-i64]
                                   [:option :vector-f64]
                                   [:option [:list :i64]]
-                                  [:option [:list :f64]]}
+                                  [:option [:list :f64]]
+                                  [:result :vector-i64 :vector-i64]
+                                  [:result :vector-f64 :vector-f64]
+                                  [:result [:list :i64] [:list :i64]]
+                                  [:result [:list :f64] [:list :f64]]}
                                 request-type)
                      (= result-type request-type))
                 {:id id
