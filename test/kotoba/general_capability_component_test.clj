@@ -11,7 +11,9 @@
   KIR directly -- the same way `component-artifact-test` does."
   (:require [clojure.test :refer [deftest is testing]]
             [clojure.string :as str]
-            [kotoba.component.core :as component-core]))
+            [kotoba.component.artifact :as artifact]
+            [kotoba.component.core :as component-core]
+            [kotoba.component.wit :as wit]))
 
 ;; clock/now, id 7 in the component-model contract: interface "clock",
 ;; function "now".
@@ -41,6 +43,26 @@
    :schemas {}
    :functions [{:name 'measure :params ['request] :param-types [:i64] :result :i64
                 :body (list 'typed-cap-call clock-now :i64 :i64 'request)}]})
+
+(def ^:private union-match-capability-kir
+  {:format :kotoba.kir/v4
+   :exports ['choose 'echo]
+   :schemas {}
+   :effects #{:clock/read}
+   :functions
+   [{:name 'choose
+     :params ['value 'fallback]
+     :param-types [[:option :i64] :i64]
+     :result :i64
+     :effects #{:clock/read}
+     :body (list 'option-match [:option :i64] 'value 'fallback 'item
+                 (list 'typed-cap-call clock-now :i64 :i64 'item))}
+    {:name 'echo
+     :params ['value]
+     :param-types [:i64]
+     :result :i64
+     :effects #{}
+     :body 'value}]})
 
 (deftest multi-function-capability-program-is-admitted
   (testing "the general lowering claims a shape the allowlist never covered"
@@ -105,6 +127,39 @@
         text (String. (byte-array (map unchecked-byte bytes)) "ISO-8859-1")]
     (is (str/includes? text "cm32p2|kotoba:application/clock@1")
         "a bound capability must reach the typed import")))
+
+(deftest structural-union-match-module-composes-with-a-named-capability
+  (let [world (wit/emit union-match-capability-kir)
+        imports (component-core/scalar-capability-imports
+                 union-match-capability-kir)
+        core (component-core/emit
+              union-match-capability-kir :wasm32-wasi-kotoba-v1)
+        component (artifact/package core union-match-capability-kir world)
+        text (String. (byte-array (map unchecked-byte core)) "ISO-8859-1")]
+    (is (= :structural-union-match-module
+           (component-core/assert-supported! union-match-capability-kir)))
+    (is (= [{:id clock-now
+             :module "cm32p2|kotoba:application/clock@1"
+             :field "now"
+             :type [0x60 1 0x7e 1 0x7e]}]
+           imports))
+    (is (str/includes? text "cm32p2|kotoba:application/clock@1"))
+    (is (not (str/includes? text (str "kotoba:typed" (char 8) "cap-call"))))
+    (is (= [:clock/now] (:imports world)))
+    (is (= :structural-union-match-module (:canonical-lowering component)))
+    (is (= [:clock/now] (:imports component))))
+  (let [unsupported
+        (-> union-match-capability-kir
+            (assoc :effects #{:unsupported/read})
+            (assoc-in [:functions 0 :body]
+                      (list 'option-match [:option :i64]
+                            'value 'fallback 'item
+                            (list 'typed-cap-call clock-now
+                                  :string :i64 'item))))]
+    (is (thrown-with-msg?
+         clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
+         (component-core/assert-supported! unsupported))
+        "a non-scalar capability cannot fall back to a generic ambient import")))
 
 (deftest declared-fuel-still-reaches-a-capability-component
   ;; The new lowering goes through the real backend, so it must keep the

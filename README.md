@@ -52,6 +52,13 @@ leaf in the selected case is validated even when the branch does not read it;
 inactive joined slots are never interpreted. Branch expressions still use the
 shared typed core-Wasm emitter rather than a Component-specific compiler.
 
+Those match modules may also call scalar named capabilities. Every
+`typed-cap-call` must resolve to an explicit standard32 WIT import; canonical
+adapters never fall back to the generic host ABI. The match adapter, ordinary
+scalar helpers, fuel global, and capability calls remain in one core module,
+so composition does not introduce a second expression compiler or ambient
+WASI authority.
+
 ## Test
 
 ```bash
