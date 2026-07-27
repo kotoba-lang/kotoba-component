@@ -1455,17 +1455,31 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+(defn- provider-capabilities
+  "Expand a provider artifact to the capability names it can close.
+  Dual-export providers (log, ui, object-write, http-ingress, …) list all
+  exports under `:capabilities`; single-export providers only set
+  `:capability`. Either form is accepted."
+  [provider]
+  (or (seq (:capabilities provider))
+      (when-let [c (:capability provider)] [c])
+      []))
+
 (defn compose-closed
   "Compose one application with provider definitions and reject any remaining
-  instance import. `wasm-tools compose --no-imports` is the closure gate."
+  instance import. `wac plug` is the closure gate.
+
+  Dual-export providers may close multiple application imports with one
+  artifact: application imports must be a subset of the expanded capability
+  set across providers (ADR 0111). Single-export exact match still holds."
   [application providers]
   (when-not (= :wasm-component/v1 (:format application))
     (reject "composition requires a compiler component artifact"
             {:format (:format application)}))
-  (let [required (frequencies (:imports application))
-        supplied (frequencies (map :capability providers))]
-    (when-not (= required supplied)
-      (reject "provider definitions do not exactly close application imports"
+  (let [required (set (:imports application))
+        supplied (set (mapcat provider-capabilities providers))]
+    (when-not (every? supplied required)
+      (reject "provider definitions do not close application imports"
               {:required required :supplied supplied})))
   (assert-wac-version!)
   (let [dir (Files/createTempDirectory "kotoba-compose-" (make-array FileAttribute 0))
@@ -1486,7 +1500,7 @@
       {:format :wasm-component-closed/v1
        :bytes (Files/readAllBytes output)
        :application-imports (:imports application)
-       :providers (mapv #(select-keys % [:capability :descriptor]) providers)}
+       :providers (mapv #(select-keys % [:capability :capabilities :descriptor]) providers)}
       (finally
         (doseq [path (concat [output app] definitions)] (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
