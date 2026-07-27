@@ -29,6 +29,7 @@
                                   ;; it may carry WIT imports too.
                                   :scalar-with-capabilities
                                   :scalar-literal-capability-call
+                                  :string-literal-unit-capability-call
                                   :vector-i64-identity
                                   :vector-i64-literal}
                                 lowering)))

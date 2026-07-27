@@ -43,6 +43,24 @@
     (is (= [0 97 115 109 13 0 1 0]
            (mapv #(bit-and (int %) 0xff) (take 8 (:bytes packaged)))))))
 
+(deftest typed-v03-log-append-lowers-bytes-request-and-unit-result
+  (let [kir {:format :kotoba.kir/v4
+             :exports ['main]
+             :schemas {}
+             :effects #{[:cap/call 6]}
+             :functions [{:name 'main :params [] :param-types []
+                          :result :i64 :effects #{[:cap/call 6]}
+                          :body '(typed-cap-call 6 :string :i64 "安全")}]}
+        opts {:typed-capability-v3? true}
+        wit (wit/emit kir opts)
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1 opts)
+        packaged (artifact/package core-bytes kir wit)]
+    (is (= ["aiueos-log-append"] (:imports wit)))
+    (is (= :string-literal-unit-capability-call
+           (:canonical-lowering packaged)))
+    (is (= :wasm-component-kotoba-v2 (:target packaged)))
+    (is (pos? (alength ^bytes (:bytes packaged))))))
+
 (def multi-match-kir
   {:format :kotoba.kir/v4
    :exports ['choose-option 'choose-result 'negate]
