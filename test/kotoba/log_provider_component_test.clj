@@ -1,6 +1,6 @@
 (ns kotoba.log-provider-component-test
   "W5 third slice: real log-v1 dual-export wasm component provider.
-   Multi-step Wasmtime append and append+read sequences driver (ADR 0102 deepen)."
+   Multi-step Wasmtime: append, append+read, and ring-overflow oldest-drop walks."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
@@ -392,5 +392,119 @@
       (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
         (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
         (is (= "1" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+
+(defn- log-ring-overflow-sequence-driver-wit
+  "Same dual-import WIT as append+read; ring overflow walk."
+  []
+  (log-append-read-sequence-driver-wit))
+
+(defn- log-ring-overflow-sequence-driver-wat
+  "Append capacity+1 times on a ring of size 2, then read after-sequence 0.
+  After 3 appends with capacity 2: sequences 1 dropped, oldest=2, latest=3.
+  Return oldest-sequence (offset 0 of read result) as s64 → 2.
+  Closes ADR 0111 deferred ring-buffer oldest-drop multi-step."
+  []
+  (let [mod "cm32p2|kotoba:application/log@1"
+        export-run "cm32p2||run"
+        level-bytes (vec (.getBytes "info" "UTF-8"))
+        event-bytes (vec (.getBytes "boot" "UTF-8"))
+        msg-bytes (vec (.getBytes "hi" "UTF-8"))
+        level-ptr 8
+        event-ptr (+ level-ptr (count level-bytes))
+        msg-ptr (+ event-ptr (count event-bytes))
+        read-ret 256
+        push-append
+        (str
+         "    i32.const " level-ptr "\n"
+         "    i32.const " (count level-bytes) "\n"
+         "    i32.const " event-ptr "\n"
+         "    i32.const " (count event-bytes) "\n"
+         "    i32.const " msg-ptr "\n"
+         "    i32.const " (count msg-bytes) "\n"
+         "    i32.const 0\n"
+         "    i32.const 0\n"
+         "    call $append\n"
+         "    drop\n")]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"append\""
+     " (func $append (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)))\n"
+     "  (import \"" mod "\" \"read\""
+     " (func $read (param i64 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 512 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     ;; three appends; capacity-2 provider drops seq 1
+     push-append
+     push-append
+     push-append
+     "    i64.const 0\n"                 ;; after-sequence
+     "    i64.const 8\n"                 ;; limit
+     "    i32.const " read-ret "\n"
+     "    call $read\n"
+     ;; oldest-sequence at offset 0
+     "    i32.const " read-ret " i64.load offset=0)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " level-ptr ") \"" (wat-data level-bytes) "\")\n"
+     "  (data (i32.const " event-ptr ") \"" (wat-data event-bytes) "\")\n"
+     "  (data (i32.const " msg-ptr ") \"" (wat-data msg-bytes) "\")\n"
+     ")\n")))
+
+(defn- package-log-ring-overflow-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-log-ring-overflow-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (log-ring-overflow-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (log-ring-overflow-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:log/append :log/read]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest log-ring-overflow-sequence-driver-closes-and-wasmtime-returns-oldest-after-drop
+  "Multi-step deepen (ADR 0115): dual-export ring of capacity 2; three appends
+   then read; Wasmtime returns oldest-sequence 2 (seq 1 dropped)."
+  (let [d (log-v1-descriptors)
+        provider (composition/package-log-provider
+                  (:append-req d) (:append-res d)
+                  (:read-req d) (:read-res d)
+                  (:schemas d)
+                  2)
+        driver (package-log-ring-overflow-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-log-ring-overflow-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:log/append :log/read] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))))
       (finally
         (Files/deleteIfExists path)))))
