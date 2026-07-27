@@ -704,6 +704,38 @@
          (doseq [path [component embedded core world]] (Files/deleteIfExists path))
          (Files/deleteIfExists dir))))))
 
+(defn package-clock-provider
+  "Build a REAL (non-wiring-only) provider artifact for clock-v1's own
+  literal request/result shape, backed by
+  `kotoba.component.core/clock-provider-wat`. Reuses
+  `asymmetric-variant-wit` for the WIT text (same package/world/interface
+  shape as ADR 0058/0059/0060). Synthetic wall/monotonic sources and a
+  real observation-sequence live inside the core module; this is wasm
+  qualification for the ABI + sequence semantics, not production host-time
+  (see ADR 0073 for the CLJ/CLJS transport path)."
+  [capability-name request-descriptor result-descriptor schemas]
+  (let [entry (capability capability-name)
+        wit (asymmetric-variant-wit entry request-descriptor result-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-clock-provider-" (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit") core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm") component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat
+                         (component-core/clock-provider-wat
+                          entry request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
+                                "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1 :capability capability-name
+       :descriptor request-descriptor :result-descriptor result-descriptor
+       :schemas schemas :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]] (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn compose-closed
   "Compose one application with provider definitions and reject any remaining
   instance import. `wasm-tools compose --no-imports` is the closure gate."
