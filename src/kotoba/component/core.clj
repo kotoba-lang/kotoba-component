@@ -303,6 +303,10 @@
               (and (fixed? (second value) seen)
                    (fixed? (nth value 2) seen))
 
+              (and (vector? value) (= :list (first value))
+                   (= 2 (count value)))
+              (fixed? (second value) seen)
+
               (and (vector? value)
                    (contains? #{:ref :record} (first value)))
               (let [identity (second value)
@@ -2619,6 +2623,10 @@
               (:max-bytes layout)
               [{:kind :indirect :offset base :max-bytes (:max-bytes layout)}]
 
+              (:max-items layout)
+              (cons {:kind :list :offset base}
+                    (walk (:item-layout layout) base))
+
               (contains? layout :fields)
               (mapcat (fn [{:keys [offset layout]}]
                         (walk layout (+ base offset)))
@@ -2630,14 +2638,90 @@
               :else []))]
     (vec (walk item-layout 0))))
 
+(defn- nested-list-locals-wat []
+  (apply str
+         (for [depth (range 1 (inc value/adt-depth-limit))]
+           (str " (local $list-pointer-" depth " i32)"
+                " (local $list-length-" depth " i32)"
+                " (local $list-index-" depth " i32)"
+                " (local $item-base-" depth " i32)"))))
+
+(defn- layout-contains-list?
+  [layout]
+  (cond
+    (:max-items layout) true
+    (contains? layout :fields)
+    (boolean (some #(layout-contains-list? (:layout %)) (:fields layout)))
+    (contains? layout :cases)
+    (boolean (some #(layout-contains-list? (:layout %)) (:cases layout)))
+    :else false))
+
+(defn- layout-needs-list-item-validation?
+  [layout]
+  (cond
+    (:max-items layout)
+    (boolean (seq (bounded-list-item-leaves (:item-layout layout))))
+    (contains? layout :fields)
+    (boolean
+     (some #(layout-needs-list-item-validation? (:layout %)) (:fields layout)))
+    (contains? layout :cases)
+    (boolean
+     (some #(layout-needs-list-item-validation? (:layout %)) (:cases layout)))
+    :else false))
+
 (defn- memory-layout-validation
   "WAT that validates one Canonical value already stored at BASE. Unlike the
   flat-param validator, this is used for list items and therefore reads the
   item's in-memory discriminant before visiting only its active union case."
-  [layout base capacity]
+  [layout base capacity initial-depth]
   (letfn [(at [expr offset]
             (if (zero? offset) expr (str expr " i32.const " offset " i32.add")))
-          (validate [node address]
+          (validate-list [node address depth]
+            (let [suffix (str depth)
+                  pointer (str "$list-pointer-" suffix)
+                  length (str "$list-length-" suffix)
+                  index (str "$list-index-" suffix)
+                  item-base (str "$item-base-" suffix)
+                  done (str "$list-done-" suffix)
+                  loop-label (str "$list-loop-" suffix)
+                  item-layout (:item-layout node)
+                  stride (align-up (:size item-layout) (:alignment item-layout))]
+              (str
+               "          " address " i32.load local.set " pointer "\n"
+               "          " address " i32.load offset=4 local.tee " length
+               " i32.const " (:max-items node) " i32.gt_u if unreachable end\n"
+               "          local.get $list-total local.get " length " i32.add\n"
+               "          local.tee $list-total local.get " length
+               " i32.lt_u if unreachable end\n"
+               "          local.get $list-total i32.const "
+               value/canonical-list-total-item-limit
+               " i32.gt_u if unreachable end\n"
+               "          local.get " length " i32.eqz if else\n"
+               "            local.get " pointer " i32.const "
+               (:alignment item-layout)
+               " i32.const 1 i32.sub i32.and if unreachable end\n"
+               "            local.get " pointer " i32.const 8 i32.lt_u if unreachable end\n"
+               "          end\n"
+               "          local.get " pointer " local.get " length
+               " i32.const " stride " i32.mul i32.add\n"
+               "          local.tee $end local.get " pointer
+               " i32.lt_u if unreachable end\n"
+               "          local.get $end i32.const " capacity
+               " i32.gt_u if unreachable end\n"
+               "          i32.const 0 local.set " index "\n"
+               "          block " done "\n"
+               "            loop " loop-label "\n"
+               "              local.get " index " local.get " length
+               " i32.ge_u br_if " done "\n"
+               "              local.get " pointer " local.get " index
+               " i32.const " stride " i32.mul i32.add local.set " item-base "\n"
+               (validate item-layout (str "local.get " item-base) (inc depth))
+               "              local.get " index
+               " i32.const 1 i32.add local.set " index "\n"
+               "              br " loop-label "\n"
+               "            end\n"
+               "          end\n")))
+          (validate [node address depth]
             (cond
               (empty? (:flat node))
               ""
@@ -2662,10 +2746,13 @@
                value/canonical-indirect-byte-limit
                " i32.gt_u if unreachable end\n")
 
+              (:max-items node)
+              (validate-list node address depth)
+
               (contains? node :fields)
               (apply str
                      (map (fn [{:keys [offset layout]}]
-                            (validate layout (at address offset)))
+                            (validate layout (at address offset) depth))
                           (:fields node)))
 
               (contains? node :cases)
@@ -2677,13 +2764,13 @@
                  "          " address " " disc-load
                  " local.tee $item-disc i32.const " (count cases)
                  " i32.ge_u if unreachable end\n"
-                 (case-chain cases payload-address)))
+                 (case-chain cases payload-address depth)))
 
               :else ""))
-          (case-chain [cases payload-address]
+          (case-chain [cases payload-address depth]
             (letfn [(build [remaining index]
                       (let [body (validate (:layout (first remaining))
-                                           payload-address)]
+                                           payload-address depth)]
                         (if (= 1 (count remaining))
                           body
                           (str
@@ -2693,7 +2780,7 @@
                            "          else\n" (build (rest remaining) (inc index))
                            "          end\n"))))]
               (build cases 0)))]
-    (validate layout base)))
+    (validate layout base initial-depth)))
 
 (defn- bounded-list-item-validation
   "Validate every active leaf in every active list item.
@@ -2703,7 +2790,7 @@
   [pointer length item-layout capacity]
   (let [stride (align-up (:size item-layout) (:alignment item-layout))
         validation (memory-layout-validation
-                    item-layout "local.get $item-base" capacity)]
+                    item-layout "local.get $item-base" capacity 1)]
     (when (seq validation)
       (str
        "      i32.const 0 local.set $list-index\n"
@@ -2765,6 +2852,12 @@
                                           (:alignment item-layout))]
                      (str
                       "      " length " i32.const " (:max-items leaf)
+                      " i32.gt_u if unreachable end\n"
+                      "      local.get $list-total " length " i32.add\n"
+                      "      local.tee $list-total " length
+                      " i32.lt_u if unreachable end\n"
+                      "      local.get $list-total i32.const "
+                      value/canonical-list-total-item-limit
                       " i32.gt_u if unreachable end\n"
                       "      " length " i32.eqz if else\n"
                       "        " pointer " i32.const " (:alignment item-layout)
@@ -2917,15 +3010,24 @@
   (cond
     (:max-bytes layout) (:max-bytes layout)
     (:max-items layout)
-    (let [item-layout (:item-layout layout)
-          item-buffer-bytes
-          (* (:max-items layout)
-             (align-up (:size item-layout) (:alignment item-layout)))
+    (letfn [(list-buffers [node]
+              (cond
+                (:max-items node)
+                (+ (* value/canonical-list-total-item-limit
+                      (align-up (get-in node [:item-layout :size])
+                                (get-in node [:item-layout :alignment])))
+                   (list-buffers (:item-layout node)))
+                (contains? node :fields)
+                (reduce + 0 (map #(list-buffers (:layout %)) (:fields node)))
+                (contains? node :cases)
+                (reduce max 0 (map #(list-buffers (:layout %)) (:cases node)))
+                :else 0))]
+      (let [item-layout (:item-layout layout)
           indirect-item?
           (some #(= :indirect (:kind %))
                 (bounded-list-item-leaves item-layout))]
-      (+ item-buffer-bytes
-         (if indirect-item? value/canonical-indirect-byte-limit 0)))
+        (+ (list-buffers layout)
+           (if indirect-item? value/canonical-indirect-byte-limit 0))))
     (contains? layout :fields)
     (reduce + 0 (map #(variant-layout-indirect-headroom (:layout %))
                      (:fields layout)))
@@ -2973,14 +3075,15 @@
          (map #(variant-layout-indirect-headroom (:layout %))
               (:cases variant-layout)))
         needs-indirect-headroom? (pos? indirect-headroom)
+        needs-list-validation?
+        (boolean
+         (some (fn [{:keys [layout]}]
+                 (layout-contains-list? layout))
+               (:cases variant-layout)))
         needs-list-item-validation?
         (boolean
          (some (fn [{:keys [layout]}]
-                 (some (fn [leaf]
-                         (and (:max-items leaf)
-                              (seq (bounded-list-item-leaves
-                                    (:item-layout leaf)))))
-                       (variant-case-leaves layout)))
+                 (layout-needs-list-item-validation? layout))
                (:cases variant-layout)))
         pages (max 1 (quot (+ 8 indirect-headroom
                               (:size variant-layout) 65535)
@@ -3025,10 +3128,14 @@
      (when needs-list-item-validation?
        (str " (local $list-index i32) (local $item-base i32)"
             " (local $item-pointer i32) (local $item-length i32)"
-            " (local $item-disc i32)"))
+            " (local $item-disc i32)"
+            (nested-list-locals-wat)))
+     (when needs-list-validation? " (local $list-total i32)")
      "\n"
      (when needs-indirect-headroom?
        "    i32.const 0 local.set $indirect-total\n")
+     (when needs-list-validation?
+       "    i32.const 0 local.set $list-total\n")
      "    local.get $disc i32.const " (count (:cases variant-layout)) " i32.ge_u if unreachable end\n"
      "    i32.const 0 i32.const 0 i32.const " (:alignment variant-layout)
      " i32.const " (:size variant-layout) " call $realloc local.set $ret\n"
@@ -3854,14 +3961,15 @@
         variant-layout (canonical/layout descriptor schemas)
         joined-types (vec (rest (:flat variant-layout)))
         [pages capacity needs-indirect-headroom?] (variant-capability-indirect-headroom variant-layout)
+        needs-list-validation?
+        (boolean
+         (some (fn [{:keys [layout]}]
+                 (layout-contains-list? layout))
+               (:cases variant-layout)))
         needs-list-item-validation?
         (boolean
          (some (fn [{:keys [layout]}]
-                 (some (fn [leaf]
-                         (and (:max-items leaf)
-                              (seq (bounded-list-item-leaves
-                                    (:item-layout leaf)))))
-                       (variant-case-leaves layout)))
+                 (layout-needs-list-item-validation? layout))
                (:cases variant-layout)))
         params (apply str
                       (cons " (param $disc i32)"
@@ -3884,10 +3992,14 @@
      (when needs-list-item-validation?
        (str " (local $list-index i32) (local $item-base i32)"
             " (local $item-pointer i32) (local $item-length i32)"
-            " (local $item-disc i32)"))
+            " (local $item-disc i32)"
+            (nested-list-locals-wat)))
+     (when needs-list-validation? " (local $list-total i32)")
      "\n"
      (when needs-indirect-headroom?
        "    i32.const 0 local.set $indirect-total\n")
+     (when needs-list-validation?
+       "    i32.const 0 local.set $list-total\n")
      "    i32.const 0 i32.const 0 i32.const " (:alignment variant-layout)
      " i32.const " (:size variant-layout) " call $realloc local.set $ret\n"
      "    local.get $disc i32.const " (count (:cases variant-layout)) " i32.ge_u if unreachable end\n"
