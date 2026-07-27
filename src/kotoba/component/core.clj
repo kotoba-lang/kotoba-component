@@ -285,13 +285,13 @@
          schema
          (canonical/layout descriptor schemas))))
 
-(defn- fixed-list-item-descriptor?
-  "True for one fixed-size list item admitted by the recursive item codec:
-  a Canonical scalar or a finite record containing only those scalars."
+(defn- bounded-list-item-descriptor?
+  "True for one list item admitted by the recursive item codec: a Canonical
+  scalar/string/keyword or a finite record containing only those leaves."
   [descriptor schemas]
   (letfn [(fixed? [value seen]
             (cond
-              (contains? #{:i64 :f32 :f64 :bool} value)
+              (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
               true
 
               (and (vector? value)
@@ -336,7 +336,7 @@
                       (and (vector? value)
                            (= :list (first value))
                            (= 2 (count value)))
-                      (fixed-list-item-descriptor? (second value) schemas)
+                      (bounded-list-item-descriptor? (second value) schemas)
 
                       (and (vector? value)
                            (= :option (first value))
@@ -1723,7 +1723,7 @@
 
             (and (vector? payload) (= :list (first payload))
                  (= 2 (count payload)))
-            (fixed-list-item-descriptor? (second payload) schemas)
+            (bounded-list-item-descriptor? (second payload) schemas)
 
             :else false))]
     (when (and (= 1 (count params))
@@ -2597,14 +2597,17 @@
   [(variant-flat-value-expr joined-types (:flat-index leaf) :i32)
    (variant-flat-value-expr joined-types (inc (:flat-index leaf)) :i32)])
 
-(defn- fixed-list-item-bool-offsets
-  "Absolute bool offsets inside one fixed-size list item.
-  Admission limits these item layouts to scalars and finite records, so this
-  walker never crosses another pointer-bearing or union boundary."
+(defn- bounded-list-item-leaves
+  "Absolute bool/string/keyword leaves inside one bounded list item."
   [item-layout]
   (letfn [(walk [layout base]
             (cond
-              (= :bool (:descriptor layout)) [base]
+              (= :bool (:descriptor layout))
+              [{:kind :bool :offset base}]
+
+              (:max-bytes layout)
+              [{:kind :indirect :offset base :max-bytes (:max-bytes layout)}]
+
               (contains? layout :fields)
               (mapcat (fn [{:keys [offset layout]}]
                         (walk layout (+ base offset)))
@@ -2612,14 +2615,15 @@
               :else []))]
     (vec (walk item-layout 0))))
 
-(defn- fixed-list-item-validation
-  "Validate every bool in every active fixed-size list item.
+(defn- bounded-list-item-validation
+  "Validate every bool and indirect string/keyword in every active list item.
   The enclosing list range/alignment checks run first. `$list-index` and
-  `$item-base` are function locals shared by sequential list validations."
-  [pointer length item-layout]
-  (let [bool-offsets (fixed-list-item-bool-offsets item-layout)
+  item scratch locals are shared by sequential list validations. All indirect
+  byte lengths also consume the shared canonical aggregate budget."
+  [pointer length item-layout capacity]
+  (let [leaves (bounded-list-item-leaves item-layout)
         stride (align-up (:size item-layout) (:alignment item-layout))]
-    (when (seq bool-offsets)
+    (when (seq leaves)
       (str
        "      i32.const 0 local.set $list-index\n"
        "      block $list-done\n"
@@ -2628,12 +2632,33 @@
        " i32.ge_u br_if $list-done\n"
        "          " pointer " local.get $list-index i32.const " stride
        " i32.mul i32.add local.set $item-base\n"
-       (apply str
-              (map (fn [offset]
-                     (str "          local.get $item-base i32.load8_u offset="
-                          offset
-                          " i32.const 1 i32.gt_u if unreachable end\n"))
-                   bool-offsets))
+       (apply
+        str
+        (map
+         (fn [{:keys [kind offset max-bytes]}]
+           (case kind
+             :bool
+             (str "          local.get $item-base i32.load8_u offset="
+                  offset " i32.const 1 i32.gt_u if unreachable end\n")
+
+             :indirect
+             (str
+              "          local.get $item-base i32.load offset=" offset
+              " local.set $item-pointer\n"
+              "          local.get $item-base i32.load offset=" (+ offset 4)
+              " local.tee $item-length i32.const " max-bytes
+              " i32.gt_u if unreachable end\n"
+              "          local.get $item-pointer local.get $item-length i32.add\n"
+              "          local.tee $end local.get $item-pointer i32.lt_u if unreachable end\n"
+              "          local.get $end i32.const " capacity
+              " i32.gt_u if unreachable end\n"
+              "          local.get $indirect-total local.get $item-length i32.add\n"
+              "          local.tee $indirect-total local.get $item-length"
+              " i32.lt_u if unreachable end\n"
+              "          local.get $indirect-total i32.const "
+              value/canonical-indirect-byte-limit
+              " i32.gt_u if unreachable end\n")))
+         leaves))
        "          local.get $list-index i32.const 1 i32.add local.set $list-index\n"
        "          br $list-loop\n"
        "        end\n"
@@ -2669,7 +2694,14 @@
                       " i32.gt_u if unreachable end\n"
                       "      " pointer " " length " i32.add\n"
                       "      local.tee $end " pointer " i32.lt_u if unreachable end\n"
-                      "      local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"))
+                      "      local.get $end i32.const " capacity
+                      " i32.gt_u if unreachable end\n"
+                      "      local.get $indirect-total " length " i32.add\n"
+                      "      local.tee $indirect-total " length
+                      " i32.lt_u if unreachable end\n"
+                      "      local.get $indirect-total i32.const "
+                      value/canonical-indirect-byte-limit
+                      " i32.gt_u if unreachable end\n"))
                    (:max-items leaf)
                    (let [[pointer length]
                          (variant-indirect-leaf-value-exprs joined-types leaf)
@@ -2689,7 +2721,8 @@
                       "      local.tee $end " pointer " i32.lt_u if unreachable end\n"
                       "      local.get $end i32.const " capacity
                       " i32.gt_u if unreachable end\n"
-                      (fixed-list-item-validation pointer length item-layout)))
+                      (bounded-list-item-validation
+                       pointer length item-layout capacity)))
                    (= :bool (:descriptor leaf))
                    (str "      " (variant-payload-value-expr joined-types leaf)
                         " i32.const 1 i32.gt_u if unreachable end\n")
@@ -2829,9 +2862,15 @@
   (cond
     (:max-bytes layout) (:max-bytes layout)
     (:max-items layout)
-    (* (:max-items layout)
-       (align-up (get-in layout [:item-layout :size])
-                 (get-in layout [:item-layout :alignment])))
+    (let [item-layout (:item-layout layout)
+          item-buffer-bytes
+          (* (:max-items layout)
+             (align-up (:size item-layout) (:alignment item-layout)))
+          indirect-item?
+          (some #(= :indirect (:kind %))
+                (bounded-list-item-leaves item-layout))]
+      (+ item-buffer-bytes
+         (if indirect-item? value/canonical-indirect-byte-limit 0)))
     (contains? layout :fields)
     (reduce + 0 (map #(variant-layout-indirect-headroom (:layout %))
                      (:fields layout)))
@@ -2884,7 +2923,7 @@
          (some (fn [{:keys [layout]}]
                  (some (fn [leaf]
                          (and (:max-items leaf)
-                              (seq (fixed-list-item-bool-offsets
+                              (seq (bounded-list-item-leaves
                                     (:item-layout leaf)))))
                        (variant-case-leaves layout)))
                (:cases variant-layout)))
@@ -2925,10 +2964,15 @@
      "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
      "    end local.get $ptr)\n"
      "  (func (export \"cm32p2||" export "\") (param $disc i32)" params " (result i32)\n"
-     "    (local $ret i32)" (when needs-indirect-headroom? " (local $end i32)")
+     "    (local $ret i32)"
+     (when needs-indirect-headroom?
+       " (local $end i32) (local $indirect-total i32)")
      (when needs-list-item-validation?
-       " (local $list-index i32) (local $item-base i32)")
+       (str " (local $list-index i32) (local $item-base i32)"
+            " (local $item-pointer i32) (local $item-length i32)"))
      "\n"
+     (when needs-indirect-headroom?
+       "    i32.const 0 local.set $indirect-total\n")
      "    local.get $disc i32.const " (count (:cases variant-layout)) " i32.ge_u if unreachable end\n"
      "    i32.const 0 i32.const 0 i32.const " (:alignment variant-layout)
      " i32.const " (:size variant-layout) " call $realloc local.set $ret\n"
@@ -3759,7 +3803,7 @@
          (some (fn [{:keys [layout]}]
                  (some (fn [leaf]
                          (and (:max-items leaf)
-                              (seq (fixed-list-item-bool-offsets
+                              (seq (bounded-list-item-leaves
                                     (:item-layout leaf)))))
                        (variant-case-leaves layout)))
                (:cases variant-layout)))
@@ -3778,10 +3822,15 @@
      "  (global $next (mut i32) (i32.const 8))\n"
      (bounded-bump-realloc-wat capacity)
      "  (func (export \"" export "\")" params " (result i32)\n"
-     "    (local $ret i32)" (when needs-indirect-headroom? " (local $end i32)")
+     "    (local $ret i32)"
+     (when needs-indirect-headroom?
+       " (local $end i32) (local $indirect-total i32)")
      (when needs-list-item-validation?
-       " (local $list-index i32) (local $item-base i32)")
+       (str " (local $list-index i32) (local $item-base i32)"
+            " (local $item-pointer i32) (local $item-length i32)"))
      "\n"
+     (when needs-indirect-headroom?
+       "    i32.const 0 local.set $indirect-total\n")
      "    i32.const 0 i32.const 0 i32.const " (:alignment variant-layout)
      " i32.const " (:size variant-layout) " call $realloc local.set $ret\n"
      "    local.get $disc i32.const " (count (:cases variant-layout)) " i32.ge_u if unreachable end\n"
@@ -4042,7 +4091,12 @@
      "  (global $next (mut i32) (i32.const " arena-base "))\n"
      (bounded-bump-realloc-wat capacity)
      "  (func (export \"" export "\")" params " (result i32)\n"
-     "    (local $ret i32)" (when needs-request-validation? " (local $end i32)") "\n"
+     "    (local $ret i32)"
+     (when needs-request-validation?
+       " (local $end i32) (local $indirect-total i32)")
+     "\n"
+     (when needs-request-validation?
+       "    i32.const 0 local.set $indirect-total\n")
      "    local.get $disc i32.const " (count (:cases request-layout)) " i32.ge_u if unreachable end\n"
      validation
      "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
