@@ -5863,6 +5863,76 @@
      "  (data (i32.const " body-pointer ") \"" (wat-data body-bytes) "\")\n"
      ")\n")))
 
+
+
+(defn- ui-provider-shape
+  "True when commit/event request+result match ui-v1 shapes."
+  [commit-req commit-res event-req event-res schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d))) (get schemas (second d))))
+          (fm [s] (into {} (nth s 2)))
+          (set-of-ref? [t name]
+            (and (vector? t) (= :set (first t))
+                 (vector? (second t)) (= :ref (first (second t)))
+                 (= name (second (second t)))))]
+    (boolean
+     (let [cr (rec commit-req) cs (rec commit-res)
+           er (rec event-req)
+           node (get schemas :kotoba.ui/node)]
+       (and cr cs er node
+            (= :record (first cr) (first cs) (first er) (first node))
+            (= (:base-revision (fm cr)) :i64)
+            (set-of-ref? (:nodes (fm cr)) :kotoba.ui/node)
+            (= (fm cs) {:revision :i64 :node-count :i64})
+            (= (fm er) {:after-revision :i64})
+            (or (and (vector? event-res) (= :option (first event-res)))
+                (and (vector? event-res) (= :ref (first event-res)))))))))
+
+(defn ui-provider-wat
+  "Synthetic dual-export provider for ui-v1 commit + next-event.
+  Maintains a revision counter; commit checks base-revision match and
+  node count <= 32; next-event always returns option none. No DOM."
+  [commit-entry event-entry commit-req commit-res event-req event-res schemas]
+  (when-not (ui-provider-shape commit-req commit-res event-req event-res schemas)
+    (reject "ui provider requires ui-v1's own literal request/result shapes"
+            {:commit-req commit-req :event-req event-req}))
+  (let [commit-export (str "cm32p2|kotoba:application/" (:interface commit-entry)
+                           "@1|" (:function commit-entry))
+        event-export (str "cm32p2|kotoba:application/" (:interface event-entry)
+                          "@1|" (:function event-entry))
+        event-res-layout (canonical/layout event-res schemas)
+        max-nodes 32
+        arena-base 8
+        pages 1
+        capacity-bytes (* pages 65536)
+        event-size (:size event-res-layout)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (global $rev (mut i64) (i64.const 0))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" commit-export "\") (param $p0 i64) (param $p1 i32) (param $p2 i32) (result i32)\n"
+     "    (local $ret i32)\n"
+     "    local.get $p0 global.get $rev i64.ne if unreachable end\n"
+     "    local.get $p2 i32.const " max-nodes " i32.gt_u if unreachable end\n"
+     "    global.get $rev i64.const 1 i64.add global.set $rev\n"
+     "    i32.const 0 i32.const 0 i32.const 8 i32.const 16 call $realloc local.set $ret\n"
+     "    local.get $ret global.get $rev i64.store\n"
+     "    local.get $ret local.get $p2 i64.extend_i32_u i64.store offset=8\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" commit-export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"" event-export "\") (param $p0 i64) (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const " (:alignment event-res-layout)
+     " i32.const " event-size " call $realloc local.set $ret\n"
+     "    local.get $ret i32.const 0 i32.store8 offset=0\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" event-export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 (defn fuel-enforcement
   "Where a component's declared `:fuel` budget is actually enforced.
 
