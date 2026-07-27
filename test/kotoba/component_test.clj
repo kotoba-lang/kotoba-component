@@ -61,6 +61,26 @@
     (is (= :wasm-component-kotoba-v2 (:target packaged)))
     (is (pos? (alength ^bytes (:bytes packaged))))))
 
+(deftest typed-v03-http-stream-consumer-lowers-linear-resources
+  (let [kir {:format :kotoba.kir/v4
+             :exports ['main]
+             :schemas {}
+             :effects #{[:cap/call 13]}
+             :functions [{:name 'main :params [] :param-types []
+                          :result :i64 :effects #{[:cap/call 13]}
+                          :body
+                          '(bytes-task-byte-count
+                            (typed-cap-call
+                             13 :string [:task [:stream :bytes]] "/data"))}]}
+        opts {:typed-capability-v3? true}
+        wit (wit/emit kir opts)
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1 opts)
+        packaged (artifact/package core-bytes kir wit)]
+    (is (= ["aiueos-http-get-stream"] (:imports wit)))
+    (is (= :stream-byte-count-call (:canonical-lowering packaged)))
+    (is (= :linear-resource (:capability-mode wit)))
+    (is (pos? (alength ^bytes (:bytes packaged))))))
+
 (def multi-match-kir
   {:format :kotoba.kir/v4
    :exports ['choose-option 'choose-result 'negate]

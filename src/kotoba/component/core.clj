@@ -1947,6 +1947,22 @@
                (string? request) capability)
       {:capability capability :request request})))
 
+(defn- stream-byte-count-call [function]
+  (let [{:keys [params param-types result body]} function
+        call (when (and (seq? body)
+                        (= 'bytes-task-byte-count (first body))
+                        (= 2 (count body)))
+               (second body))
+        [_ id request-type result-type request] (when (seq? call) call)
+        capability (some #(when (= id (:id %)) %) (:capabilities component-wit/contract))]
+    (when (and (empty? params) (empty? param-types) (= :i64 result)
+               (seq? call) (= 'typed-cap-call (first call))
+               (= :string request-type)
+               (= [:task [:stream :bytes]] result-type)
+               (string? request)
+               capability)
+      {:capability capability :request request})))
+
 (defn- record-capability-call [function schemas]
   (let [{:keys [params param-types result body]} function
         request-type (first param-types)
@@ -2249,6 +2265,10 @@
            (= 1 (count exports))
            (string-literal-unit-capability-call (first exports)))
       :string-literal-unit-capability-call
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
+           (stream-byte-count-call (first exports)))
+      :stream-byte-count-call
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (scalar-capability-call (first exports))) :scalar-capability-call
@@ -5257,6 +5277,74 @@
      "  (data (i32.const " request-pointer ") \"" (wat-data request-bytes) "\")\n"
      ")\n")))
 
+(defn- typed-v3-stream-byte-count-wat [function plan]
+  (let [id (get-in plan [:capability :id])
+        operation (abi/typed-capability-operation id)
+        request-bytes (.getBytes ^String (:request plan) StandardCharsets/UTF_8)
+        request-pointer 128]
+    (when-not (and (= :http-get-stream-request (:request operation))
+                   (= :bytes-task (:response operation)))
+      (reject "typed v0.3 stream consumer does not match operation types"
+              {:capability id
+               :request (:request operation)
+               :response (:response operation)}))
+    (str
+     "(module\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"[method]bytes-stream.read\"\n"
+     "    (func $read-stream (param i32 i32 i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"[method]bytes-stream.cancel\"\n"
+     "    (func $cancel-stream (param i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"[method]bytes-task.poll\"\n"
+     "    (func $poll-task (param i32 i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"[method]bytes-task.cancel\"\n"
+     "    (func $cancel-task (param i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"acquire\"\n"
+     "    (func $acquire (param i32 i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"grant_drop\"\n"
+     "    (func $drop-grant (param i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"bytes-stream_drop\"\n"
+     "    (func $drop-stream (param i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"bytes-task_drop\"\n"
+     "    (func $drop-task (param i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/" (:interface operation) "@0.3\" \""
+     (:function operation) "\"\n"
+     "    (func $provider (param i32 i32 i32 i32 i32 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 2 2)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz\n"
+     "    if (result i32) i32.const 4096 else local.get $old end)\n"
+     "  (func (export \"cm32p2||" (name (:name function)) "\") (result i64)\n"
+     "    (local $grant i32) (local $task i32) (local $stream i32)\n"
+     "    i32.const " (:grant-index operation) " i32.const 0 call $acquire\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    i32.const 4 i32.load local.set $grant\n"
+     "    local.get $grant i32.const " request-pointer " i32.const "
+     (alength request-bytes) " i32.const 0 i32.const 0 i32.const 0 call $provider\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    i32.const 4 i32.load local.set $task\n"
+     "    local.get $grant call $drop-grant\n"
+     "    local.get $task i32.const 0 call $poll-task\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    i32.const 4 i32.load8_u i32.eqz\n"
+     "    if\n"
+     "      local.get $task call $cancel-task\n"
+     "      local.get $task call $drop-task\n"
+     "      i64.const -1 return\n"
+     "    end\n"
+     "    i32.const 8 i32.load local.set $stream\n"
+     "    local.get $task call $drop-task\n"
+     "    local.get $stream i32.const 65536 i32.const 0 call $read-stream\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    local.get $stream call $cancel-stream\n"
+     "    local.get $stream call $drop-stream\n"
+     "    i32.const 8 i32.load i64.extend_i32_u)\n"
+     "  (func (export \"cm32p2||" (name (:name function)) "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " request-pointer ") \"" (wat-data request-bytes) "\")\n"
+     ")\n")))
+
 (defn- typed-v3-scalar-literal-wat [function plan]
   (let [id (get-in plan [:capability :id])
         operation (abi/typed-capability-operation id)]
@@ -5299,6 +5387,13 @@
   ([kir target] (emit kir target {}))
   ([kir target opts]
   (case (assert-supported! kir)
+    :stream-byte-count-call
+    (let [function (first (exported-functions kir))]
+      (if (:typed-capability-v3? opts)
+        (wasm-tools/parse-wat
+         (typed-v3-stream-byte-count-wat
+          function (stream-byte-count-call function)))
+        (reject "stream consumer requires typed v0.3" {:target target})))
     :string-literal-unit-capability-call
     (let [function (first (exported-functions kir))]
       (if (:typed-capability-v3? opts)
