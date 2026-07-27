@@ -2023,8 +2023,10 @@
         lowering (get-in typed-v3-projections [projection id])]
     (when (and (empty? params) (empty? param-types) (= :i64 result)
                lowering capability (seq? call) (= 'typed-cap-call (first call))
-               (= descriptor request-type) (vector? result-type)
-               (= :record (first result-type)))
+               (= descriptor request-type)
+               (if (= 2 id)
+                 (= :bool result-type)
+                 (and (vector? result-type) (= :record (first result-type)))))
       {:capability capability :projection projection :request-values values
        :request-type request-type :result-type result-type :lowering lowering})))
 

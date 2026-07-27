@@ -165,7 +165,7 @@
          (package 2
                   (list 'bool-result
                         (list 'typed-cap-call 2 bytes-request
-                              [:record :cap/bool [[:value :bool]]]
+                              :bool
                               (list 'record-new bytes-request "signed"))))
          (package 3 (bytes-call 'bytes-response-byte-count 3))
          (package 4
