@@ -716,6 +716,110 @@
         (Files/deleteIfExists path)
         (Files/deleteIfExists core-path)))))
 
+(deftest structural-nested-list-match-shares-one-total-item-budget
+  (doseq [[descriptor invoke expected]
+          [[[:option [:list [:list :i64]]]
+            "choose(some([[1, 2], [], [-3]]))" "3"]
+           [[:option [:list [:list [:list :i64]]]]
+            "choose(some([[[1], [2, 3]], [[]]]))" "2"]]]
+    (let [body
+          (list 'option-match descriptor 'value 9 'selected
+                (list 'option-match descriptor
+                      (list 'typed-cap-call
+                            clock-now descriptor descriptor
+                            (list 'option-some-of descriptor 'selected))
+                      9 'returned
+                      (list 'vector-count 'returned)))
+          kir {:format :kotoba.kir/v4
+               :exports ['choose 'echo]
+               :schemas {}
+               :effects #{:clock/read}
+               :functions
+               [{:name 'choose
+                 :params ['value]
+                 :param-types [descriptor]
+                 :result :i64
+                 :effects #{:clock/read}
+                 :body body}
+                {:name 'echo
+                 :params ['value]
+                 :param-types [:i64]
+                 :result :i64
+                 :effects #{}
+                 :body 'value}]}
+          application
+          (artifact/package
+           (component-core/emit kir :wasm32-wasi-kotoba-v1)
+           kir (wit/emit kir))
+          provider
+          (composition/package-structural-union-identity-provider
+           :clock/now descriptor)
+          closed (composition/compose-closed application [provider])
+          path (Files/createTempFile
+                "kotoba-nested-list-match-capability-" ".wasm"
+                (make-array FileAttribute 0))]
+      (try
+        (Files/write path ^bytes (:bytes closed)
+                     (make-array java.nio.file.OpenOption 0))
+        (is (= :structural-union-match-module
+               (component-core/assert-supported! kir)))
+        (doseq [[call result]
+                [["choose(none)" "9"]
+                 ["choose(some([]))" "0"]
+                 [invoke expected]]]
+          (let [run (shell/sh "wasmtime" "run" "--invoke"
+                              call (str path))]
+            (is (zero? (:exit run)) (:err run))
+            (is (= result (str/trim (:out run))) call)))
+        (finally
+          (Files/deleteIfExists path)))))
+  (let [descriptor [:option [:list [:list :i64]]]
+        body
+        (list 'option-match descriptor 'value 9 'selected
+              (list 'option-match descriptor
+                    (list 'typed-cap-call
+                          clock-now descriptor descriptor
+                          (list 'option-some-of descriptor 'selected))
+                    9 'returned
+                    (list 'vector-count 'returned)))
+        kir {:format :kotoba.kir/v4
+             :exports ['choose 'echo]
+             :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'choose :params ['value] :param-types [descriptor]
+               :result :i64 :effects #{:clock/read} :body body}
+              {:name 'echo :params ['value] :param-types [:i64]
+               :result :i64 :effects #{} :body 'value}]}
+        core (component-core/emit kir :wasm32-wasi-kotoba-v1)
+        path (Files/createTempFile
+              "kotoba-nested-list-total-validation-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes core (make-array java.nio.file.OpenOption 0))
+      (let [script
+            (str
+             "const fs=require('fs');let inst,outer;"
+             "const imports={['cm32p2|kotoba:application/clock@1']:{"
+             "now:(disc,ptr,count,ret)=>{const v=new DataView(inst.exports.cm32p2_memory.buffer);"
+             "v.setUint8(ret,1);v.setUint32(ret+4,outer,true);v.setUint32(ret+8,2,true);}}};"
+             "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),imports)"
+             ".then(({instance})=>{inst=instance;const e=instance.exports;"
+             "e.cm32p2_initialize();const alloc=(a,n)=>e.cm32p2_realloc(0,0,a,n);"
+             "const request=alloc(4,8),empty=alloc(8,8);"
+             "outer=alloc(4,16);const shared=alloc(8,8192*8);"
+             "const v=new DataView(e.cm32p2_memory.buffer);"
+             "v.setUint32(request,empty,true);v.setUint32(request+4,0,true);"
+             "for(let i=0;i<2;i++){v.setUint32(outer+i*8,shared,true);"
+             "v.setUint32(outer+i*8+4,8192,true);}"
+             "let trapped=false;try{e['cm32p2||choose'](1,request,1);}catch(_){trapped=true;}"
+             "console.log(trapped);if(!trapped)process.exit(1);});")
+            run (shell/sh "node" "-e" script (str path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= "true" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
 (deftest structural-option-record-match-calls-a-named-capability
   (let [record-type
         [:record :demo/cap-record
