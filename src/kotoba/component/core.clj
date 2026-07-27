@@ -6206,6 +6206,94 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+(defn- http-ingress-provider-shape
+  "True when accept/reply match http-ingress-v1 (slot i64 → option request;
+  response record → bool)."
+  [accept-req accept-res reply-req reply-res schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))
+          (set-of-ref? [t name]
+            (and (vector? t) (= :set (first t))
+                 (vector? (second t)) (= :ref (first (second t)))
+                 (= name (second (second t)))))]
+    (boolean
+     (when-let [ar (rec accept-req)]
+       (when-let [rr (rec reply-req)]
+         (let [incoming (get schemas :kotoba.http/incoming-request)
+               header (get schemas :kotoba.http/header)
+               af (field-map ar)
+               rf (field-map rr)
+               inc-f (when incoming (field-map incoming))]
+           (and header incoming
+                (= :bool reply-res)
+                (= :record (first ar) (first rr) (first incoming) (first header))
+                (= (:slot af) :i64)
+                (vector? accept-res) (= :option (first accept-res))
+                (or (= (second accept-res) [:ref :kotoba.http/incoming-request])
+                    (= (second accept-res) incoming))
+                (= (field-map header) {:name :keyword :value :string})
+                (= (:method inc-f) :keyword)
+                (= (:path inc-f) :string)
+                (set-of-ref? (:headers inc-f) :kotoba.http/header)
+                (= (:body inc-f) :string)
+                (= (:status rf) :i64)
+                (set-of-ref? (:headers rf) :kotoba.http/header)
+                (= (:body rf) :string))))))))
+
+(defn http-ingress-provider-wat
+  "Synthetic dual-export provider for http-ingress-v1 accept + reply.
+  accept: slot must be 0; always returns option none (no ambient queue).
+  reply: status in [100,599], header count ≤ 32, body bound; always true.
+  Packaging/ABI only — dual-runtime host inject is ADR 0097. :wasm-aot pending."
+  [accept-entry reply-entry accept-req accept-res reply-req reply-res schemas]
+  (when-not (http-ingress-provider-shape accept-req accept-res reply-req reply-res schemas)
+    (reject "http ingress provider requires http-ingress-v1 shapes"
+            {:accept-req accept-req :reply-req reply-req}))
+  (when-not (= (:interface accept-entry) (:interface reply-entry))
+    (reject "http accept/reply must share one interface" {}))
+  (let [accept-export (str "cm32p2|kotoba:application/" (:interface accept-entry)
+                           "@1|" (:function accept-entry))
+        reply-export (str "cm32p2|kotoba:application/" (:interface reply-entry)
+                          "@1|" (:function reply-entry))
+        accept-res-layout (canonical/layout accept-res schemas)
+        disc-store (variant-disc-store (:discriminant-size accept-res-layout))
+        accept-size (:size accept-res-layout)
+        max-headers 32
+        max-body value/string-value-byte-limit
+        arena-base 8
+        pages 1
+        capacity-bytes (* pages 65536)]
+    ;; accept flat: p0 slot i64
+    ;; reply flat: p0 status i64, p1/p2 headers, p3/p4 body
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" accept-export "\") (param $p0 i64) (result i32)\n"
+     "    (local $ret i32)\n"
+     "    local.get $p0 i64.const 0 i64.ne if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const " (:alignment accept-res-layout)
+     " i32.const " accept-size " call $realloc local.set $ret\n"
+     ;; option none
+     "    local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" accept-export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"" reply-export "\")"
+     " (param $p0 i64) (param $p1 i32) (param $p2 i32)"
+     " (param $p3 i32) (param $p4 i32) (result i32)\n"
+     "    local.get $p0 i64.const 100 i64.lt_s if unreachable end\n"
+     "    local.get $p0 i64.const 599 i64.gt_s if unreachable end\n"
+     "    local.get $p2 i32.const " max-headers " i32.gt_u if unreachable end\n"
+     "    local.get $p4 i32.const " max-body " i32.gt_u if unreachable end\n"
+     "    i32.const 1)\n"
+     "  (func (export \"" reply-export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 (defn fuel-enforcement
   "Where a component's declared `:fuel` budget is actually enforced.
 

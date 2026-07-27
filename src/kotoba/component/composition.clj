@@ -1360,6 +1360,101 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+
+(defn- http-ingress-wit-type
+  [ft schemas]
+  (cond
+    (= ft :i64) "s64"
+    (= ft :bool) "bool"
+    (contains? #{:string :keyword} ft) "string"
+    (and (vector? ft) (= :option (first ft)))
+    (str "option<" (http-ingress-wit-type (second ft) schemas) ">")
+    (and (vector? ft) (= :set (first ft)))
+    (str "list<" (http-ingress-wit-type (second ft) schemas) ">")
+    (and (vector? ft) (= :ref (first ft)))
+    (wit-name (second ft))
+    :else (log-record-wit-type ft schemas)))
+
+(defn- http-ingress-wit
+  "WIT for http-ingress dual-export: accept (option) + reply (bool)."
+  [accept-entry reply-entry accept-req accept-res reply-req schemas]
+  (let [accept-name (second accept-req)
+        reply-name (second reply-req)
+        incoming :kotoba.http/incoming-request
+        header :kotoba.http/header
+        interface (:interface accept-entry)
+        record-names [header accept-name incoming reply-name]]
+    (when-not (= interface (:interface reply-entry))
+      (reject "http accept/reply must share one interface" {}))
+    (when-not (and (vector? accept-res) (= :option (first accept-res)))
+      (reject "http accept result must be option" {:accept-res accept-res}))
+    (str "package kotoba:application@1.0.0;\n\n"
+         "interface types {\n"
+         (apply str
+                (map (fn [n]
+                       (let [schema (get schemas n)
+                             [_ id fields] schema]
+                         (str "  record " (wit-name id) " {\n"
+                              (apply str
+                                     (map (fn [[field ft]]
+                                            (str "    " (wit-name field) ": "
+                                                 (http-ingress-wit-type ft schemas)
+                                                 ",\n"))
+                                          fields))
+                              "  }\n")))
+                     record-names))
+         "}\n\n"
+         "interface " interface " {\n"
+         "  use types.{" (str/join ", " (map wit-name [accept-name incoming reply-name])) "};\n"
+         "  " (:function accept-entry) ": func(request: " (wit-name accept-name)
+         ") -> option<" (wit-name incoming) ">;\n"
+         "  " (:function reply-entry) ": func(request: " (wit-name reply-name)
+         ") -> bool;\n"
+         "}\n\n"
+         "world " interface "-provider {\n"
+         "  export " interface ";\n"
+         "}\n")))
+
+(defn package-http-ingress-provider
+  "Build a synthetic dual-export provider for http-ingress-v1
+  (accept always-none; reply bounds + true; no ambient listen)."
+  [accept-req accept-res reply-req reply-res schemas]
+  (let [accept-entry (capability :http/accept)
+        reply-entry (capability :http/reply)
+        wit (http-ingress-wit accept-entry reply-entry accept-req accept-res
+                              reply-req schemas)
+        dir (Files/createTempDirectory "kotoba-http-ingress-provider-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/http-ingress-provider-wat
+                     accept-entry reply-entry accept-req accept-res
+                     reply-req reply-res schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :http/accept
+       :capabilities [:http/accept :http/reply]
+       :descriptor accept-req
+       :result-descriptor accept-res
+       :schemas schemas
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn compose-closed
   "Compose one application with provider definitions and reject any remaining
   instance import. `wasm-tools compose --no-imports` is the closure gate."
