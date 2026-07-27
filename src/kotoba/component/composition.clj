@@ -1034,6 +1034,132 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+
+(defn- storage-wit-type
+  "WIT field/case payload spelling for storage-v1 shapes (option/set/ref)."
+  [ft schemas]
+  (cond
+    (= ft :i64) "s64"
+    (= ft :bool) "bool"
+    (contains? #{:string :keyword} ft) "string"
+    (and (vector? ft) (= :option (first ft)))
+    (str "option<" (storage-wit-type (second ft) schemas) ">")
+    (and (vector? ft) (= :set (first ft)))
+    (str "list<" (storage-wit-type (second ft) schemas) ">")
+    (and (vector? ft) (= :ref (first ft)))
+    (wit-name (second ft))
+    (and (vector? ft) (= :record (first ft)))
+    (wit-name (second ft))
+    :else (log-record-wit-type ft schemas)))
+
+(defn- storage-wit
+  "WIT for storage-v1 asymmetric variant request/result."
+  [entry request-descriptor result-descriptor schemas]
+  (let [req-name (second request-descriptor)
+        res-name (second result-descriptor)
+        wanted (atom #{req-name res-name})
+        changed (atom true)]
+    (while @changed
+      (reset! changed false)
+      (doseq [n (vec @wanted)
+              :let [schema (get schemas n)]
+              :when schema]
+        (case (first schema)
+          :record
+          (doseq [[_ ft] (nth schema 2)]
+            (cond
+              (and (vector? ft) (= :ref (first ft)))
+              (when-not (contains? @wanted (second ft))
+                (swap! wanted conj (second ft))
+                (reset! changed true))
+              (and (vector? ft) (#{:option :set :list} (first ft))
+                   (vector? (second ft)) (= :ref (first (second ft))))
+              (when-not (contains? @wanted (second (second ft)))
+                (swap! wanted conj (second (second ft)))
+                (reset! changed true))))
+          :variant
+          (doseq [[_ payload] (nth schema 2)]
+            (when (and (vector? payload) (= :ref (first payload)))
+              (when-not (contains? @wanted (second payload))
+                (swap! wanted conj (second payload))
+                (reset! changed true))))
+          nil)))
+    (let [names (sort-by str @wanted)
+          interface (:interface entry)
+          record-names (filterv #(= :record (first (get schemas %))) names)
+          variant-names (filterv #(= :variant (first (get schemas %))) names)]
+      (str "package kotoba:application@1.0.0;\n\n"
+           "interface types {\n"
+           (apply str
+                  (map (fn [n]
+                         (let [schema (get schemas n)
+                               [_ id fields] schema]
+                           (str "  record " (wit-name id) " {\n"
+                                (apply str
+                                       (map (fn [[field ft]]
+                                              (str "    " (wit-name field) ": "
+                                                   (storage-wit-type ft schemas) ",\n"))
+                                            fields))
+                                "  }\n")))
+                       record-names))
+           (apply str
+                  (map (fn [n]
+                         (let [schema (get schemas n)
+                               [_ id cases] schema]
+                           (str "  variant " (wit-name id) " {\n"
+                                (apply str
+                                       (map (fn [[tag payload]]
+                                              (str "    " (wit-name tag) "("
+                                                   (storage-wit-type payload schemas)
+                                                   "),\n"))
+                                            cases))
+                                "  }\n")))
+                       variant-names))
+           "}\n\n"
+           "interface " interface " {\n"
+           "  use types.{" (str/join ", " (map wit-name [req-name res-name])) "};\n"
+           "  " (:function entry) ": func(request: " (wit-name req-name)
+           ") -> " (wit-name res-name) ";\n"
+           "}\n\n"
+           "world " interface "-provider {\n"
+           "  export " interface ";\n"
+           "}\n"))))
+
+(defn package-storage-provider
+  "Build a synthetic provider for storage-v1 (always-missing; no ambient backend)."
+  [request-descriptor result-descriptor schemas]
+  (let [entry (capability :storage/transact)
+        wit (storage-wit entry request-descriptor result-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-storage-provider-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/storage-provider-wat
+                     entry request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :storage/transact
+       :descriptor request-descriptor
+       :result-descriptor result-descriptor
+       :schemas schemas
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn compose-closed
   "Compose one application with provider definitions and reject any remaining
   instance import. `wasm-tools compose --no-imports` is the closure gate."
