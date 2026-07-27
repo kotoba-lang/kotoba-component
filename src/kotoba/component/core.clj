@@ -5300,6 +5300,143 @@
       "  (data (i32.const " error-message-pointer ") \"" (wat-data error-message-bytes) "\")\n"
       ")\n"))))
 
+(defn- clock-record-fields
+  "Field list for a sealed scalar record payload (clock wall/monotonic), or
+  string-field-record fields (error)."
+  [payload-type schemas]
+  (or (when-let [schema (sealed-scalar-record payload-type schemas)]
+        (nth schema 2))
+      (when-let [schema (string-field-record-schema payload-type schemas)]
+        (nth schema 2))))
+
+(defn- clock-provider-shape
+  "True when request/result descriptors are clock-v1's own literal shape:
+  request cases wall/monotonic each carrying a bare bool; result cases
+  wall {unix-millis:i64, observation-sequence:i64}, monotonic {nanos:i64,
+  observation-sequence:i64}, error {code:keyword, message:string}."
+  [request-descriptor result-descriptor schemas]
+  (let [request-schema (get schemas (second request-descriptor))
+        result-schema (get schemas (second result-descriptor))]
+    (boolean
+     (when (and (vector? request-descriptor) (= :ref (first request-descriptor))
+                (vector? request-schema) (= :variant (first request-schema))
+                (= (second request-descriptor) (second request-schema))
+                (vector? result-descriptor) (= :ref (first result-descriptor))
+                (vector? result-schema) (= :variant (first result-schema))
+                (= (second result-descriptor) (second result-schema)))
+       (let [request-cases (nth request-schema 2)
+             result-cases (nth result-schema 2)]
+         (when (and (= 2 (count request-cases)) (= 3 (count result-cases))
+                    (= [:wall :monotonic] (mapv first request-cases))
+                    (= [:wall :monotonic :error] (mapv first result-cases)))
+           (let [[[_ wall-req] [_ mono-req]] request-cases
+                 [[_ wall-res] [_ mono-res] [_ error-res]] result-cases]
+             (and (= wall-req :bool)
+                  (= mono-req :bool)
+                  (= (clock-record-fields wall-res schemas)
+                     [[:unix-millis :i64] [:observation-sequence :i64]])
+                  (= (clock-record-fields mono-res schemas)
+                     [[:nanos :i64] [:observation-sequence :i64]])
+                  (= (clock-record-fields error-res schemas)
+                     [[:code :keyword] [:message :string]])))))))))
+
+(defn clock-provider-wat
+  "REAL (non-wiring-only) provider core module for clock-v1's own literal
+  request/result shape. Self-contained synthetic sources: wall and
+  monotonic advance on each observation; observation-sequence is a
+  provider-local monotonic i64 matching provider.clock's per-instance
+  counter. Production host wall/monotonic injection remains the CLJ/CLJS
+  transport path (ADR 0073); WASI clocks listed on the component-model
+  contract are not wired here. This is wasm-component qualification for
+  the ABI + sequence semantics, not a production host-time claim.
+
+  Synthetic policy (documented, deterministic):
+  - `$wall` starts at 1700000000000 (fixed Unix-ms base), +1 per wall read
+  - `$mono` starts at 0, +1000 per monotonic read (nondecreasing)
+  - `$obs` starts at 0, +1 before every successful observation
+  - request bool payload must be 0 or 1 (trap otherwise)
+  - disc outside [0,2) traps"
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (clock-provider-shape request-descriptor result-descriptor schemas)
+    (reject "clock provider requires clock-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|" (:function entry))
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined-types (vec (rest (:flat request-layout)))
+        params (apply str
+                      (cons " (param $disc i32)"
+                            (map-indexed
+                             (fn [index core-type]
+                               (str " (param $p" index " " (core-type-name core-type) ")"))
+                             joined-types)))
+        result-cases (:cases result-layout)
+        wall-layout (:layout (nth result-cases 0))
+        mono-layout (:layout (nth result-cases 1))
+        ;; error case (index 2) reserved; literals below keep data region ready
+        payload-offset (:payload-offset result-layout)
+        disc-store (variant-disc-store (:discriminant-size result-layout))
+        wall-millis (field-by-name wall-layout :unix-millis)
+        wall-obs (field-by-name wall-layout :observation-sequence)
+        mono-nanos (field-by-name mono-layout :nanos)
+        mono-obs (field-by-name mono-layout :observation-sequence)
+        ;; No request string headroom (bool only). Error-case string literals
+        ;; reserved for a future domain-mismatch path; keep them so the
+        ;; result arena layout stays stable if that path is added.
+        error-code-bytes (vec (.getBytes "clock/domain" "UTF-8"))
+        error-message-bytes (vec (.getBytes "clock domain not admitted" "UTF-8"))
+        literal-base 8
+        error-code-pointer literal-base
+        error-message-pointer (+ error-code-pointer (count error-code-bytes))
+        arena-base (align-up (+ error-message-pointer (count error-message-bytes)) 8)
+        result-size (:size result-layout)
+        required-bytes (+ arena-base result-size)
+        pages (max 1 (quot (+ required-bytes 65535) 65536))
+        capacity-bytes (* pages 65536)
+        wall-base 1700000000000
+        ;; bool validation: only if there is at least one joined payload param
+        bool-validate
+        (when (seq joined-types)
+          (str "    local.get $p0 i32.const 1 i32.gt_u if unreachable end\n"))]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (global $obs (mut i64) (i64.const 0))\n"
+     "  (global $wall (mut i64) (i64.const " wall-base "))\n"
+     "  (global $mono (mut i64) (i64.const 0))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32)\n"
+     "    local.get $disc i32.const 2 i32.ge_u if unreachable end\n"
+     bool-validate
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     "    global.get $obs i64.const 1 i64.add global.set $obs\n"
+     "    local.get $disc i32.const 0 i32.eq\n"
+     "    if\n"
+     "      global.get $wall i64.const 1 i64.add global.set $wall\n"
+     "      local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "      local.get $ret global.get $wall i64.store offset="
+     (+ payload-offset (:offset wall-millis)) "\n"
+     "      local.get $ret global.get $obs i64.store offset="
+     (+ payload-offset (:offset wall-obs)) "\n"
+     "    else\n"
+     "      global.get $mono i64.const 1000 i64.add global.set $mono\n"
+     "      local.get $ret i32.const 1 " disc-store " offset=0\n"
+     "      local.get $ret global.get $mono i64.store offset="
+     (+ payload-offset (:offset mono-nanos)) "\n"
+     "      local.get $ret global.get $obs i64.store offset="
+     (+ payload-offset (:offset mono-obs)) "\n"
+     "    end\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     "  (data (i32.const " error-code-pointer ") \"" (wat-data error-code-bytes) "\")\n"
+     "  (data (i32.const " error-message-pointer ") \"" (wat-data error-message-bytes) "\")\n"
+     ")\n")))
+
 (defn fuel-enforcement
   "Where a component's declared `:fuel` budget is actually enforced.
 
