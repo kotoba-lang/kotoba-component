@@ -1,6 +1,6 @@
 (ns kotoba.http-ingress-provider-component-test
   "W5 family-3 second slice: synthetic http-ingress dual-export wasm provider.
-   Multi-step Wasmtime accept→none and reply true-sum sequences as deepen slices."
+   Multi-step Wasmtime: accept→none, reply true-sum, and accept+reply dual-export walk."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
@@ -330,6 +330,134 @@
     (try
       (is (= :wasm-component-closed/v1 (:format closed)))
       (is (= [:http/reply] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+
+(defn- http-accept-reply-sequence-driver-wit
+  "Application WIT importing accept + reply; multi-function multi-step walk."
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-http-accept-request {\n"
+   "    slot: s64,\n"
+   "  }\n"
+   "  record kotoba-http-header {\n"
+   "    name: string,\n"
+   "    value: string,\n"
+   "  }\n"
+   "  record kotoba-http-incoming-request {\n"
+   "    method: string,\n"
+   "    path: string,\n"
+   "    headers: list<kotoba-http-header>,\n"
+   "    body: string,\n"
+   "  }\n"
+   "  record kotoba-http-response {\n"
+   "    status: s64,\n"
+   "    headers: list<kotoba-http-header>,\n"
+   "    body: string,\n"
+   "  }\n"
+   "}\n\n"
+   "interface http-ingress {\n"
+   "  use types.{kotoba-http-accept-request, kotoba-http-incoming-request,\n"
+   "             kotoba-http-response};\n"
+   "  accept: func(request: kotoba-http-accept-request) -> option<kotoba-http-incoming-request>;\n"
+   "  reply: func(request: kotoba-http-response) -> bool;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import http-ingress;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- http-accept-reply-sequence-driver-wat
+  "One accept(slot=0) then one reply(status=200 empty).
+  Synthetic provider: accept always none (disc=0), reply always true.
+  Return none-count + true = 1 + 1 = 2.
+  Requires dual-export compose-closed (ADR 0111).
+  Closes ADR 0110 deferred lifecycle accept→reply coupling in one invoke."
+  []
+  (let [mod "cm32p2|kotoba:application/http-ingress@1"
+        export-run "cm32p2||run"
+        accept-ret 64]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"accept\""
+     " (func $accept (param i64 i32)))\n"
+     "  (import \"" mod "\" \"reply\""
+     " (func $reply (param i64 i32 i32 i32 i32) (result i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $disc i32) (local $ok i32)\n"
+     ;; accept slot=0 → option none
+     "    i64.const 0 i32.const " accept-ret " call $accept\n"
+     "    i32.const " accept-ret " i32.load8_u offset=0 local.set $disc\n"
+     ;; reply status=200 empty headers/body → true
+     "    i64.const 200\n"
+     "    i32.const 0 i32.const 0\n"
+     "    i32.const 0 i32.const 0\n"
+     "    call $reply\n"
+     "    local.set $ok\n"
+     ;; none-count (1-disc) + ok
+     "    i32.const 1 local.get $disc i32.sub\n"
+     "    local.get $ok\n"
+     "    i32.add i64.extend_i32_s)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     ")\n")))
+
+(defn- package-http-accept-reply-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-http-accept-reply-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (http-accept-reply-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (http-accept-reply-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:http/accept :http/reply]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest http-accept-reply-sequence-driver-closes-and-wasmtime-returns-none-plus-true
+  "Multi-step deepen (ADR 0114): dual-export accept then reply;
+   Wasmtime returns none(1)+true(1)=2."
+  (let [d (http-ingress-descriptors)
+        provider (composition/package-http-ingress-provider
+                  (:accept-req d) (:accept-res d)
+                  (:reply-req d) (:reply-res d)
+                  (:schemas d))
+        driver (package-http-accept-reply-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-http-accept-reply-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:http/accept :http/reply] (:application-imports closed)))
       (Files/write path ^bytes (:bytes closed)
                    (make-array java.nio.file.OpenOption 0))
       (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
