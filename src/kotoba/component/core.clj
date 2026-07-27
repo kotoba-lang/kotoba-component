@@ -508,6 +508,34 @@
           (recur item-layout layouts)
           :else nil)))))
 
+(defn- finite-union-item-validation
+  "Build the closed active-case plan for an inline option/result list item.
+  Numeric and empty cases need no payload read. String/keyword and bool cases
+  are validated only after the item's discriminant selects that case."
+  [layout]
+  (when (and (seq (:cases layout))
+             (integer? (:payload-offset layout)))
+    (let [cases
+          (mapv
+           (fn [{case-layout :layout}]
+             (let [descriptor (:descriptor case-layout)]
+               (cond
+                 (or (zero? (:size case-layout))
+                     (contains? #{:i64 :f32 :f64} descriptor))
+                 [0 0]
+
+                 (and (contains? #{:string :keyword} descriptor)
+                      (integer? (:max-bytes case-layout)))
+                 [1 (:max-bytes case-layout)]
+
+                 (= :bool descriptor) [2 0]
+                 :else nil)))
+           (:cases layout))]
+      (when (every? some? cases)
+        (into [5 (count cases) (:payload-offset layout)
+               value/canonical-indirect-byte-limit]
+              (mapcat identity cases))))))
+
 (defn- match-payload-leaves
   "Return admitted leaves keyed by record-get path for one match payload.
   Products may recurse through finite records. Strings and admitted bounded
@@ -539,6 +567,20 @@
                 :flat-index flat-index
                 :max-items (:max-items node)
                 :item-layout (:item-layout node)}]
+
+              (and (vector? (:descriptor node))
+                   (= :list (first (:descriptor node)))
+                   (integer? (:max-items node))
+                   (map? (:item-layout node))
+                   (some? (finite-union-item-validation
+                           (:item-layout node))))
+              [{:path path
+                :descriptor (:descriptor node)
+                :flat-index flat-index
+                :max-items (:max-items node)
+                :item-layout (:item-layout node)
+                :union-item-validation
+                (finite-union-item-validation (:item-layout node))}]
 
               (and (vector? (:descriptor node))
                    (= :list (first (:descriptor node)))
@@ -619,7 +661,9 @@
                         (or (contains? (get leaves-by-path [])
                                        :record-bool-offsets)
                             (contains? (get leaves-by-path [])
-                                       :nested-list-layouts))))
+                                       :nested-list-layouts)
+                            (contains? (get leaves-by-path [])
+                                       :union-item-validation))))
               (let [[_ descriptor call fallback result-binder result-body] node]
                 (let [leaf-descriptor
                       (:descriptor (get leaves-by-path []))
@@ -651,7 +695,9 @@
                          (or (contains? (get leaves-by-path [])
                                         :record-bool-offsets)
                              (contains? (get leaves-by-path [])
-                                        :nested-list-layouts)))
+                                        :nested-list-layouts)
+                             (contains? (get leaves-by-path [])
+                                        :union-item-validation)))
                      (valid? fallback))))))
           (result-list-capability-count? [node]
             (when (and (seq? node)
@@ -681,7 +727,9 @@
                          (or (contains? (get leaves-by-path [])
                                         :record-bool-offsets)
                              (contains? (get leaves-by-path [])
-                                        :nested-list-layouts)))
+                                        :nested-list-layouts)
+                             (contains? (get leaves-by-path [])
+                                        :union-item-validation)))
                      (= leaf-descriptor (second descriptor))
                      (seq? call)
                      (= 5 (count call))
@@ -1084,6 +1132,8 @@
                             (:record-bool-offsets request-leaf)
                             nested-list-layouts
                             (:nested-list-layouts request-leaf)
+                            union-item-validation
+                            (:union-item-validation request-leaf)
                             item-validation-args
                             (cond
                               indirect-string-items?
@@ -1099,6 +1149,9 @@
                               (into [4 value/canonical-list-total-item-limit
                                      (count nested-list-layouts)]
                                     (mapcat identity nested-list-layouts))
+
+                              (seq union-item-validation)
+                              union-item-validation
 
                               :else [0 0])]
                         (when (and (= request-type descriptor)
@@ -1164,6 +1217,8 @@
                             (:record-bool-offsets request-leaf)
                             nested-list-layouts
                             (:nested-list-layouts request-leaf)
+                            union-item-validation
+                            (:union-item-validation request-leaf)
                             item-validation-args
                             (cond
                               indirect-string-items?
@@ -1179,6 +1234,9 @@
                               (into [4 value/canonical-list-total-item-limit
                                      (count nested-list-layouts)]
                                     (mapcat identity nested-list-layouts))
+
+                              (seq union-item-validation)
+                              union-item-validation
 
                               :else [0 0])]
                         (when (and (= constructor-type descriptor)
@@ -1407,7 +1465,8 @@
            (into {}
                  (map (fn [{:keys [path descriptor flat-index max-bytes
                                    max-items item-layout
-                                   record-bool-offsets nested-list-layouts]}]
+                                   record-bool-offsets nested-list-layouts
+                                   union-item-validation]}]
                         [path
                          (if (or max-bytes max-items)
                            (let [i32-slot
@@ -1446,6 +1505,7 @@
                                 :alignment alignment
                                 :record-bool-offsets record-bool-offsets
                                 :nested-list-layouts nested-list-layouts
+                                :union-item-validation union-item-validation
                                 :count-form
                                 (list 'component-list-count
                                       (i32-slot flat-index)
@@ -1569,6 +1629,10 @@
                 nested-scalar-list?
                 (and list-payload-layout
                      (seq (nested-scalar-list-layouts list-payload-layout)))
+                finite-union-list?
+                (and list-payload-layout
+                     (some? (finite-union-item-validation
+                             (:item-layout list-payload-layout))))
                 flat-byte {:i32 0x7f :i64 0x7e :f32 0x7d :f64 0x7c}]
             (when entry
               (cond
@@ -1613,7 +1677,8 @@
                                   [:result :keyword :keyword]}
                                   request-type)
                          finite-record-list?
-                         nested-scalar-list?)
+                         nested-scalar-list?
+                         finite-union-list?)
                      (= result-type request-type))
                 {:id id
                  :module (str "cm32p2|kotoba:application/"

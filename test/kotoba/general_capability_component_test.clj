@@ -716,6 +716,90 @@
         (Files/deleteIfExists path)
         (Files/deleteIfExists core-path)))))
 
+(deftest structural-union-list-match-validates-only-active-provider-cases
+  (let [item-type [:result :string :bool]
+        descriptor [:option [:list item-type]]
+        body
+        (list 'option-match descriptor 'value 9 'selected
+              (list 'option-match descriptor
+                    (list 'typed-cap-call
+                          clock-now descriptor descriptor
+                          (list 'option-some-of descriptor 'selected))
+                    9 'returned
+                    (list 'vector-count 'returned)))
+        kir {:format :kotoba.kir/v4
+             :exports ['choose 'echo]
+             :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'choose
+               :params ['value]
+               :param-types [descriptor]
+               :result :i64
+               :effects #{:clock/read}
+               :body body}
+              {:name 'echo :params ['value] :param-types [:i64]
+               :result :i64 :effects #{} :body 'value}]}
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir (wit/emit kir))
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor)
+        closed (composition/compose-closed application [provider])
+        component-path
+        (Files/createTempFile
+         "kotoba-union-list-match-capability-" ".wasm"
+         (make-array FileAttribute 0))
+        core-path
+        (Files/createTempFile
+         "kotoba-union-list-provider-validation-" ".wasm"
+         (make-array FileAttribute 0))]
+    (try
+      (Files/write component-path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (Files/write core-path
+                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-match-module
+             (component-core/assert-supported! kir)))
+      (let [run (shell/sh "wasmtime" "run" "--invoke"
+                          "choose(some([ok(\"safe\"), err(true)]))"
+                          (str component-path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= "2" (str/trim (:out run)))))
+      (let [script
+            (str
+             "const fs=require('fs');let inst,mode=0,returned,shared;"
+             "const imports={['cm32p2|kotoba:application/clock@1']:{"
+             "now:(disc,ptr,count,ret)=>{const v=new DataView(inst.exports.cm32p2_memory.buffer);"
+             "v.setUint8(ret,1);v.setUint32(ret+4,returned,true);"
+             "if(mode===4){v.setUint32(ret+8,17,true);"
+             "for(let i=0;i<17;i++){const p=returned+i*12;v.setUint8(p,0);"
+             "v.setUint32(p+4,shared,true);v.setUint32(p+8,65536,true);}}"
+             "else{v.setUint32(ret+8,1,true);"
+             "if(mode===0){v.setUint8(returned,1);v.setUint32(returned+4,0xffffff01,true);}"
+             "if(mode===1){v.setUint8(returned,1);v.setUint8(returned+4,2);}"
+             "if(mode===2){v.setUint8(returned,0);v.setUint32(returned+4,0xfffffff0,true);v.setUint32(returned+8,32,true);}"
+             "if(mode===3){v.setUint8(returned,2);}}}}};"
+             "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),imports)"
+             ".then(({instance})=>{inst=instance;const e=instance.exports;"
+             "e.cm32p2_initialize();const alloc=(a,n)=>e.cm32p2_realloc(0,0,a,n);"
+             "const request=alloc(4,12);returned=alloc(4,17*12);shared=alloc(1,65536);"
+             "const v=new DataView(e.cm32p2_memory.buffer);"
+             "v.setUint8(request,1);v.setUint32(request+4,0xffffff00,true);"
+             "let outcomes=[];for(mode=0;mode<5;mode++){let trapped=false;"
+             "try{e['cm32p2||choose'](1,request,1);}catch(_){trapped=true;}"
+             "outcomes.push(trapped);}console.log(JSON.stringify(outcomes));"
+             "if(JSON.stringify(outcomes)!=='[false,true,true,true,true]')process.exit(1);});")
+            run (shell/sh "node" "-e" script (str core-path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= "[false,true,true,true,true]" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists component-path)
+        (Files/deleteIfExists core-path)))))
+
 (deftest structural-nested-list-match-shares-one-total-item-budget
   (doseq [[descriptor invoke expected]
           [[[:option [:list [:list :i64]]]
