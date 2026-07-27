@@ -683,6 +683,7 @@
         option-string-list [:option [:list :string]]
         option-option-string-list [:option [:list [:option :string]]]
         option-result-list [:option [:list [:result :string :bool]]]
+        option-nested-list [:option [:list [:list :i64]]]
         option-point-list [:option [:list point]]
         option-message-list [:option [:list message]]
         option-option [:option [:option :i64]]
@@ -741,6 +742,9 @@
                {:descriptor option-result-list
                 :calls [["echo(some([ok(\"hello\"), err(true)]))"
                          "some([ok(\"hello\"), err(true)])"]]}
+               {:descriptor option-nested-list
+                :calls [["echo(some([[1, 2], [], [-3]]))"
+                         "some([[1, 2], [], [-3]])"]]}
                {:descriptor option-point-list
                 :calls
                 [["echo(none)" "none"]
@@ -825,7 +829,6 @@
             (Files/deleteIfExists core-path)))))
     (doseq [[descriptor schemas]
             [[[:result [:vector :i64] :bool] {}]
-             [[:option [:list [:list :i64]]] {}]
              [[:option [:ref :demo/node]]
               {:demo/node
                [:record :demo/node [[:next [:ref :demo/node]]]]}]]]
@@ -863,6 +866,41 @@
            e['cm32p2||echo'](0,p,1);
            let trapped=false;
            try { e['cm32p2||echo'](1,p,1); } catch (_) { trapped=true; }
+           if (!trapped) process.exit(2);
+         }).catch(error=>{ console.error(error); process.exit(3); });"]
+    (try
+      (Files/write path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run (shell/sh "node" "-e" script (str path))]
+        (is (zero? (:exit run)) (:err run)))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest structural-nested-lists-share-one-total-item-budget
+  (let [descriptor [:option [:list [:list :i64]]]
+        kir {:format :kotoba.kir/v4
+             :exports ['echo] :schemas {} :effects #{}
+             :functions
+             [{:name 'echo :params ['value] :param-types [descriptor]
+               :result descriptor :effects #{} :body 'value}]}
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+        path (Files/createTempFile
+              "kotoba-component-nested-list-budget-" ".wasm"
+              (make-array FileAttribute 0))
+        script
+        "const fs=require('node:fs');
+         WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
+           const e=instance.exports;
+           const outer=e.cm32p2_realloc(0,0,4,16);
+           const inner=e.cm32p2_realloc(0,0,8,8192*8);
+           const view=new DataView(e.cm32p2_memory.buffer);
+           for(let i=0;i<2;i++){
+             view.setUint32(outer+i*8,inner,true);
+             view.setUint32(outer+i*8+4,8192,true);
+           }
+           e['cm32p2||echo'](0,outer,2);
+           let trapped=false;
+           try { e['cm32p2||echo'](1,outer,2); } catch (_) { trapped=true; }
            if (!trapped) process.exit(2);
          }).catch(error=>{ console.error(error); process.exit(3); });"]
     (try

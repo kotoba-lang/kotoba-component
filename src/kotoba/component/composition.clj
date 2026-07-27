@@ -334,6 +334,10 @@
               (and (fixed-list-item? (second value) seen)
                    (fixed-list-item? (nth value 2) seen))
 
+              (and (vector? value) (= :list (first value))
+                   (= 2 (count value)))
+              (fixed-list-item? (second value) seen)
+
               (and (vector? value)
                    (contains? #{:ref :record} (first value)))
               (let [identity (second value)

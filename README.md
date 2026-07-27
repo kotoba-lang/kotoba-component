@@ -41,16 +41,18 @@ count, alignment, pointer overflow, and every outer and inner arena range in
 the selected case. Each item's in-memory discriminant is range-checked before
 only its active union case is visited. Bool fields and string/keyword byte
 bounds are checked for every active item.
-All indirect leaves in one value share KIR's 1 MiB aggregate byte budget, so
-per-item limits cannot amplify into a host-memory denial of service. Identity
-lowering borrows the complete item graph through Canonical lift; it neither
-frees nor mutates that graph, and post-return resets the arena only after lift
-has finished.
+All indirect leaves in one value share KIR's 1 MiB aggregate byte budget, and
+all nested list nodes share one 16,384-item budget. Per-node limits therefore
+cannot multiply into a host-memory or traversal denial of service. Recursive
+validation uses depth-specific loop locals, so an inner traversal cannot
+clobber its outer cursor. Identity lowering borrows the complete item graph
+through Canonical lift; it neither frees nor mutates that graph, and
+post-return resets the arena only after lift has finished.
 
 Nested `option`/`result` payloads recursively validate each inner
 discriminant and only the selected inner case before storing the same nested
-in-memory union shape. List-of-list and recursive records remain fail-closed
-pending recursive variable-cardinality graph validation and ownership.
+in-memory union shape. Recursive nominal records remain fail-closed; nested
+structural lists are admitted under the shared cardinality/depth budgets.
 
 Non-identity `option`/`result` matches can consume scalar payloads and finite
 records whose recursive leaves are `s64`, `float32`, `float64`, or `bool`.
