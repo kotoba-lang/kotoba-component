@@ -1,9 +1,23 @@
 (ns kotoba.storage-provider-component-test
-  "W5 remaining kit wasm packaging: synthetic storage-v1 component provider."
-  (:require [clojure.test :refer [deftest is]]
+  "W5 remaining kit wasm packaging: synthetic storage-v1 component provider.
+   Multi-step Wasmtime get→missing sequence added as deepen slice."
+  (:require [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
-            [kotoba.wasm.tools :as wasm-tools]))
+            [kotoba.wasm.tools :as wasm-tools])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(def ^:private wasmtime-binary
+  (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
+    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+
+(defn- wat-data
+  [bytes]
+  (apply str (map #(format "\\%02x" (bit-and (int %) 0xff)) bytes)))
 
 (defn- ref-ify
   [descriptor]
@@ -91,3 +105,152 @@
     (is (re-find #"cm32p2\|kotoba:application/storage@1\|transact" wat))
     (is (re-find #"i32.const 1" wat)) ;; missing case disc
     (is (re-find #"i32.const 3 i32.ge_u" wat))))
+
+(defn- storage-get-sequence-driver-wit
+  "Application WIT importing storage.transact; exports scalar multi-step run."
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-storage-get {\n"
+   "    key: string,\n"
+   "  }\n"
+   "  record kotoba-storage-put {\n"
+   "    key: string,\n"
+   "    value: string,\n"
+   "    expected-version: option<s64>,\n"
+   "  }\n"
+   "  record kotoba-storage-delete {\n"
+   "    key: string,\n"
+   "    expected-version: option<s64>,\n"
+   "  }\n"
+   "  variant kotoba-storage-request {\n"
+   "    get(kotoba-storage-get),\n"
+   "    put(kotoba-storage-put),\n"
+   "    delete(kotoba-storage-delete),\n"
+   "  }\n"
+   "  record kotoba-storage-entry {\n"
+   "    key: string,\n"
+   "    value: string,\n"
+   "    version: s64,\n"
+   "  }\n"
+   "  record kotoba-storage-conflict {\n"
+   "    key: string,\n"
+   "    current-version: option<s64>,\n"
+   "  }\n"
+   "  record kotoba-storage-error {\n"
+   "    code: string,\n"
+   "    message: string,\n"
+   "    retryable: bool,\n"
+   "  }\n"
+   "  variant kotoba-storage-result {\n"
+   "    found(kotoba-storage-entry),\n"
+   "    missing(bool),\n"
+   "    written(kotoba-storage-entry),\n"
+   "    deleted(bool),\n"
+   "    conflict(kotoba-storage-conflict),\n"
+   "    error(kotoba-storage-error),\n"
+   "  }\n"
+   "}\n\n"
+   "interface storage {\n"
+   "  use types.{kotoba-storage-request, kotoba-storage-result};\n"
+   "  transact: func(request: kotoba-storage-request) -> kotoba-storage-result;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import storage;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- storage-get-sequence-driver-wat
+  "Two get(transact) calls; synthetic provider always returns missing (disc=1).
+  Return (disc1 + disc2) = 2. Canonical ABI: MAX_FLAT_RESULTS=1 so variant
+  result uses retptr as last param.
+  Provider flat: disc + p0..p5 (i32 i32 i32 i64 i32 i64) + retptr."
+  []
+  (let [mod "cm32p2|kotoba:application/storage@1"
+        export-run "cm32p2||run"
+        key-bytes (vec (.getBytes "k" "UTF-8"))
+        key-ptr 8
+        r1-base 64
+        r2-base 128
+        push-get
+        (fn [ret-base]
+          (str
+           "    i32.const 0\n"            ;; disc = get
+           "    i32.const " key-ptr "\n"  ;; key ptr
+           "    i32.const " (count key-bytes) "\n"
+           "    i32.const 0\n"            ;; unused put value ptr
+           "    i64.const 0\n"            ;; unused
+           "    i32.const 0\n"
+           "    i64.const 0\n"
+           "    i32.const " ret-base "\n"
+           "    call $transact\n"))]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"transact\""
+     " (func $transact (param i32 i32 i32 i32 i64 i32 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $d1 i32) (local $d2 i32)\n"
+     (push-get r1-base)
+     "    i32.const " r1-base " i32.load8_u offset=0 local.set $d1\n"
+     (push-get r2-base)
+     "    i32.const " r2-base " i32.load8_u offset=0 local.set $d2\n"
+     "    local.get $d1 local.get $d2 i32.add i64.extend_i32_u)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " key-ptr ") \"" (wat-data key-bytes) "\")\n"
+     ")\n")))
+
+(defn- package-storage-get-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-storage-get-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (storage-get-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (storage-get-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:storage/transact]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest storage-get-sequence-driver-closes-and-wasmtime-returns-missing-sum
+  "Multi-step deepen (ADR 0106): compose real storage provider with a driver
+   that performs two get transacts; Wasmtime returns missing-disc sum 2."
+  (let [d (storage-v1-descriptors)
+        provider (composition/package-storage-provider
+                  (:request d) (:result d) (:schemas d))
+        driver (package-storage-get-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-storage-get-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:storage/transact] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
