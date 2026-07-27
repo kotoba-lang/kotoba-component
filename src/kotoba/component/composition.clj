@@ -940,6 +940,100 @@
         (doseq [path [component embedded core world]] (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+
+(defn- ui-wit
+  "WIT for ui-v1: commit record->record and next-event record->option."
+  [commit-entry event-entry commit-req commit-res event-req event-res schemas]
+  (let [interface (:interface commit-entry)
+        commit-req-n (second commit-req)
+        commit-res-n (second commit-res)
+        event-req-n (second event-req)
+        node-n :kotoba.ui/node
+        event-n :kotoba.ui/event
+        wanted #{commit-req-n commit-res-n event-req-n node-n event-n}
+        record-names (sort-by str (filter #(= :record (first (get schemas %))) wanted))]
+    (when-not (= interface (:interface event-entry))
+      (reject "ui commit/event must share one interface" {}))
+    (str "package kotoba:application@1.0.0;\n\n"
+         "interface types {\n"
+         (apply str
+                (map (fn [n]
+                       (let [schema (get schemas n)
+                             [_ id fields] schema]
+                         (str "  record " (wit-name id) " {\n"
+                              (apply str
+                                     (map (fn [[field ft]]
+                                            (str "    " (wit-name field) ": "
+                                                 (cond
+                                                   (= ft :i64) "s64"
+                                                   (contains? #{:string :keyword} ft) "string"
+                                                   (and (vector? ft) (= :option (first ft))
+                                                        (= :keyword (second ft)))
+                                                   "option<string>"
+                                                   (and (vector? ft) (= :set (first ft))
+                                                        (vector? (second ft))
+                                                        (= :ref (first (second ft))))
+                                                   (str "list<" (wit-name (second (second ft))) ">")
+                                                   (and (vector? ft) (= :ref (first ft)))
+                                                   (wit-name (second ft))
+                                                   :else (log-record-wit-type ft schemas))
+                                                 ",\n"))
+                                          fields))
+                              "  }\n")))
+                     record-names))
+         "}\n\n"
+         "interface " interface " {\n"
+         "  use types.{"
+         (str/join ", " (map wit-name [commit-req-n commit-res-n event-req-n event-n]))
+         "};\n"
+         "  " (:function commit-entry) ": func(request: " (wit-name commit-req-n)
+         ") -> " (wit-name commit-res-n) ";\n"
+         "  " (:function event-entry) ": func(request: " (wit-name event-req-n)
+         ") -> option<" (wit-name event-n) ">;\n"
+         "}\n\n"
+         "world " interface "-provider {\n"
+         "  export " interface ";\n"
+         "}\n")))
+
+(defn package-ui-provider
+  "Build a synthetic dual-export provider for ui-v1 (revision counter + empty events)."
+  [commit-req commit-res event-req event-res schemas]
+  (let [commit-entry (capability :ui/commit)
+        event-entry (capability :ui/next-event)
+        wit (ui-wit commit-entry event-entry commit-req commit-res
+                    event-req event-res schemas)
+        dir (Files/createTempDirectory "kotoba-ui-provider-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/ui-provider-wat
+                     commit-entry event-entry commit-req commit-res
+                     event-req event-res schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :ui/commit
+       :capabilities [:ui/commit :ui/next-event]
+       :descriptor commit-req
+       :result-descriptor commit-res
+       :schemas schemas
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn compose-closed
   "Compose one application with provider definitions and reject any remaining
   instance import. `wasm-tools compose --no-imports` is the closure gate."
