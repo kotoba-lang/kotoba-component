@@ -79,7 +79,13 @@
             :canonical-abi :compiler-generated
             :private-externref-abi :legacy-only}
  :capabilities
- [{:name :http/post :id 4 :interface "http-post" :function "post"
+ [{:name :identity/sign :id 1 :interface "identity" :function "sign"
+   :kit :identity :provider-wasi []}
+  {:name :identity/verify :id 2 :interface "identity" :function "verify"
+   :kit :identity :provider-wasi []}
+  {:name :hash/sha256 :id 3 :interface "hash" :function "sha256"
+   :kit :hash :provider-wasi []}
+  {:name :http/post :id 4 :interface "http-post" :function "post"
    :kit :http :provider-wasi ["wasi:http/outgoing-handler@0.3.0"]}
   {:name :log/read :id 5 :interface "log" :function "read"
    :kit :log :provider-wasi []}

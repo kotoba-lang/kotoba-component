@@ -137,6 +137,52 @@
     (is (= :object-compare-and-set-call (:canonical-lowering cas)))
     (is (pos? (alength ^bytes (:bytes cas))))))
 
+(deftest typed-v03-core-provider-operations-lower-formal-records
+  (let [bytes-request [:record :cap/bytes-request [[:bytes :string]]]
+        bytes-response [:record :cap/bytes-response [[:bytes :string]]]
+        http-request [:record :http/post-request
+                      [[:path :string] [:headers [:vector :string]] [:body :string]]]
+        http-response [:record :http/post-response
+                       [[:status :i64] [:headers [:vector :string]] [:body :string]]]
+        log-request [:record :log/read-request [[:cursor :i64] [:max-bytes :i64]]]
+        log-response [:record :log/read-response [[:next-cursor :i64] [:bytes :string]]]
+        package
+        (fn [id body]
+          (let [kir {:format :kotoba.kir/v4 :exports ['main] :schemas {}
+                     :effects #{[:cap/call id]}
+                     :functions [{:name 'main :params [] :param-types []
+                                  :result :i64 :effects #{[:cap/call id]} :body body}]}
+                opts {:typed-capability-v3? true}
+                emitted-wit (wit/emit kir opts)]
+            (artifact/package
+             (core/emit kir :wasm32-wasi-kotoba-v1 opts) kir emitted-wit)))
+        bytes-call (fn [projection id]
+                     (list projection
+                           (list 'typed-cap-call id bytes-request bytes-response
+                                 (list 'record-new bytes-request "payload"))))
+        packages
+        [(package 1 (bytes-call 'bytes-response-byte-count 1))
+         (package 2
+                  (list 'bool-result
+                        (list 'typed-cap-call 2 bytes-request
+                              :bool
+                              (list 'record-new bytes-request "signed"))))
+         (package 3 (bytes-call 'bytes-response-byte-count 3))
+         (package 4
+                  (list 'http-response-status
+                        (list 'typed-cap-call 4 http-request http-response
+                              (list 'record-new http-request "/safe"
+                                    (list 'vector-new) "body"))))
+         (package 5
+                  (list 'log-read-byte-count
+                        (list 'typed-cap-call 5 log-request log-response
+                              (list 'record-new log-request 0 128))))]]
+    (is (= ["aiueos-identity-sign" "aiueos-identity-verify"
+            "aiueos-hash-sha256" "aiueos-http-post" "aiueos-log-read"]
+           (mapv (comp first :imports) packages)))
+    (is (every? #(= :typed-v3-projected-call (:canonical-lowering %)) packages))
+    (is (every? #(pos? (alength ^bytes (:bytes %))) packages))))
+
 (def multi-match-kir
   {:format :kotoba.kir/v4
    :exports ['choose-option 'choose-result 'negate]

@@ -33,6 +33,7 @@
                                   :stream-byte-count-call
                                   :object-put-block-call
                                   :object-compare-and-set-call
+                                  :typed-v3-projected-call
                                   :vector-i64-identity
                                   :vector-i64-literal}
                                 lowering)))
