@@ -1976,7 +1976,7 @@
         {:keys [descriptor values]} (literal-record-values request)
         capability (some #(when (= id (:id %)) %) (:capabilities component-wit/contract))]
     (when (and (empty? params) (empty? param-types) (= :i64 result)
-               (= 'typed-cap-call (first body)) (= 15 id)
+               (seq? body) (= 'typed-cap-call (first body)) (= 15 id)
                (= descriptor request-type) (= :i64 result-type)
                (= 2 (count values)) (every? string? values)
                capability)
@@ -1992,7 +1992,7 @@
         {:keys [descriptor values]} (literal-record-values request)
         capability (some #(when (= id (:id %)) %) (:capabilities component-wit/contract))]
     (when (and (empty? params) (empty? param-types) (= :i64 result)
-               (= 'typed-cap-call (first call)) (= 16 id)
+               (seq? call) (= 'typed-cap-call (first call)) (= 16 id)
                (= descriptor request-type)
                (vector? result-type) (= :record (first result-type))
                (= 3 (count values)) (every? string? values)
