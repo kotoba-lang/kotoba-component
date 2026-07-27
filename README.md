@@ -72,13 +72,14 @@ WASI authority.
 An `option<list<T>>` match may reconstruct its selected list, pass that bounded
 value to a named capability with the same request/result descriptor, and
 immediately match the returned option when `T` is `s64`, `float64`, `string`,
-or `keyword`. The branch still compiles through the shared core-Wasm expression
-module; the generated standard32 adapter validates the request and returned
-list bounds and uses caller-allocated result storage. For indirect string-like
-items it also visits every active item, rejects pointer overflow or
-out-of-memory ranges, and enforces the shared 1 MiB byte budget even though the
-branch observes only the outer count. Other aggregate branch/capability shapes
-fail closed until their Canonical codec is admitted explicitly.
+`keyword`, or `bool`. The branch still compiles through the shared core-Wasm
+expression module; the generated standard32 adapter validates the request and
+returned list bounds and uses caller-allocated result storage. It visits every
+active bool or indirect string-like item even though the branch observes only
+the outer count. Bool bytes must be 0/1; strings reject pointer overflow or
+out-of-memory ranges and share the 1 MiB byte budget. Other aggregate
+branch/capability shapes fail closed until their Canonical codec is admitted
+explicitly.
 
 A symmetric `result<list<T>, list<T>>` match has the same property for both
 `ok` and `err`, including string-like item validation. The request case is
