@@ -4,6 +4,7 @@
             [kotoba.wasm.core :as wasm]
             [kotoba.wasm.canonical-abi :as canonical]
             [kotoba.component.wit :as component-wit]
+            [kotoba.abi.contract :as abi]
             [kotoba.kir.value :as value]
             [kotoba.wasm.tools :as wasm-tools]))
 
@@ -5200,18 +5201,24 @@
     :module-global
     :host-only))
 
-(defn- typed-v3-clock-wat [function plan]
-  (when-not (= 7 (get-in plan [:capability :id]))
-    (reject "typed v0.3 scalar lowering currently requires clock/now"
-            {:capability (get-in plan [:capability :id])}))
-  (str
+(defn- typed-v3-scalar-literal-wat [function plan]
+  (let [id (get-in plan [:capability :id])
+        operation (abi/typed-capability-operation id)]
+    (when-not (and (= :unit (:request operation))
+                   (= :u64 (:response operation)))
+      (reject "typed v0.3 scalar-literal lowering does not match operation types"
+              {:capability id
+               :request (:request operation)
+               :response (:response operation)}))
+    (str
    "(module\n"
    "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"acquire\"\n"
    "    (func $acquire (param i32 i32)))\n"
    "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"grant_drop\"\n"
    "    (func $drop-grant (param i32)))\n"
-   "  (import \"cm32p2|aiueos:capability/clock@0.3\" \"now\"\n"
-   "    (func $clock-now (param i32 i32)))\n"
+   "  (import \"cm32p2|aiueos:capability/" (:interface operation) "@0.3\" \""
+   (:function operation) "\"\n"
+   "    (func $provider (param i32 i32)))\n"
    "  (memory (export \"cm32p2_memory\") 1)\n"
    "  (func (export \"cm32p2_realloc\")\n"
    "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
@@ -5220,17 +5227,17 @@
    "    if (result i32) i32.const 32 else local.get $old end)\n"
    "  (func (export \"cm32p2||" (name (:name function)) "\") (result i64)\n"
    "    (local $grant i32) (local $value i64)\n"
-   "    i32.const 6 i32.const 0 call $acquire\n"
+   "    i32.const " (:grant-index operation) " i32.const 0 call $acquire\n"
    "    i32.const 0 i32.load8_u if unreachable end\n"
    "    i32.const 4 i32.load local.set $grant\n"
-   "    local.get $grant i32.const 0 call $clock-now\n"
+   "    local.get $grant i32.const 0 call $provider\n"
    "    i32.const 0 i32.load8_u if unreachable end\n"
    "    i32.const 8 i64.load local.set $value\n"
    "    local.get $grant call $drop-grant\n"
    "    local.get $value)\n"
    "  (func (export \"cm32p2||" (name (:name function)) "_post\") (param i64))\n"
    "  (func (export \"cm32p2_initialize\"))\n"
-   ")\n"))
+   ")\n")))
 
 (defn emit
   ([kir target] (emit kir target {}))
@@ -5240,7 +5247,8 @@
     (let [function (first (exported-functions kir))]
       (if (:typed-capability-v3? opts)
         (wasm-tools/parse-wat
-         (typed-v3-clock-wat function (scalar-literal-capability-call function)))
+         (typed-v3-scalar-literal-wat
+          function (scalar-literal-capability-call function)))
         (if (= :linear-resource (:capability-mode opts))
         (wasm-tools/parse-wat
          (linear-resource-literal-capability-wat
