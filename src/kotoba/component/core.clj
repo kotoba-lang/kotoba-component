@@ -2993,6 +2993,66 @@
      (some #(layout-needs-list-item-validation? (:layout %)) (:cases layout)))
     :else false))
 
+(defn- utf8-validation-wat
+  "Strictly validate the byte slice in `$utf8-pointer/$utf8-length`.
+  The scratch pointer and remaining length are consumed by the scan."
+  [indent]
+  (let [line #(str indent % "\n")
+        set-width
+        (fn [minimum maximum width]
+          (str
+           (line (str "local.get $utf8-lead i32.const " minimum " i32.ge_u"))
+           (line (str "local.get $utf8-lead i32.const " maximum
+                      " i32.le_u i32.and"))
+           (line (str "if i32.const " width " local.set $utf8-width end"))))
+        continuation
+        (fn [offset]
+          (str
+           (line (str "local.get $utf8-width i32.const " offset " i32.gt_u"))
+           (line "if")
+           (line (str "  local.get $utf8-pointer i32.load8_u offset=" offset
+                      " i32.const 128 i32.ge_u"))
+           (line (str "  local.get $utf8-pointer i32.load8_u offset=" offset
+                      " i32.const 191 i32.le_u i32.and"))
+           (line "  i32.eqz if unreachable end")
+           (line "end")))
+        special
+        (fn [lead comparison boundary]
+          (str
+           (line (str "local.get $utf8-lead i32.const " lead " i32.eq"))
+           (line "if")
+           (line (str "  local.get $utf8-pointer i32.load8_u offset=1 i32.const "
+                      boundary " " comparison " i32.eqz if unreachable end"))
+           (line "end")))]
+    (str
+     (line "block $utf8-done")
+     (line "  loop $utf8-loop")
+     (line "    local.get $utf8-length i32.eqz br_if $utf8-done")
+     (line "    local.get $utf8-pointer i32.load8_u local.set $utf8-lead")
+     (line "    local.get $utf8-lead i32.const 128 i32.lt_u")
+     (line "    if")
+     (line "      i32.const 1 local.set $utf8-width")
+     (line "    else")
+     (line "      i32.const 0 local.set $utf8-width")
+     (set-width 194 223 2)
+     (set-width 224 239 3)
+     (set-width 240 244 4)
+     (line "      local.get $utf8-width i32.eqz if unreachable end")
+     (line "    end")
+     (line "    local.get $utf8-width local.get $utf8-length i32.gt_u if unreachable end")
+     (continuation 1)
+     (continuation 2)
+     (continuation 3)
+     (special 224 "i32.ge_u" 160)
+     (special 237 "i32.le_u" 159)
+     (special 240 "i32.ge_u" 144)
+     (special 244 "i32.le_u" 143)
+     (line "    local.get $utf8-pointer local.get $utf8-width i32.add local.set $utf8-pointer")
+     (line "    local.get $utf8-length local.get $utf8-width i32.sub local.set $utf8-length")
+     (line "    br $utf8-loop")
+     (line "  end")
+     (line "end"))))
+
 (defn- memory-layout-validation
   "WAT that validates one Canonical value already stored at BASE. Unlike the
   flat-param validator, this is used for list items and therefore reads the
@@ -3068,7 +3128,10 @@
                " i32.lt_u if unreachable end\n"
                "          local.get $indirect-total i32.const "
                value/canonical-indirect-byte-limit
-               " i32.gt_u if unreachable end\n")
+               " i32.gt_u if unreachable end\n"
+               "          local.get $item-pointer local.set $utf8-pointer\n"
+               "          local.get $item-length local.set $utf8-length\n"
+               (utf8-validation-wat "          "))
 
               (:max-items node)
               (validate-list node address depth)
@@ -3167,7 +3230,10 @@
                       " i32.lt_u if unreachable end\n"
                       "      local.get $indirect-total i32.const "
                       value/canonical-indirect-byte-limit
-                      " i32.gt_u if unreachable end\n"))
+                      " i32.gt_u if unreachable end\n"
+                      "      " pointer " local.set $utf8-pointer\n"
+                      "      " length " local.set $utf8-length\n"
+                      (utf8-validation-wat "      ")))
                    (:max-items leaf)
                    (let [[pointer length]
                          (variant-indirect-leaf-value-exprs joined-types leaf)
@@ -3448,7 +3514,9 @@
      "  (func (export \"cm32p2||" export "\") (param $disc i32)" params " (result i32)\n"
      "    (local $ret i32)"
      (when needs-indirect-headroom?
-       " (local $end i32) (local $indirect-total i32)")
+       (str " (local $end i32) (local $indirect-total i32)"
+            " (local $utf8-pointer i32) (local $utf8-length i32)"
+            " (local $utf8-lead i32) (local $utf8-width i32)"))
      (when needs-list-item-validation?
        (str " (local $list-index i32) (local $item-base i32)"
             " (local $item-pointer i32) (local $item-length i32)"
@@ -4312,7 +4380,9 @@
      "  (func (export \"" export "\")" params " (result i32)\n"
      "    (local $ret i32)"
      (when needs-indirect-headroom?
-       " (local $end i32) (local $indirect-total i32)")
+       (str " (local $end i32) (local $indirect-total i32)"
+            " (local $utf8-pointer i32) (local $utf8-length i32)"
+            " (local $utf8-lead i32) (local $utf8-width i32)"))
      (when needs-list-item-validation?
        (str " (local $list-index i32) (local $item-base i32)"
             " (local $item-pointer i32) (local $item-length i32)"
@@ -4586,7 +4656,9 @@
      "  (func (export \"" export "\")" params " (result i32)\n"
      "    (local $ret i32)"
      (when needs-request-validation?
-       " (local $end i32) (local $indirect-total i32)")
+       (str " (local $end i32) (local $indirect-total i32)"
+            " (local $utf8-pointer i32) (local $utf8-length i32)"
+            " (local $utf8-lead i32) (local $utf8-width i32)"))
      "\n"
      (when needs-request-validation?
        "    i32.const 0 local.set $indirect-total\n")
@@ -5083,7 +5155,9 @@
       "    (local $ret i32) (local $match i32) (local $free i32)"
       " (local $slot i32) (local $slot-addr i32) (local $full i32)"
       (when needs-request-validation?
-        " (local $end i32) (local $indirect-total i32)")
+        (str " (local $end i32) (local $indirect-total i32)"
+             " (local $utf8-pointer i32) (local $utf8-length i32)"
+             " (local $utf8-lead i32) (local $utf8-width i32)"))
       "\n"
       (when needs-request-validation?
         "    i32.const 0 local.set $indirect-total\n")

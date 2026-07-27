@@ -877,7 +877,19 @@
              "v.setUint32(returned+16,1,true);v.setUint8(bools,2);}"
              "if(mode===3){v.setUint8(returned+20,2);}"
              "if(mode===5){v.setUint8(returned+8,0);v.setUint32(returned+12,bools,true);"
-             "v.setUint32(returned+16,16384,true);}}}}};"
+             "v.setUint32(returned+16,16384,true);}"
+             "if(mode===6){v.setUint32(returned,shared,true);v.setUint32(returned+4,2,true);"
+             "v.setUint8(shared,0xc0);v.setUint8(shared+1,0x80);}"
+             "if(mode===7){v.setUint32(returned,shared,true);v.setUint32(returned+4,3,true);"
+             "v.setUint8(shared,0xed);v.setUint8(shared+1,0xa0);v.setUint8(shared+2,0x80);}"
+             "if(mode===8){v.setUint32(returned,shared,true);v.setUint32(returned+4,4,true);"
+             "v.setUint8(shared,0xf4);v.setUint8(shared+1,0x90);"
+             "v.setUint8(shared+2,0x80);v.setUint8(shared+3,0x80);}"
+             "if(mode===9){v.setUint32(returned,shared,true);v.setUint32(returned+4,2,true);"
+             "v.setUint8(shared,0xe2);v.setUint8(shared+1,0x82);}"
+             "if(mode===10){v.setUint32(returned,shared,true);v.setUint32(returned+4,3,true);"
+             "v.setUint8(shared,0xe5);v.setUint8(shared+1,0xae);v.setUint8(shared+2,0x89);}"
+             "}}}};"
              "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),imports)"
              ".then(({instance})=>{inst=instance;const e=instance.exports;"
              "e.cm32p2_initialize();const alloc=(a,n)=>e.cm32p2_realloc(0,0,a,n);"
@@ -887,13 +899,13 @@
              "v.setUint32(request,shared,true);v.setUint32(request+4,0,true);"
              "v.setUint8(request+8,1);v.setUint32(request+12,shared,true);"
              "v.setUint32(request+16,0,true);v.setUint8(request+20,0);"
-             "let outcomes=[];for(mode=0;mode<6;mode++){let trapped=false;"
+             "let outcomes=[];for(mode=0;mode<11;mode++){let trapped=false;"
              "try{e['cm32p2||choose'](1,request,1);}catch(_){trapped=true;}"
              "outcomes.push(trapped);}console.log(JSON.stringify(outcomes));"
-             "if(JSON.stringify(outcomes)!=='[false,true,true,true,true,true]')process.exit(1);});")
+             "if(JSON.stringify(outcomes)!=='[false,true,true,true,true,true,true,true,true,true,false]')process.exit(1);});")
             run (shell/sh "node" "-e" script (str core-path))]
         (is (zero? (:exit run)) (:err run))
-        (is (= "[false,true,true,true,true,true]"
+        (is (= "[false,true,true,true,true,true,true,true,true,true,false]"
                (str/trim (:out run)))))
       (finally
         (Files/deleteIfExists component-path)
