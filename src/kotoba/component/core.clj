@@ -4589,7 +4589,11 @@
       "  (func (export \"" export "\")" params " (result i32)\n"
       "    (local $ret i32) (local $match i32) (local $free i32)"
       " (local $slot i32) (local $slot-addr i32) (local $full i32)"
-      (when needs-request-validation? " (local $end i32)") "\n"
+      (when needs-request-validation?
+        " (local $end i32) (local $indirect-total i32)")
+      "\n"
+      (when needs-request-validation?
+        "    i32.const 0 local.set $indirect-total\n")
       "    local.get $disc i32.const 3 i32.ge_u if unreachable end\n"
       validation
       scan
