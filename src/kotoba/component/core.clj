@@ -5995,6 +5995,133 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+(defn- llm-provider-shape
+  "True when request/result match llm-v1 generate: record with
+  model/system/prompt/max-output-tokens/temperature-milli and result
+  variant ok|error with nested usage on the ok completion."
+  [request-descriptor result-descriptor schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))]
+    (boolean
+     (when-let [req (rec request-descriptor)]
+       (when-let [res (rec result-descriptor)]
+         (let [completion (get schemas :kotoba.llm/completion)
+               usage (get schemas :kotoba.llm/usage)
+               error (get schemas :kotoba.llm/error)
+               rmf (field-map req)
+               cases (when (= :variant (first res)) (nth res 2))]
+           (and completion usage error
+                (= :record (first req) (first completion) (first usage) (first error))
+                (= (:model rmf) :keyword)
+                (= (:system rmf) :string)
+                (= (:prompt rmf) :string)
+                (= (:max-output-tokens rmf) :i64)
+                (= (:temperature-milli rmf) :i64)
+                (= 2 (count cases))
+                (= [:ok :error] (mapv first cases))
+                (= (second (first cases)) [:ref :kotoba.llm/completion])
+                (= (second (second cases)) [:ref :kotoba.llm/error])
+                (let [cf (field-map completion)]
+                  (and (= (:text cf) :string)
+                       (= (:finish-reason cf) :keyword)
+                       (= (:usage cf) [:ref :kotoba.llm/usage])))
+                (= (field-map usage) {:input-tokens :i64 :output-tokens :i64})
+                (let [ef (field-map error)]
+                  (and (= (:code ef) :keyword)
+                       (= (:message ef) :string)
+                       (= (:retryable ef) :bool))))))))))
+
+(defn llm-provider-wat
+  "Synthetic REAL-semantics provider core for llm-v1's generate shape.
+  Enforces max-output-tokens [1,4096], temperature-milli [0,2000], non-empty
+  model (≤ keyword byte limit), and system/prompt byte bounds. On success
+  returns a fixed ok completion (text \"ok\", finish-reason \"stop\", zero
+  usage) — no ambient network, credentials, or SDK. Production host
+  transport remains ADR 0064 (JVM) / dual-runtime mock path (ADR 0091).
+  :wasm-aot stays pending."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (llm-provider-shape request-descriptor result-descriptor schemas)
+    (reject "llm provider requires llm-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|"
+                    (:function entry))
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined (vec (:flat request-layout))
+        params (apply str
+                      (map-indexed
+                       (fn [i t]
+                         (str " (param $p" i " " (core-type-name t) ")"))
+                       joined))
+        result-cases (:cases result-layout)
+        ok-layout (:layout (nth result-cases 0))
+        payload-offset (:payload-offset result-layout)
+        disc-store (variant-disc-store (:discriminant-size result-layout))
+        ok-text (field-by-name ok-layout :text)
+        ok-finish (field-by-name ok-layout :finish-reason)
+        ok-usage (field-by-name ok-layout :usage)
+        usage-in (field-by-name (:layout ok-usage) :input-tokens)
+        usage-out (field-by-name (:layout ok-usage) :output-tokens)
+        text-bytes (vec (.getBytes "ok" "UTF-8"))
+        finish-bytes (vec (.getBytes "stop" "UTF-8"))
+        literal-base 8
+        text-pointer literal-base
+        finish-pointer (align-up (+ text-pointer (count text-bytes)) 4)
+        arena-base (align-up (+ finish-pointer (count finish-bytes)) 8)
+        result-size (:size result-layout)
+        required-bytes (+ arena-base result-size 256)
+        pages (max 1 (quot (+ required-bytes 65535) 65536))
+        capacity-bytes (* pages 65536)
+        max-output-tokens 4096
+        max-temperature-milli 2000
+        max-model value/keyword-value-byte-limit
+        max-input 65536]
+    ;; flat: p0/p1 model, p2/p3 system, p4/p5 prompt,
+    ;;       p6 max-output-tokens i64, p7 temperature-milli i64
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32)\n"
+     ;; model non-empty and within keyword bound
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-model " i32.gt_u if unreachable end\n"
+     ;; system/prompt lengths
+     "    local.get $p3 i32.const " max-input " i32.gt_u if unreachable end\n"
+     "    local.get $p5 i32.const " max-input " i32.gt_u if unreachable end\n"
+     ;; max-output-tokens in [1, max]
+     "    local.get $p6 i64.const 1 i64.lt_s if unreachable end\n"
+     "    local.get $p6 i64.const " max-output-tokens " i64.gt_s if unreachable end\n"
+     ;; temperature-milli in [0, max]
+     "    local.get $p7 i64.const 0 i64.lt_s if unreachable end\n"
+     "    local.get $p7 i64.const " max-temperature-milli " i64.gt_s if unreachable end\n"
+     ;; allocate result, write ok completion
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     "    local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "    local.get $ret i32.const " text-pointer " i32.store offset="
+     (+ payload-offset (:offset ok-text)) "\n"
+     "    local.get $ret i32.const " (count text-bytes) " i32.store offset="
+     (+ payload-offset (:offset ok-text) 4) "\n"
+     "    local.get $ret i32.const " finish-pointer " i32.store offset="
+     (+ payload-offset (:offset ok-finish)) "\n"
+     "    local.get $ret i32.const " (count finish-bytes) " i32.store offset="
+     (+ payload-offset (:offset ok-finish) 4) "\n"
+     "    local.get $ret i64.const 0 i64.store offset="
+     (+ payload-offset (:offset ok-usage) (:offset usage-in)) "\n"
+     "    local.get $ret i64.const 0 i64.store offset="
+     (+ payload-offset (:offset ok-usage) (:offset usage-out)) "\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     "  (data (i32.const " text-pointer ") \"" (wat-data text-bytes) "\")\n"
+     "  (data (i32.const " finish-pointer ") \"" (wat-data finish-bytes) "\")\n"
+     ")\n")))
+
 (defn fuel-enforcement
   "Where a component's declared `:fuel` budget is actually enforced.
 
