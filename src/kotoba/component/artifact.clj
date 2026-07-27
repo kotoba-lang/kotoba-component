@@ -30,6 +30,7 @@
                                   :scalar-with-capabilities
                                   :scalar-literal-capability-call
                                   :string-literal-unit-capability-call
+                                  :stream-byte-count-call
                                   :vector-i64-identity
                                   :vector-i64-literal}
                                 lowering)))
