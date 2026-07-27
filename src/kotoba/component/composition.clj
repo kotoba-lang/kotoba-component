@@ -1271,6 +1271,95 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+
+(defn- object-write-wit-type
+  "WIT field spelling for object write-path records (string/option/ref)."
+  [ft schemas]
+  (cond
+    (= ft :i64) "s64"
+    (= ft :bool) "bool"
+    (contains? #{:string :keyword} ft) "string"
+    (and (vector? ft) (= :option (first ft)))
+    (str "option<" (object-write-wit-type (second ft) schemas) ">")
+    (and (vector? ft) (= :ref (first ft)))
+    (wit-name (second ft))
+    :else (log-record-wit-type ft schemas)))
+
+(defn- object-write-wit
+  "WIT for stream-object write path: dual-export put-block + compare-and-set-ref
+  on the shared object-store interface, both returning bool."
+  [put-entry cas-entry put-req cas-req schemas]
+  (let [put-name (second put-req)
+        cas-name (second cas-req)
+        interface (:interface put-entry)
+        schemas-needed [put-name cas-name]]
+    (when-not (= interface (:interface cas-entry))
+      (reject "object put-block/CAS must share one interface" {}))
+    (str "package kotoba:application@1.0.0;\n\n"
+         "interface types {\n"
+         (apply str
+                (map (fn [n]
+                       (let [schema (get schemas n)
+                             [_ id fields] schema]
+                         (str "  record " (wit-name id) " {\n"
+                              (apply str
+                                     (map (fn [[field ft]]
+                                            (str "    " (wit-name field) ": "
+                                                 (object-write-wit-type ft schemas)
+                                                 ",\n"))
+                                          fields))
+                              "  }\n")))
+                     schemas-needed))
+         "}\n\n"
+         "interface " interface " {\n"
+         "  use types.{" (str/join ", " (map wit-name [put-name cas-name])) "};\n"
+         "  " (:function put-entry) ": func(request: " (wit-name put-name)
+         ") -> bool;\n"
+         "  " (:function cas-entry) ": func(request: " (wit-name cas-name)
+         ") -> bool;\n"
+         "}\n\n"
+         "world " interface "-provider {\n"
+         "  export " interface ";\n"
+         "}\n")))
+
+(defn package-object-write-provider
+  "Build a synthetic dual-export provider for stream-object write path
+  (put-block + compare-and-set-ref; always-true; no ambient store)."
+  [put-req put-res cas-req cas-res schemas]
+  (let [put-entry (capability :object/put-block)
+        cas-entry (capability :object/compare-and-set-ref)
+        wit (object-write-wit put-entry cas-entry put-req cas-req schemas)
+        dir (Files/createTempDirectory "kotoba-object-write-provider-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/object-write-provider-wat
+                     put-entry cas-entry put-req put-res cas-req cas-res schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :object/put-block
+       :capabilities [:object/put-block :object/compare-and-set-ref]
+       :descriptor put-req
+       :result-descriptor put-res
+       :schemas schemas
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn compose-closed
   "Compose one application with provider definitions and reject any remaining
   instance import. `wasm-tools compose --no-imports` is the closure gate."

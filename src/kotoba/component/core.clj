@@ -6122,6 +6122,90 @@
      "  (data (i32.const " finish-pointer ") \"" (wat-data finish-bytes) "\")\n"
      ")\n")))
 
+(defn- object-write-provider-shape
+  "True when put-block + CAS request/result match the stream-object write path
+  (record → bool). Kit field `:bytes` is admitted as `:string` (reference dual-
+  runtime ADR 0095 intermediate representation)."
+  [put-req put-res cas-req cas-res schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))]
+    (boolean
+     (when-let [put (rec put-req)]
+       (when-let [cas (rec cas-req)]
+         (let [pf (field-map put)
+               cf (field-map cas)]
+           (and (= :bool put-res cas-res)
+                (= :record (first put) (first cas))
+                (= (:binding pf) :keyword)
+                (= (:digest pf) :string)
+                ;; kit :bytes as host :string (ADR 0095)
+                (= (:bytes pf) :string)
+                (= (:binding cf) :keyword)
+                (= (:key cf) :string)
+                (= (:expected cf) [:option :string])
+                (= (:next cf) :string))))))))
+
+(defn object-write-provider-wat
+  "Synthetic dual-export provider for stream-object write path
+  (`:object/put-block` + `:object/compare-and-set-ref` on shared
+  object-store interface). Bounds-checks non-empty keyword/string leaves and
+  payload ≤ 65536; always returns true. No ambient object store.
+  Packaging/ABI qualification only — dual-runtime mock path is ADR 0095.
+  :wasm-aot stays pending."
+  [put-entry cas-entry put-req put-res cas-req cas-res schemas]
+  (when-not (object-write-provider-shape put-req put-res cas-req cas-res schemas)
+    (reject "object write provider requires stream-object write-path shapes"
+            {:put-req put-req :cas-req cas-req}))
+  (when-not (= (:interface put-entry) (:interface cas-entry))
+    (reject "object put-block/CAS must share one interface" {}))
+  (let [put-export (str "cm32p2|kotoba:application/" (:interface put-entry)
+                        "@1|" (:function put-entry))
+        cas-export (str "cm32p2|kotoba:application/" (:interface cas-entry)
+                        "@1|" (:function cas-entry))
+        max-string value/string-value-byte-limit
+        max-keyword value/keyword-value-byte-limit
+        arena-base 8
+        pages 1
+        capacity-bytes (* pages 65536)]
+    ;; put flat: p0/p1 binding, p2/p3 digest, p4/p5 bytes
+    ;; cas flat: p0/p1 binding, p2/p3 key, p4 opt-disc, p5/p6 opt-string, p7/p8 next
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" put-export "\")"
+     " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32)"
+     " (param $p4 i32) (param $p5 i32) (result i32)\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-keyword " i32.gt_u if unreachable end\n"
+     "    local.get $p3 i32.eqz if unreachable end\n"
+     "    local.get $p3 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    local.get $p5 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    i32.const 1)\n"
+     "  (func (export \"" put-export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"" cas-export "\")"
+     " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32)"
+     " (param $p4 i32) (param $p5 i32) (param $p6 i32)"
+     " (param $p7 i32) (param $p8 i32) (result i32)\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-keyword " i32.gt_u if unreachable end\n"
+     "    local.get $p3 i32.eqz if unreachable end\n"
+     "    local.get $p3 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    local.get $p4 i32.const 2 i32.ge_u if unreachable end\n"
+     ;; when expected is some, length must be in bound (may be empty etag? allow empty)
+     "    local.get $p4 i32.const 1 i32.eq\n"
+     "    if local.get $p6 i32.const " max-string " i32.gt_u if unreachable end end\n"
+     "    local.get $p8 i32.eqz if unreachable end\n"
+     "    local.get $p8 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    i32.const 1)\n"
+     "  (func (export \"" cas-export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 (defn fuel-enforcement
   "Where a component's declared `:fuel` budget is actually enforced.
 
