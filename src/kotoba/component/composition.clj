@@ -736,6 +736,110 @@
         (doseq [path [component embedded core world]] (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+(defn- log-record-wit-type
+  "WIT spelling for one field type in a log-v1 record, including nested
+  sets (as list<...>) and refs to other records in the types interface."
+  [field-type schemas]
+  (cond
+    (contains? record-field-wit-type field-type)
+    (get record-field-wit-type field-type)
+    (and (vector? field-type) (= :ref (first field-type)))
+    (wit-name (second field-type))
+    (and (vector? field-type) (= :set (first field-type)))
+    (str "list<" (log-record-wit-type (second field-type) schemas) ">")
+    (and (vector? field-type) (= :list (first field-type)))
+    (str "list<" (log-record-wit-type (second field-type) schemas) ">")
+    :else
+    (reject "log provider record field is not representable in WIT"
+            {:field-type field-type})))
+
+(defn- log-wit
+  "WIT package exporting interface log with append + read (shared types)."
+  [append-entry read-entry append-req append-res read-req read-res schemas]
+  (let [names (mapv #(second %) [append-req append-res read-req read-res])
+        ;; collect record schemas reachable from the four roots
+        wanted (atom (set names))
+        changed (atom true)]
+    (while @changed
+      (reset! changed false)
+      (doseq [n @wanted
+              :let [schema (get schemas n)]
+              :when (and schema (= :record (first schema)))]
+        (doseq [[_ ft] (nth schema 2)]
+          (let [refs (cond
+                       (and (vector? ft) (= :ref (first ft))) [(second ft)]
+                       (and (vector? ft) (#{:set :list} (first ft))
+                            (vector? (second ft)) (= :ref (first (second ft))))
+                       [(second (second ft))]
+                       :else [])]
+            (doseq [r refs]
+              (when-not (contains? @wanted r)
+                (swap! wanted conj r)
+                (reset! changed true)))))))
+    (let [record-names (sort-by str @wanted)
+          interface (:interface append-entry)]
+      (when-not (= interface (:interface read-entry))
+        (reject "log append/read must share one interface" {:append append-entry :read read-entry}))
+      (str "package kotoba:application@1.0.0;\n\n"
+           "interface types {\n"
+           (apply str
+                  (map (fn [n]
+                         (let [schema (get schemas n)
+                               [_ id fields] schema]
+                           (str "  record " (wit-name id) " {\n"
+                                (apply str
+                                       (map (fn [[field ft]]
+                                              (str "    " (wit-name field) ": "
+                                                   (log-record-wit-type ft schemas) ",\n"))
+                                            fields))
+                                "  }\n")))
+                       record-names))
+           "}\n\n"
+           "interface " interface " {\n"
+           "  use types.{" (str/join ", " (map wit-name names)) "};\n"
+           "  " (:function append-entry) ": func(request: "
+           (wit-name (second append-req)) ") -> " (wit-name (second append-res)) ";\n"
+           "  " (:function read-entry) ": func(request: "
+           (wit-name (second read-req)) ") -> " (wit-name (second read-res)) ";\n"
+           "}\n\n"
+           "world " interface "-provider {\n  export " interface ";\n}\n"))))
+
+(defn package-log-provider
+  "Build a REAL dual-export provider for log-v1 (append + read sharing one
+  ring buffer). Returns one component artifact whose `:capability` is
+  `:log/append` and whose `:capabilities` lists both append and read."
+  ([append-req append-res read-req read-res schemas]
+   (package-log-provider append-req append-res read-req read-res schemas
+                         component-core/log-provider-table-capacity))
+  ([append-req append-res read-req read-res schemas capacity]
+   (let [append-entry (capability :log/append)
+         read-entry (capability :log/read)
+         wit (log-wit append-entry read-entry append-req append-res
+                      read-req read-res schemas)
+         dir (Files/createTempDirectory "kotoba-log-provider-" (make-array FileAttribute 0))
+         world (.resolve dir "provider.wit") core (.resolve dir "provider.wasm")
+         embedded (.resolve dir "embedded.wasm") component (.resolve dir "provider.component.wasm")]
+     (try
+       (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+       (Files/write core (wasm-tools/parse-wat
+                          (component-core/log-provider-wat
+                           append-entry read-entry append-req append-res
+                           read-req read-res schemas capacity))
+                    (make-array java.nio.file.OpenOption 0))
+       (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
+                                 "--encoding" "utf8" "-o" (str embedded)])
+       (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                 "--reject-legacy-names" "-o" (str component)])
+       {:format :wasm-component-provider/v1
+        :capability :log/append
+        :capabilities [:log/append :log/read]
+        :descriptor append-req :result-descriptor append-res
+        :read-descriptor read-req :read-result-descriptor read-res
+        :schemas schemas :bytes (Files/readAllBytes component)}
+       (finally
+         (doseq [path [component embedded core world]] (Files/deleteIfExists path))
+         (Files/deleteIfExists dir))))))
+
 (defn compose-closed
   "Compose one application with provider definitions and reject any remaining
   instance import. `wasm-tools compose --no-imports` is the closure gate."
