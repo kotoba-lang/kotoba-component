@@ -627,6 +627,95 @@
       (finally
         (Files/deleteIfExists path)))))
 
+(deftest structural-record-list-match-validates-all-provider-item-bools
+  (let [inner-type
+        [:record :demo/match-inner [[:ok :bool] [:weight :f64]]]
+        item-type
+        [:record :demo/match-item
+         [[:x :i64] [:enabled :bool] [:inner [:ref :demo/match-inner]]]]
+        schemas {:demo/match-inner inner-type :demo/match-item item-type}
+        descriptor [:option [:list [:ref :demo/match-item]]]
+        body
+        (list 'option-match descriptor 'value 9 'selected
+              (list 'option-match descriptor
+                    (list 'typed-cap-call
+                          clock-now descriptor descriptor
+                          (list 'option-some-of descriptor 'selected))
+                    9 'returned
+                    (list 'vector-count 'returned)))
+        kir {:format :kotoba.kir/v4
+             :exports ['choose 'echo]
+             :schemas schemas
+             :effects #{:clock/read}
+             :functions
+             [{:name 'choose
+               :params ['value]
+               :param-types [descriptor]
+               :result :i64
+               :effects #{:clock/read}
+               :body body}
+              {:name 'echo
+               :params ['value]
+               :param-types [:i64]
+               :result :i64
+               :effects #{}
+               :body 'value}]}
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir (wit/emit kir))
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor schemas)
+        closed (composition/compose-closed application [provider])
+        path (Files/createTempFile
+              "kotoba-record-list-match-capability-" ".wasm"
+              (make-array FileAttribute 0))
+        core-path (Files/createTempFile
+                   "kotoba-record-list-provider-validation-" ".wasm"
+                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (Files/write core-path
+                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-match-module
+             (component-core/assert-supported! kir)))
+      (doseq [[invoke expected]
+              [["choose(none)" "9"]
+               ["choose(some([]))" "0"]
+               [(str "choose(some([{x: 7, enabled: true, "
+                     "inner: {ok: false, weight: 1.5}}]))")
+                "1"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke"
+                            invoke (str path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      (let [script
+            (str
+             "const fs=require('fs');let inst,bad;"
+             "const imports={['cm32p2|kotoba:application/clock@1']:{"
+             "now:(disc,ptr,count,ret)=>{const v=new DataView(inst.exports.cm32p2_memory.buffer);"
+             "v.setUint8(ret,1);v.setUint32(ret+4,bad,true);v.setUint32(ret+8,1,true);}}};"
+             "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),imports)"
+             ".then(({instance})=>{inst=instance;const e=instance.exports;"
+             "e.cm32p2_initialize();const alloc=(a,n)=>e.cm32p2_realloc(0,0,a,n);"
+             "const request=alloc(8,32);bad=alloc(8,32);"
+             "const v=new DataView(e.cm32p2_memory.buffer);"
+             "v.setBigInt64(request,7n,true);v.setUint8(request+8,1);"
+             "v.setUint8(request+16,0);v.setFloat64(request+24,1.5,true);"
+             "v.setBigInt64(bad,7n,true);v.setUint8(bad+8,2);"
+             "v.setUint8(bad+16,0);v.setFloat64(bad+24,1.5,true);"
+             "let trapped=false;try{e['cm32p2||choose'](1,request,1);}catch(_){trapped=true;}"
+             "console.log(trapped);if(!trapped)process.exit(1);});")
+            run (shell/sh "node" "-e" script (str core-path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= "true" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)
+        (Files/deleteIfExists core-path)))))
+
 (deftest structural-option-record-match-calls-a-named-capability
   (let [record-type
         [:record :demo/cap-record
