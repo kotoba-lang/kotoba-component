@@ -320,7 +320,50 @@
         (Files/deleteIfExists dir)))))
 
 (defn- structural-union-provider-wit [entry descriptor schemas]
-  (let [payloads (when (vector? descriptor)
+  (letfn [(fixed-list-item? [value seen]
+            (cond
+              (contains? #{:i64 :f32 :f64 :bool} value)
+              true
+
+              (and (vector? value)
+                   (contains? #{:ref :record} (first value)))
+              (let [identity (second value)
+                    schema (if (= :ref (first value))
+                             (get schemas identity)
+                             value)]
+                (and (keyword? identity)
+                     (not (contains? seen identity))
+                     (vector? schema)
+                     (= :record (first schema))
+                     (every? (fn [[_ field-type]]
+                               (fixed-list-item?
+                                field-type (conj seen identity)))
+                             (nth schema 2))))
+
+              :else false))
+          (referenced-records [value seen]
+            (cond
+              (and (vector? value)
+                   (= :list (first value)))
+              (referenced-records (second value) seen)
+
+              (and (vector? value)
+                   (contains? #{:ref :record} (first value)))
+              (let [identity (second value)
+                    schema (if (= :ref (first value))
+                             (get schemas identity)
+                             value)]
+                (if (or (contains? seen identity)
+                        (not= :record (first schema)))
+                  []
+                  (cons schema
+                        (mapcat (fn [[_ field-type]]
+                                  (referenced-records
+                                   field-type (conj seen identity)))
+                                (nth schema 2)))))
+
+              :else []))]
+    (let [payloads (when (vector? descriptor)
                    (case (first descriptor)
                      :option [(second descriptor)]
                      :result [(second descriptor) (get descriptor 2)]
@@ -341,6 +384,10 @@
             (and (supported? (second payload))
                  (supported? (nth payload 2)))
 
+            (and (vector? payload) (= :list (first payload))
+                 (= 2 (count payload)))
+            (fixed-list-item? (second payload) #{})
+
             (and (vector? payload)
                  (contains? #{:ref :record} (first payload)))
             (let [schema (if (= :ref (first payload))
@@ -357,12 +404,7 @@
         interface (:interface entry)
         record-schemas
         (->> payloads
-             (keep (fn [payload]
-                     (cond
-                       (and (vector? payload) (= :ref (first payload)))
-                       (get schemas (second payload))
-                       (and (vector? payload) (= :record (first payload)))
-                       payload)))
+             (mapcat #(referenced-records % #{}))
              distinct)
         declarations
         (apply str
@@ -372,7 +414,7 @@
                        (apply str
                               (map (fn [[field-name field-type]]
                                      (str "    " (wit-name field-name) ": "
-                                          (record-field-wit-type field-type)
+                                          (component-wit/type-text field-type)
                                           ",\n"))
                                    fields))
                        "  }\n"))
@@ -390,7 +432,7 @@
            "}\n\n"
            "world " interface "-provider {\n"
            "  export " interface ";\n"
-           "}\n"))))
+           "}\n")))))
 
 (defn package-structural-union-identity-provider
   "Build a named WIT provider that echoes one bounded option/result value."
