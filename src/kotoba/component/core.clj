@@ -1963,6 +1963,43 @@
                capability)
       {:capability capability :request request})))
 
+(defn- literal-record-values [form]
+  (when (and (seq? form)
+             (= 'record-new (first form))
+             (vector? (second form)))
+    {:descriptor (second form)
+     :values (vec (drop 2 form))}))
+
+(defn- object-put-block-call [function]
+  (let [{:keys [params param-types result body]} function
+        [_ id request-type result-type request] (when (seq? body) body)
+        {:keys [descriptor values]} (literal-record-values request)
+        capability (some #(when (= id (:id %)) %) (:capabilities component-wit/contract))]
+    (when (and (empty? params) (empty? param-types) (= :i64 result)
+               (seq? body) (= 'typed-cap-call (first body)) (= 15 id)
+               (= descriptor request-type) (= :i64 result-type)
+               (= 2 (count values)) (every? string? values)
+               capability)
+      {:capability capability :key (first values) :bytes (second values)})))
+
+(defn- object-compare-and-set-call [function]
+  (let [{:keys [params param-types result body]} function
+        call (when (and (seq? body)
+                        (= 'object-cas-won (first body))
+                        (= 2 (count body)))
+               (second body))
+        [_ id request-type result-type request] (when (seq? call) call)
+        {:keys [descriptor values]} (literal-record-values request)
+        capability (some #(when (= id (:id %)) %) (:capabilities component-wit/contract))]
+    (when (and (empty? params) (empty? param-types) (= :i64 result)
+               (seq? call) (= 'typed-cap-call (first call)) (= 16 id)
+               (= descriptor request-type)
+               (vector? result-type) (= :record (first result-type))
+               (= 3 (count values)) (every? string? values)
+               capability)
+      {:capability capability
+       :key (first values) :expected-etag (second values) :bytes (nth values 2)})))
+
 (defn- record-capability-call [function schemas]
   (let [{:keys [params param-types result body]} function
         request-type (first param-types)
@@ -2269,6 +2306,14 @@
            (= 1 (count exports))
            (stream-byte-count-call (first exports)))
       :stream-byte-count-call
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
+           (object-put-block-call (first exports)))
+      :object-put-block-call
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
+           (object-compare-and-set-call (first exports)))
+      :object-compare-and-set-call
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (scalar-capability-call (first exports))) :scalar-capability-call
@@ -5281,8 +5326,11 @@
   (let [id (get-in plan [:capability :id])
         operation (abi/typed-capability-operation id)
         request-bytes (.getBytes ^String (:request plan) StandardCharsets/UTF_8)
-        request-pointer 128]
-    (when-not (and (= :http-get-stream-request (:request operation))
+        request-pointer 128
+        request-kind (:request operation)]
+    (when-not (and (contains? #{:http-get-stream-request
+                                :object-get-stream-request}
+                              request-kind)
                    (= :bytes-task (:response operation)))
       (reject "typed v0.3 stream consumer does not match operation types"
               {:capability id
@@ -5308,7 +5356,9 @@
      "    (func $drop-task (param i32)))\n"
      "  (import \"cm32p2|aiueos:capability/" (:interface operation) "@0.3\" \""
      (:function operation) "\"\n"
-     "    (func $provider (param i32 i32 i32 i32 i32 i32)))\n"
+     (if (= :http-get-stream-request request-kind)
+       "    (func $provider (param i32 i32 i32 i32 i32 i32)))\n"
+       "    (func $provider (param i32 i32 i32 i32)))\n")
      "  (memory (export \"cm32p2_memory\") 2 2)\n"
      "  (func (export \"cm32p2_realloc\")\n"
      "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
@@ -5321,7 +5371,10 @@
      "    i32.const 0 i32.load8_u if unreachable end\n"
      "    i32.const 4 i32.load local.set $grant\n"
      "    local.get $grant i32.const " request-pointer " i32.const "
-     (alength request-bytes) " i32.const 0 i32.const 0 i32.const 0 call $provider\n"
+     (alength request-bytes)
+     (if (= :http-get-stream-request request-kind)
+       " i32.const 0 i32.const 0 i32.const 0 call $provider\n"
+       " i32.const 0 call $provider\n")
      "    i32.const 0 i32.load8_u if unreachable end\n"
      "    i32.const 4 i32.load local.set $task\n"
      "    local.get $grant call $drop-grant\n"
@@ -5343,6 +5396,100 @@
      "  (func (export \"cm32p2||" (name (:name function)) "_post\") (param i64))\n"
      "  (func (export \"cm32p2_initialize\"))\n"
      "  (data (i32.const " request-pointer ") \"" (wat-data request-bytes) "\")\n"
+     ")\n")))
+
+(defn- typed-v3-object-put-block-wat [function plan]
+  (let [id (get-in plan [:capability :id])
+        operation (abi/typed-capability-operation id)
+        key-bytes (.getBytes ^String (:key plan) StandardCharsets/UTF_8)
+        value-bytes (.getBytes ^String (:bytes plan) StandardCharsets/UTF_8)
+        key-pointer 128
+        value-pointer 512]
+    (when-not (and (= :object-put-block-request (:request operation))
+                   (= :unit (:response operation)))
+      (reject "typed v0.3 object put lowering does not match operation types"
+              {:capability id :request (:request operation)
+               :response (:response operation)}))
+    (str
+     "(module\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"acquire\"\n"
+     "    (func $acquire (param i32 i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"grant_drop\"\n"
+     "    (func $drop-grant (param i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/" (:interface operation) "@0.3\" \""
+     (:function operation) "\"\n"
+     "    (func $provider (param i32 i32 i32 i32 i32 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz\n"
+     "    if (result i32) i32.const 4096 else local.get $old end)\n"
+     "  (func (export \"cm32p2||" (name (:name function)) "\") (result i64)\n"
+     "    (local $grant i32)\n"
+     "    i32.const " (:grant-index operation) " i32.const 0 call $acquire\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    i32.const 4 i32.load local.set $grant\n"
+     "    local.get $grant"
+     " i32.const " key-pointer " i32.const " (alength key-bytes)
+     " i32.const " value-pointer " i32.const " (alength value-bytes)
+     " i32.const 0 call $provider\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    local.get $grant call $drop-grant\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" (name (:name function)) "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " key-pointer ") \"" (wat-data key-bytes) "\")\n"
+     "  (data (i32.const " value-pointer ") \"" (wat-data value-bytes) "\")\n"
+     ")\n")))
+
+(defn- typed-v3-object-cas-wat [function plan]
+  (let [id (get-in plan [:capability :id])
+        operation (abi/typed-capability-operation id)
+        key-bytes (.getBytes ^String (:key plan) StandardCharsets/UTF_8)
+        etag-bytes (.getBytes ^String (:expected-etag plan) StandardCharsets/UTF_8)
+        value-bytes (.getBytes ^String (:bytes plan) StandardCharsets/UTF_8)
+        key-pointer 128
+        etag-pointer 512
+        value-pointer 1024]
+    (when-not (and (= :object-compare-and-set-ref-request (:request operation))
+                   (= :object-compare-and-set-ref-response (:response operation)))
+      (reject "typed v0.3 object CAS lowering does not match operation types"
+              {:capability id :request (:request operation)
+               :response (:response operation)}))
+    (str
+     "(module\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"acquire\"\n"
+     "    (func $acquire (param i32 i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"grant_drop\"\n"
+     "    (func $drop-grant (param i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/" (:interface operation) "@0.3\" \""
+     (:function operation) "\"\n"
+     "    (func $provider (param i32 i32 i32 i32 i32 i32 i32 i32 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz\n"
+     "    if (result i32) i32.const 4096 else local.get $old end)\n"
+     "  (func (export \"cm32p2||" (name (:name function)) "\") (result i64)\n"
+     "    (local $grant i32)\n"
+     "    i32.const " (:grant-index operation) " i32.const 0 call $acquire\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    i32.const 4 i32.load local.set $grant\n"
+     "    local.get $grant"
+     " i32.const " key-pointer " i32.const " (alength key-bytes)
+     " i32.const 1 i32.const " etag-pointer " i32.const " (alength etag-bytes)
+     " i32.const " value-pointer " i32.const " (alength value-bytes)
+     " i32.const 0 call $provider\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    local.get $grant call $drop-grant\n"
+     "    i32.const 4 i32.load8_u i64.extend_i32_u)\n"
+     "  (func (export \"cm32p2||" (name (:name function)) "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " key-pointer ") \"" (wat-data key-bytes) "\")\n"
+     "  (data (i32.const " etag-pointer ") \"" (wat-data etag-bytes) "\")\n"
+     "  (data (i32.const " value-pointer ") \"" (wat-data value-bytes) "\")\n"
      ")\n")))
 
 (defn- typed-v3-scalar-literal-wat [function plan]
@@ -5387,6 +5534,20 @@
   ([kir target] (emit kir target {}))
   ([kir target opts]
   (case (assert-supported! kir)
+    :object-compare-and-set-call
+    (let [function (first (exported-functions kir))]
+      (if (:typed-capability-v3? opts)
+        (wasm-tools/parse-wat
+         (typed-v3-object-cas-wat
+          function (object-compare-and-set-call function)))
+        (reject "object CAS requires typed v0.3" {:target target})))
+    :object-put-block-call
+    (let [function (first (exported-functions kir))]
+      (if (:typed-capability-v3? opts)
+        (wasm-tools/parse-wat
+         (typed-v3-object-put-block-wat
+          function (object-put-block-call function)))
+        (reject "object put requires typed v0.3" {:target target})))
     :stream-byte-count-call
     (let [function (first (exported-functions kir))]
       (if (:typed-capability-v3? opts)

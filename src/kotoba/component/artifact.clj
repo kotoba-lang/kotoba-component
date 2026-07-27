@@ -31,6 +31,8 @@
                                   :scalar-literal-capability-call
                                   :string-literal-unit-capability-call
                                   :stream-byte-count-call
+                                  :object-put-block-call
+                                  :object-compare-and-set-call
                                   :vector-i64-identity
                                   :vector-i64-literal}
                                 lowering)))

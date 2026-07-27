@@ -81,6 +81,62 @@
     (is (= :linear-resource (:capability-mode wit)))
     (is (pos? (alength ^bytes (:bytes packaged))))))
 
+(deftest typed-v03-object-stream-consumer-lowers-linear-resources
+  (let [kir {:format :kotoba.kir/v4
+             :exports ['main]
+             :schemas {}
+             :effects #{[:cap/call 14]}
+             :functions [{:name 'main :params [] :param-types []
+                          :result :i64 :effects #{[:cap/call 14]}
+                          :body
+                          '(bytes-task-byte-count
+                            (typed-cap-call
+                             14 :string [:task [:stream :bytes]] "blocks/key"))}]}
+        opts {:typed-capability-v3? true}
+        wit (wit/emit kir opts)
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1 opts)
+        packaged (artifact/package core-bytes kir wit)]
+    (is (= ["aiueos-object-get-stream"] (:imports wit)))
+    (is (= :stream-byte-count-call (:canonical-lowering packaged)))
+    (is (= :linear-resource (:capability-mode wit)))
+    (is (pos? (alength ^bytes (:bytes packaged))))))
+
+(deftest typed-v03-object-write-operations-lower-formal-records
+  (let [put-request [:record :object/put
+                     [[:key :string] [:bytes :string]]]
+        cas-request [:record :object/cas
+                     [[:key :string] [:expected-etag :string] [:bytes :string]]]
+        cas-response [:record :object/cas-response
+                      [[:won :bool] [:etag :string]]]
+        package
+        (fn [id body]
+          (let [kir {:format :kotoba.kir/v4
+                     :exports ['main] :schemas {}
+                     :effects #{[:cap/call id]}
+                     :functions [{:name 'main :params [] :param-types []
+                                  :result :i64 :effects #{[:cap/call id]}
+                                  :body body}]}
+                opts {:typed-capability-v3? true}
+                wit (wit/emit kir opts)
+                core-bytes (core/emit kir :wasm32-wasi-kotoba-v1 opts)]
+            (artifact/package core-bytes kir wit)))
+        put (package
+             15
+             (list 'typed-cap-call 15 put-request :i64
+                   (list 'record-new put-request "blocks/hash" "payload")))
+        cas (package
+             16
+             (list 'object-cas-won
+                   (list 'typed-cap-call 16 cas-request cas-response
+                         (list 'record-new cas-request
+                               "refs/main" "etag-1" "next"))))]
+    (is (= ["aiueos-object-put-block"] (:imports put)))
+    (is (= :object-put-block-call (:canonical-lowering put)))
+    (is (pos? (alength ^bytes (:bytes put))))
+    (is (= ["aiueos-object-compare-and-set-ref"] (:imports cas)))
+    (is (= :object-compare-and-set-call (:canonical-lowering cas)))
+    (is (pos? (alength ^bytes (:bytes cas))))))
+
 (def multi-match-kir
   {:format :kotoba.kir/v4
    :exports ['choose-option 'choose-result 'negate]
