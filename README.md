@@ -95,14 +95,15 @@ validated even when the projected field is different.
 
 A direct named capability may also transport one bounded structural
 `option`/`result` unchanged. Its leaves may be scalars, strings/keywords,
-lists of scalars/strings/keywords or sealed finite records containing those
-leaves, or nested structural unions. Both application and provider use the
-same recursive Canonical ABI layout, validate the selected case, every active
-record bool, every nested pointer/length pair, and the shared aggregate byte
-budget, and allocate from a bounded arena sized for the widest permitted
-active payload. Bare nominal records remain on the schema-aware variant path;
-unsupported aggregate shapes fail closed instead of falling back to an
-ambient host ABI.
+finite sealed records, nested structural unions, or bounded lists recursively
+containing any of those admitted values (including other lists). Both
+application and provider use the same recursive Canonical ABI layout, validate
+the selected case, every active record bool, and every nested pointer/length
+pair. All active indirect leaves share the 1 MiB byte budget and all active
+list nodes share the 16,384-item budget; the bounded arena is sized for the
+widest permitted active payload. Bare nominal records remain on the
+schema-aware variant path; recursive nominal records and unsupported aggregate
+shapes fail closed instead of falling back to an ambient host ABI.
 
 Selected string/keyword leaves may feed `string-byte-length` without becoming
 host objects. The shared core emitter consumes their Canonical `(ptr,len)`

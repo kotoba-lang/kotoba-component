@@ -329,10 +329,10 @@
   These layouts have the same discriminant-plus-joined-payload shape as a
   sealed variant, so they deliberately share `variant-wat`. Payloads are
   admitted only when that emitter can recursively validate and store every
-  active-case leaf: a Canonical scalar/string/keyword or a finite sealed record
-  recursively containing those leaves, bounded `list<s64>`/`list<f64>`, or
-  another finite structural option/result. Other list item types and recursive
-  record identities remain fail-closed."
+  active-case leaf: a Canonical scalar/string/keyword, a finite sealed record,
+  another finite structural option/result, or a bounded list recursively
+  containing any of those admitted values. Recursive nominal record identities
+  remain fail-closed."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         descriptor (first param-types)
