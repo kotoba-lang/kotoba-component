@@ -322,7 +322,7 @@
 (defn- structural-union-provider-wit [entry descriptor schemas]
   (letfn [(fixed-list-item? [value seen]
             (cond
-              (contains? #{:i64 :f32 :f64 :bool} value)
+              (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
               true
 
               (and (vector? value)

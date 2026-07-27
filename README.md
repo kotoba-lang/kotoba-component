@@ -35,18 +35,21 @@ scalars, bounded strings/keywords, or finite sealed records recursively
 containing those leaves. Validation is case-dependent: malformed inactive
 joined slots are ignored, while malformed leaves in the selected case trap.
 
-Bounded lists of `s64`, `float64`, `bool`, or finite scalar records additionally
-validate item count, alignment, pointer overflow, and arena range in the
-selected case. Bool fields are checked for every active item before the list
-is exposed. Identity lowering borrows the complete fixed-size item buffer
-through Canonical lift; it neither frees nor mutates that buffer, and
-post-return resets the arena only after lift has finished.
+Bounded lists of scalars, strings/keywords, or finite records recursively
+containing those leaves additionally validate item count, alignment, pointer
+overflow, and every outer and inner arena range in the selected case. Bool
+fields and string/keyword byte bounds are checked for every active item.
+All indirect leaves in one value share KIR's 1 MiB aggregate byte budget, so
+per-item limits cannot amplify into a host-memory denial of service. Identity
+lowering borrows the complete item graph through Canonical lift; it neither
+frees nor mutates that graph, and post-return resets the arena only after lift
+has finished.
 
 Nested `option`/`result` payloads recursively validate each inner
 discriminant and only the selected inner case before storing the same nested
-in-memory union shape. Lists whose items contain indirect values or unions,
-list-of-list, and recursive records remain fail-closed pending recursive
-per-element graph validation and ownership.
+in-memory union shape. List items containing unions, list-of-list, and
+recursive records remain fail-closed pending recursive per-element graph
+validation and ownership.
 
 Non-identity `option`/`result` matches can consume scalar payloads and finite
 records whose recursive leaves are `s64`, `float32`, `float64`, or `bool`.
@@ -89,13 +92,14 @@ validated even when the projected field is different.
 
 A direct named capability may also transport one bounded structural
 `option`/`result` unchanged. Its leaves may be scalars, strings/keywords,
-lists of scalars or sealed finite all-scalar records, or nested structural
-unions. Both application and provider use the same recursive Canonical ABI
-layout, validate the selected case and every active indirect bound (including
-every active record bool), and allocate from a bounded arena sized for the
-widest possible active payload. Bare nominal records remain on the
-schema-aware variant path; unsupported aggregate shapes fail closed instead
-of falling back to an ambient host ABI.
+lists of scalars/strings/keywords or sealed finite records containing those
+leaves, or nested structural unions. Both application and provider use the
+same recursive Canonical ABI layout, validate the selected case, every active
+record bool, every nested pointer/length pair, and the shared aggregate byte
+budget, and allocate from a bounded arena sized for the widest permitted
+active payload. Bare nominal records remain on the schema-aware variant path;
+unsupported aggregate shapes fail closed instead of falling back to an
+ambient host ABI.
 
 Selected string/keyword leaves may feed `string-byte-length` without becoming
 host objects. The shared core emitter consumes their Canonical `(ptr,len)`

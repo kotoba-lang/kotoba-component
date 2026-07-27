@@ -680,7 +680,9 @@
         option-list [:option :vector-i64]
         option-f64-list [:option :vector-f64]
         option-bool-list [:option [:list :bool]]
+        option-string-list [:option [:list :string]]
         option-point-list [:option [:list point]]
+        option-message-list [:option [:list message]]
         option-option [:option [:option :i64]]
         option-result [:option [:result :string :bool]]
         result-message [:result message :bool]
@@ -726,12 +728,21 @@
                         ["echo(some([]))" "some([])"]
                         ["echo(some([true, false, true]))"
                          "some([true, false, true])"]]}
+               {:descriptor option-string-list
+                :calls [["echo(none)" "none"]
+                        ["echo(some([]))" "some([])"]
+                        ["echo(some([\"hello\", \"安全\"]))"
+                         "some([\"hello\", \"安全\"])"]]}
                {:descriptor option-point-list
                 :calls
                 [["echo(none)" "none"]
                  ["echo(some([]))" "some([])"]
                  ["echo(some([{x: 7, visible: true}, {x: -2, visible: false}]))"
                   "some([{x: 7, visible: true}, {x: -2, visible: false}])"]]}
+               {:descriptor option-message-list
+                :calls
+                [["echo(some([{topic: \"demo\", text: \"hello\"}]))"
+                  "some([{topic: \"demo\", text: \"hello\"}])"]]}
                {:descriptor option-option
                 :calls [["echo(none)" "none"]
                         ["echo(some(none))" "some(none)"]
@@ -844,6 +855,41 @@
            e['cm32p2||echo'](0,p,1);
            let trapped=false;
            try { e['cm32p2||echo'](1,p,1); } catch (_) { trapped=true; }
+           if (!trapped) process.exit(2);
+         }).catch(error=>{ console.error(error); process.exit(3); });"]
+    (try
+      (Files/write path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run (shell/sh "node" "-e" script (str path))]
+        (is (zero? (:exit run)) (:err run)))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest structural-list-string-enforces-one-aggregate-byte-budget
+  (let [descriptor [:option [:list :string]]
+        kir {:format :kotoba.kir/v4
+             :exports ['echo] :schemas {} :effects #{}
+             :functions
+             [{:name 'echo :params ['value] :param-types [descriptor]
+               :result descriptor :effects #{} :body 'value}]}
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+        path (Files/createTempFile
+              "kotoba-component-list-string-budget-" ".wasm"
+              (make-array FileAttribute 0))
+        script
+        "const fs=require('node:fs');
+         WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
+           const e=instance.exports;
+           const items=e.cm32p2_realloc(0,0,4,17*8);
+           const bytes=e.cm32p2_realloc(0,0,1,65536);
+           const view=new DataView(e.cm32p2_memory.buffer);
+           for(let i=0;i<17;i++){
+             view.setUint32(items+i*8,bytes,true);
+             view.setUint32(items+i*8+4,65536,true);
+           }
+           e['cm32p2||echo'](0,items,17);
+           let trapped=false;
+           try { e['cm32p2||echo'](1,items,17); } catch (_) { trapped=true; }
            if (!trapped) process.exit(2);
          }).catch(error=>{ console.error(error); process.exit(3); });"]
     (try

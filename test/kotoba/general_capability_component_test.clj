@@ -618,6 +618,47 @@
       (finally
         (Files/deleteIfExists path)))))
 
+(deftest structural-union-capability-transports-list-of-strings
+  (let [descriptor [:option [:list :string]]
+        kir {:format :kotoba.kir/v4
+             :exports ['echo] :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'echo
+               :params ['request]
+               :param-types [descriptor]
+               :result descriptor
+               :effects #{:clock/read}
+               :body (list 'typed-cap-call clock-now
+                           descriptor descriptor 'request)}]}
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir (wit/emit kir))
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor)
+        closed (composition/compose-closed application [provider])
+        path (Files/createTempFile
+              "kotoba-aggregate-capability-string-list-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-capability-call
+             (component-core/assert-supported! kir)))
+      (doseq [[invoke expected]
+              [["echo(none)" "none"]
+               ["echo(some([]))" "some([])"]
+               ["echo(some([\"hello\",\"安全\"]))"
+                "some([\"hello\", \"安全\"])"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke"
+                            invoke (str path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      (finally
+        (Files/deleteIfExists path)))))
+
 (deftest structural-union-capability-transports-maximum-list
   (let [descriptor [:option :vector-i64]
         kir {:format :kotoba.kir/v4
