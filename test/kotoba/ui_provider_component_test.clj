@@ -1,9 +1,19 @@
 (ns kotoba.ui-provider-component-test
-  "W5 remaining wasm packaging: synthetic ui-v1 dual-export component provider."
-  (:require [clojure.test :refer [deftest is]]
+  "W5 remaining wasm packaging: synthetic ui-v1 dual-export component provider.
+   Multi-step Wasmtime commit sequence (rev0→rev1→rev2) added as deepen slice."
+  (:require [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
-            [kotoba.wasm.tools :as wasm-tools]))
+            [kotoba.wasm.tools :as wasm-tools])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(def ^:private wasmtime-binary
+  (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
+    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
 
 (defn- ref-ify-record
   [descriptor]
@@ -96,3 +106,116 @@
     (is (re-find #"cm32p2\|kotoba:application/ui@1\|commit" wat))
     (is (re-find #"cm32p2\|kotoba:application/ui@1\|next-event" wat))
     (is (re-find #"global \$rev" wat))))
+
+(defn- ui-commit-sequence-driver-wit
+  "Application WIT importing ui.commit only; exports scalar multi-step run."
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-ui-node {\n"
+   "    id: string,\n"
+   "    parent: option<string>,\n"
+   "    kind: string,\n"
+   "    text: string,\n"
+   "  }\n"
+   "  record kotoba-ui-commit-request {\n"
+   "    base-revision: s64,\n"
+   "    nodes: list<kotoba-ui-node>,\n"
+   "  }\n"
+   "  record kotoba-ui-commit-result {\n"
+   "    revision: s64,\n"
+   "    node-count: s64,\n"
+   "  }\n"
+   "}\n\n"
+   "interface ui {\n"
+   "  use types.{kotoba-ui-commit-request, kotoba-ui-commit-result};\n"
+   "  commit: func(request: kotoba-ui-commit-request) -> kotoba-ui-commit-result;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import ui;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- ui-commit-sequence-driver-wat
+  "Two empty commits with advancing base-revision; return (rev2 - rev1).
+  Canonical ABI: MAX_FLAT_RESULTS=1 so record{s64,s64} uses retptr as last
+  param (base-rev i64, nodes ptr/len i32, retptr i32) -> [].
+  revision sits at retptr + 0."
+  []
+  (let [mod "cm32p2|kotoba:application/ui@1"
+        export-run "cm32p2||run"
+        r1-base 64
+        r2-base 128]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"commit\""
+     " (func $commit (param i64 i32 i32 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $r1 i64) (local $r2 i64)\n"
+     ;; commit base-rev=0, empty nodes → revision 1
+     "    i64.const 0 i32.const 0 i32.const 0 i32.const " r1-base " call $commit\n"
+     "    i32.const " r1-base " i64.load offset=0 local.set $r1\n"
+     ;; commit base-rev=1, empty nodes → revision 2
+     "    i64.const 1 i32.const 0 i32.const 0 i32.const " r2-base " call $commit\n"
+     "    i32.const " r2-base " i64.load offset=0 local.set $r2\n"
+     "    local.get $r2 local.get $r1 i64.sub)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     ")\n")))
+
+(defn- package-ui-commit-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-ui-commit-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (ui-commit-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (ui-commit-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:ui/commit]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest ui-commit-sequence-driver-closes-and-wasmtime-advances-revision
+  "Multi-step deepen (ADR 0104): compose real ui provider with a driver that
+   performs two empty commits; Wasmtime returns revision delta 1."
+  (let [d (ui-v1-descriptors)
+        provider (composition/package-ui-provider
+                  (:commit-req d) (:commit-res d)
+                  (:event-req d) (:event-res d)
+                  (:schemas d))
+        driver (package-ui-commit-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-ui-commit-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:ui/commit] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "1" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
