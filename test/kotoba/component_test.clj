@@ -681,6 +681,8 @@
         option-f64-list [:option :vector-f64]
         option-bool-list [:option [:list :bool]]
         option-string-list [:option [:list :string]]
+        option-option-string-list [:option [:list [:option :string]]]
+        option-result-list [:option [:list [:result :string :bool]]]
         option-point-list [:option [:list point]]
         option-message-list [:option [:list message]]
         option-option [:option [:option :i64]]
@@ -733,6 +735,12 @@
                         ["echo(some([]))" "some([])"]
                         ["echo(some([\"hello\", \"安全\"]))"
                          "some([\"hello\", \"安全\"])"]]}
+               {:descriptor option-option-string-list
+                :calls [["echo(some([none, some(\"hello\")]))"
+                         "some([none, some(\"hello\")])"]]}
+               {:descriptor option-result-list
+                :calls [["echo(some([ok(\"hello\"), err(true)]))"
+                         "some([ok(\"hello\"), err(true)])"]]}
                {:descriptor option-point-list
                 :calls
                 [["echo(none)" "none"]
@@ -890,6 +898,37 @@
            e['cm32p2||echo'](0,items,17);
            let trapped=false;
            try { e['cm32p2||echo'](1,items,17); } catch (_) { trapped=true; }
+           if (!trapped) process.exit(2);
+         }).catch(error=>{ console.error(error); process.exit(3); });"]
+    (try
+      (Files/write path ^bytes core-bytes
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run (shell/sh "node" "-e" script (str path))]
+        (is (zero? (:exit run)) (:err run)))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest structural-list-union-validates-only-each-active-item-case
+  (let [descriptor [:option [:list [:option :string]]]
+        kir {:format :kotoba.kir/v4
+             :exports ['echo] :schemas {} :effects #{}
+             :functions
+             [{:name 'echo :params ['value] :param-types [descriptor]
+               :result descriptor :effects #{} :body 'value}]}
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
+        path (Files/createTempFile
+              "kotoba-component-list-union-validation-" ".wasm"
+              (make-array FileAttribute 0))
+        script
+        "const fs=require('node:fs');
+         WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
+           const e=instance.exports;
+           const item=e.cm32p2_realloc(0,0,4,12);
+           const view=new DataView(e.cm32p2_memory.buffer);
+           view.setUint8(item,2);
+           e['cm32p2||echo'](0,item,1);
+           let trapped=false;
+           try { e['cm32p2||echo'](1,item,1); } catch (_) { trapped=true; }
            if (!trapped) process.exit(2);
          }).catch(error=>{ console.error(error); process.exit(3); });"]
     (try
