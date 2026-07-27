@@ -325,6 +325,15 @@
               (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
               true
 
+              (and (vector? value) (= :option (first value))
+                   (= 2 (count value)))
+              (fixed-list-item? (second value) seen)
+
+              (and (vector? value) (= :result (first value))
+                   (= 3 (count value)))
+              (and (fixed-list-item? (second value) seen)
+                   (fixed-list-item? (nth value 2) seen))
+
               (and (vector? value)
                    (contains? #{:ref :record} (first value)))
               (let [identity (second value)

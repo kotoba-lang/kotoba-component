@@ -294,6 +294,15 @@
               (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
               true
 
+              (and (vector? value) (= :option (first value))
+                   (= 2 (count value)))
+              (fixed? (second value) seen)
+
+              (and (vector? value) (= :result (first value))
+                   (= 3 (count value)))
+              (and (fixed? (second value) seen)
+                   (fixed? (nth value 2) seen))
+
               (and (vector? value)
                    (contains? #{:ref :record} (first value)))
               (let [identity (second value)
@@ -2598,7 +2607,9 @@
    (variant-flat-value-expr joined-types (inc (:flat-index leaf)) :i32)])
 
 (defn- bounded-list-item-leaves
-  "Absolute bool/string/keyword leaves inside one bounded list item."
+  "All bool/string/keyword leaves reachable inside one bounded list item.
+  Union cases are collected only for sizing/local-admission decisions; runtime
+  validation below still dispatches on the active discriminant."
   [item-layout]
   (letfn [(walk [layout base]
             (cond
@@ -2612,18 +2623,88 @@
               (mapcat (fn [{:keys [offset layout]}]
                         (walk layout (+ base offset)))
                       (:fields layout))
+
+              (contains? layout :cases)
+              (mapcat #(walk (:layout %) (+ base (:payload-offset layout)))
+                      (:cases layout))
               :else []))]
     (vec (walk item-layout 0))))
 
+(defn- memory-layout-validation
+  "WAT that validates one Canonical value already stored at BASE. Unlike the
+  flat-param validator, this is used for list items and therefore reads the
+  item's in-memory discriminant before visiting only its active union case."
+  [layout base capacity]
+  (letfn [(at [expr offset]
+            (if (zero? offset) expr (str expr " i32.const " offset " i32.add")))
+          (validate [node address]
+            (cond
+              (empty? (:flat node))
+              ""
+
+              (= :bool (:descriptor node))
+              (str "          " address
+                   " i32.load8_u i32.const 1 i32.gt_u if unreachable end\n")
+
+              (:max-bytes node)
+              (str
+               "          " address " i32.load local.set $item-pointer\n"
+               "          " address " i32.load offset=4 local.tee $item-length"
+               " i32.const " (:max-bytes node) " i32.gt_u if unreachable end\n"
+               "          local.get $item-pointer local.get $item-length i32.add\n"
+               "          local.tee $end local.get $item-pointer i32.lt_u if unreachable end\n"
+               "          local.get $end i32.const " capacity
+               " i32.gt_u if unreachable end\n"
+               "          local.get $indirect-total local.get $item-length i32.add\n"
+               "          local.tee $indirect-total local.get $item-length"
+               " i32.lt_u if unreachable end\n"
+               "          local.get $indirect-total i32.const "
+               value/canonical-indirect-byte-limit
+               " i32.gt_u if unreachable end\n")
+
+              (contains? node :fields)
+              (apply str
+                     (map (fn [{:keys [offset layout]}]
+                            (validate layout (at address offset)))
+                          (:fields node)))
+
+              (contains? node :cases)
+              (let [disc-load ({1 "i32.load8_u" 2 "i32.load16_u" 4 "i32.load"}
+                               (:discriminant-size node))
+                    payload-address (at address (:payload-offset node))
+                    cases (:cases node)]
+                (str
+                 "          " address " " disc-load
+                 " local.tee $item-disc i32.const " (count cases)
+                 " i32.ge_u if unreachable end\n"
+                 (case-chain cases payload-address)))
+
+              :else ""))
+          (case-chain [cases payload-address]
+            (letfn [(build [remaining index]
+                      (let [body (validate (:layout (first remaining))
+                                           payload-address)]
+                        (if (= 1 (count remaining))
+                          body
+                          (str
+                           "          local.get $item-disc i32.const " index
+                           " i32.eq\n"
+                           "          if\n" body
+                           "          else\n" (build (rest remaining) (inc index))
+                           "          end\n"))))]
+              (build cases 0)))]
+    (validate layout base)))
+
 (defn- bounded-list-item-validation
-  "Validate every bool and indirect string/keyword in every active list item.
+  "Validate every active leaf in every active list item.
   The enclosing list range/alignment checks run first. `$list-index` and
   item scratch locals are shared by sequential list validations. All indirect
   byte lengths also consume the shared canonical aggregate budget."
   [pointer length item-layout capacity]
-  (let [leaves (bounded-list-item-leaves item-layout)
-        stride (align-up (:size item-layout) (:alignment item-layout))]
-    (when (seq leaves)
+  (let [stride (align-up (:size item-layout) (:alignment item-layout))
+        validation (memory-layout-validation
+                    item-layout "local.get $item-base" capacity)]
+    (when (seq validation)
       (str
        "      i32.const 0 local.set $list-index\n"
        "      block $list-done\n"
@@ -2632,33 +2713,7 @@
        " i32.ge_u br_if $list-done\n"
        "          " pointer " local.get $list-index i32.const " stride
        " i32.mul i32.add local.set $item-base\n"
-       (apply
-        str
-        (map
-         (fn [{:keys [kind offset max-bytes]}]
-           (case kind
-             :bool
-             (str "          local.get $item-base i32.load8_u offset="
-                  offset " i32.const 1 i32.gt_u if unreachable end\n")
-
-             :indirect
-             (str
-              "          local.get $item-base i32.load offset=" offset
-              " local.set $item-pointer\n"
-              "          local.get $item-base i32.load offset=" (+ offset 4)
-              " local.tee $item-length i32.const " max-bytes
-              " i32.gt_u if unreachable end\n"
-              "          local.get $item-pointer local.get $item-length i32.add\n"
-              "          local.tee $end local.get $item-pointer i32.lt_u if unreachable end\n"
-              "          local.get $end i32.const " capacity
-              " i32.gt_u if unreachable end\n"
-              "          local.get $indirect-total local.get $item-length i32.add\n"
-              "          local.tee $indirect-total local.get $item-length"
-              " i32.lt_u if unreachable end\n"
-              "          local.get $indirect-total i32.const "
-              value/canonical-indirect-byte-limit
-              " i32.gt_u if unreachable end\n")))
-         leaves))
+       validation
        "          local.get $list-index i32.const 1 i32.add local.set $list-index\n"
        "          br $list-loop\n"
        "        end\n"
@@ -2969,7 +3024,8 @@
        " (local $end i32) (local $indirect-total i32)")
      (when needs-list-item-validation?
        (str " (local $list-index i32) (local $item-base i32)"
-            " (local $item-pointer i32) (local $item-length i32)"))
+            " (local $item-pointer i32) (local $item-length i32)"
+            " (local $item-disc i32)"))
      "\n"
      (when needs-indirect-headroom?
        "    i32.const 0 local.set $indirect-total\n")
@@ -3827,7 +3883,8 @@
        " (local $end i32) (local $indirect-total i32)")
      (when needs-list-item-validation?
        (str " (local $list-index i32) (local $item-base i32)"
-            " (local $item-pointer i32) (local $item-length i32)"))
+            " (local $item-pointer i32) (local $item-length i32)"
+            " (local $item-disc i32)"))
      "\n"
      (when needs-indirect-headroom?
        "    i32.const 0 local.set $indirect-total\n")

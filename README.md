@@ -35,10 +35,12 @@ scalars, bounded strings/keywords, or finite sealed records recursively
 containing those leaves. Validation is case-dependent: malformed inactive
 joined slots are ignored, while malformed leaves in the selected case trap.
 
-Bounded lists of scalars, strings/keywords, or finite records recursively
-containing those leaves additionally validate item count, alignment, pointer
-overflow, and every outer and inner arena range in the selected case. Bool
-fields and string/keyword byte bounds are checked for every active item.
+Bounded lists of scalars, strings/keywords, structural options/results, or
+finite records recursively containing those leaves additionally validate item
+count, alignment, pointer overflow, and every outer and inner arena range in
+the selected case. Each item's in-memory discriminant is range-checked before
+only its active union case is visited. Bool fields and string/keyword byte
+bounds are checked for every active item.
 All indirect leaves in one value share KIR's 1 MiB aggregate byte budget, so
 per-item limits cannot amplify into a host-memory denial of service. Identity
 lowering borrows the complete item graph through Canonical lift; it neither
@@ -47,9 +49,8 @@ has finished.
 
 Nested `option`/`result` payloads recursively validate each inner
 discriminant and only the selected inner case before storing the same nested
-in-memory union shape. List items containing unions, list-of-list, and
-recursive records remain fail-closed pending recursive per-element graph
-validation and ownership.
+in-memory union shape. List-of-list and recursive records remain fail-closed
+pending recursive variable-cardinality graph validation and ownership.
 
 Non-identity `option`/`result` matches can consume scalar payloads and finite
 records whose recursive leaves are `s64`, `float32`, `float64`, or `bool`.
