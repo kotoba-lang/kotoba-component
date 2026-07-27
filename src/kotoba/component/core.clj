@@ -465,6 +465,26 @@
         (assoc projection :descriptor descriptor :operation op
                :kind :projection)))))
 
+(defn- finite-inline-record-bool-offsets
+  "Return every nested bool byte offset for an inline finite record layout.
+  Nil means that a non-scalar leaf was encountered; an empty vector is a
+  valid numeric-only record that needs no item-level validation."
+  [layout]
+  (when (:fields layout)
+    (letfn [(walk [node base]
+              (cond
+                (contains? #{:i64 :f32 :f64} (:descriptor node)) []
+                (= :bool (:descriptor node)) [base]
+                (:fields node)
+                (reduce
+                 (fn [offsets {:keys [offset layout]}]
+                   (when offsets
+                     (when-let [nested (walk layout (+ base offset))]
+                       (into offsets nested))))
+                 [] (:fields node))
+                :else nil))]
+      (some-> (walk layout 0) vec))))
+
 (defn- match-payload-leaves
   "Return admitted leaves keyed by record-get path for one match payload.
   Products may recurse through finite records. Strings and admitted bounded
@@ -496,6 +516,20 @@
                 :flat-index flat-index
                 :max-items (:max-items node)
                 :item-layout (:item-layout node)}]
+
+              (and (vector? (:descriptor node))
+                   (= :list (first (:descriptor node)))
+                   (integer? (:max-items node))
+                   (map? (:item-layout node))
+                   (some? (finite-inline-record-bool-offsets
+                           (:item-layout node))))
+              [{:path path
+                :descriptor (:descriptor node)
+                :flat-index flat-index
+                :max-items (:max-items node)
+                :item-layout (:item-layout node)
+                :record-bool-offsets
+                (finite-inline-record-bool-offsets (:item-layout node))}]
 
               (contains? node :fields)
               (loop [remaining (:fields node)
@@ -537,7 +571,8 @@
             (when (and (seq? node)
                        (= 6 (count node))
                        (= 'option-match (first node))
-                       (contains? #{[:option :vector-i64]
+                       (or
+                        (contains? #{[:option :vector-i64]
                                     [:option :vector-f64]
                                     [:option [:list :i64]]
                                     [:option [:list :f64]]
@@ -546,7 +581,9 @@
                                     [:option [:list :bool]]
                                     [:option :string]
                                     [:option :keyword]}
-                                  (second node)))
+                                   (second node))
+                        (contains? (get leaves-by-path [])
+                                   :record-bool-offsets)))
               (let [[_ descriptor call fallback result-binder result-body] node]
                 (let [leaf-descriptor
                       (:descriptor (get leaves-by-path []))
@@ -569,12 +606,14 @@
                                request)))
                      (symbol? result-binder)
                      (= result-body (list count-op result-binder))
-                     (contains? #{:vector-i64 :vector-f64
-                                  [:list :i64] [:list :f64]
-                                  [:list :string] [:list :keyword]
-                                  [:list :bool]
-                                  :string :keyword}
-                                leaf-descriptor)
+                     (or (contains? #{:vector-i64 :vector-f64
+                                      [:list :i64] [:list :f64]
+                                      [:list :string] [:list :keyword]
+                                      [:list :bool]
+                                      :string :keyword}
+                                    leaf-descriptor)
+                         (contains? (get leaves-by-path [])
+                                    :record-bool-offsets))
                      (valid? fallback))))))
           (result-list-capability-count? [node]
             (when (and (seq? node)
@@ -595,12 +634,14 @@
                 (and (vector? descriptor)
                      (= :result (first descriptor))
                      (= (second descriptor) (nth descriptor 2))
-                     (contains? #{:vector-i64 :vector-f64
-                                  [:list :i64] [:list :f64]
-                                  [:list :string] [:list :keyword]
-                                  [:list :bool]
-                                  :string :keyword}
-                                leaf-descriptor)
+                     (or (contains? #{:vector-i64 :vector-f64
+                                      [:list :i64] [:list :f64]
+                                      [:list :string] [:list :keyword]
+                                      [:list :bool]
+                                      :string :keyword}
+                                    leaf-descriptor)
+                         (contains? (get leaves-by-path [])
+                                    :record-bool-offsets))
                      (= leaf-descriptor (second descriptor))
                      (seq? call)
                      (= 5 (count call))
@@ -971,16 +1012,8 @@
             (when (and (seq? node)
                        (= 6 (count node))
                        (= 'option-match (first node))
-                       (contains? #{[:option :vector-i64]
-                                    [:option :vector-f64]
-                                    [:option [:list :i64]]
-                                    [:option [:list :f64]]
-                                    [:option [:list :string]]
-                                    [:option [:list :keyword]]
-                                    [:option [:list :bool]]
-                                    [:option :string]
-                                    [:option :keyword]}
-                                  (second node)))
+                       (vector? (second node))
+                       (= :option (first (second node))))
               (let [[_ descriptor call fallback result-binder result-body] node]
                 (when (and (seq? call)
                            (= 5 (count call))
@@ -1006,7 +1039,21 @@
                             indirect-string-items?
                             (contains? #{[:list :string] [:list :keyword]}
                                        (second descriptor))
-                            bool-items? (= [:list :bool] (second descriptor))]
+                            bool-items? (= [:list :bool] (second descriptor))
+                            record-bool-offsets
+                            (:record-bool-offsets request-leaf)
+                            item-validation-args
+                            (cond
+                              indirect-string-items?
+                              [1 value/canonical-indirect-byte-limit]
+
+                              bool-items? [2 0]
+
+                              (seq record-bool-offsets)
+                              (into [3 (count record-bool-offsets)]
+                                    record-bool-offsets)
+
+                              :else [0 0])]
                         (when (and (= request-type descriptor)
                                    (= result-type descriptor)
                                    (= constructor-type descriptor)
@@ -1016,23 +1063,19 @@
                                       (list count-op result-binder))
                                    (or (:indirect-list? request-leaf)
                                        (:indirect-string? request-leaf)))
-                          (list 'component-option-list-capability-count
-                                capability-id
-                                (:pointer request-leaf)
-                                (:count request-leaf)
-                                (rewrite fallback)
-                                maximum
-                                (:stride request-leaf)
-                                (:alignment request-leaf)
-                                (:size result-layout)
-                                (:payload-offset result-layout)
-                                (:alignment result-layout)
-                                (cond indirect-string-items? 1
-                                      bool-items? 2
-                                      :else 0)
-                                (if indirect-string-items?
-                                  value/canonical-indirect-byte-limit
-                                  0))))))))))
+                          (apply
+                           list 'component-option-list-capability-count
+                           capability-id
+                           (:pointer request-leaf)
+                           (:count request-leaf)
+                           (rewrite fallback)
+                           maximum
+                           (:stride request-leaf)
+                           (:alignment request-leaf)
+                           (:size result-layout)
+                           (:payload-offset result-layout)
+                           (:alignment result-layout)
+                           item-validation-args)))))))))
           (result-list-capability-count [node]
             (when (and (seq? node)
                        (= 7 (count node))
@@ -1069,7 +1112,21 @@
                             indirect-string-items?
                             (contains? #{[:list :string] [:list :keyword]}
                                        (second descriptor))
-                            bool-items? (= [:list :bool] (second descriptor))]
+                            bool-items? (= [:list :bool] (second descriptor))
+                            record-bool-offsets
+                            (:record-bool-offsets request-leaf)
+                            item-validation-args
+                            (cond
+                              indirect-string-items?
+                              [1 value/canonical-indirect-byte-limit]
+
+                              bool-items? [2 0]
+
+                              (seq record-bool-offsets)
+                              (into [3 (count record-bool-offsets)]
+                                    record-bool-offsets)
+
+                              :else [0 0])]
                         (when (and (= constructor-type descriptor)
                                    (= request-value binder)
                                    (symbol? ok-binder)
@@ -1078,23 +1135,19 @@
                                    (= err-body (list count-op err-binder))
                                    (or (:indirect-list? request-leaf)
                                        (:indirect-string? request-leaf)))
-                          (list 'component-result-list-capability-count
-                                capability-id
-                                (if (= constructor 'result-ok-of) 0 1)
-                                (:pointer request-leaf)
-                                (:count request-leaf)
-                                maximum
-                                (:stride request-leaf)
-                                (:alignment request-leaf)
-                                (:size result-layout)
-                                (:payload-offset result-layout)
-                                (:alignment result-layout)
-                                (cond indirect-string-items? 1
-                                      bool-items? 2
-                                      :else 0)
-                                (if indirect-string-items?
-                                  value/canonical-indirect-byte-limit
-                                  0))))))))))
+                          (apply
+                           list 'component-result-list-capability-count
+                           capability-id
+                           (if (= constructor 'result-ok-of) 0 1)
+                           (:pointer request-leaf)
+                           (:count request-leaf)
+                           maximum
+                           (:stride request-leaf)
+                           (:alignment request-leaf)
+                           (:size result-layout)
+                           (:payload-offset result-layout)
+                           (:alignment result-layout)
+                           item-validation-args)))))))))
           (option-record-capability-projection [node]
             (when (and (seq? node)
                        (= 6 (count node))
@@ -1299,7 +1352,8 @@
          (fn [leaves]
            (into {}
                  (map (fn [{:keys [path descriptor flat-index max-bytes
-                                   max-items item-layout]}]
+                                   max-items item-layout
+                                   record-bool-offsets]}]
                         [path
                          (if (or max-bytes max-items)
                            (let [i32-slot
@@ -1333,9 +1387,10 @@
                                {:indirect-list? true
                                 :pointer (i32-slot flat-index)
                                 :count (i32-slot (inc flat-index))
-                                :max-items max-items
+                               :max-items max-items
                                 :stride stride
                                 :alignment alignment
+                                :record-bool-offsets record-bool-offsets
                                 :count-form
                                 (list 'component-list-count
                                       (i32-slot flat-index)
@@ -1440,6 +1495,22 @@
                   (canonical/layout request-type (:schemas kir)))
                 record-payload
                 (when request-layout (:item-layout request-layout))
+                list-payload
+                (when (vector? request-type)
+                  (case (first request-type)
+                    :option (second request-type)
+                    :result (when (= (second request-type)
+                                     (nth request-type 2))
+                              (second request-type))
+                    nil))
+                list-payload-layout
+                (when (and (vector? list-payload)
+                           (= :list (first list-payload)))
+                  (canonical/layout list-payload (:schemas kir)))
+                finite-record-list?
+                (and list-payload-layout
+                     (some? (finite-inline-record-bool-offsets
+                             (:item-layout list-payload-layout))))
                 flat-byte {:i32 0x7f :i64 0x7e :f32 0x7d :f64 0x7c}]
             (when entry
               (cond
@@ -1464,7 +1535,7 @@
                           (map flat-byte (:flat request-layout))
                           [0x7f 0]))}
 
-                (and (contains? #{[:option :vector-i64]
+                (and (or (contains? #{[:option :vector-i64]
                                   [:option :vector-f64]
                                   [:option [:list :i64]]
                                   [:option [:list :f64]]
@@ -1482,7 +1553,8 @@
                                   [:result [:list :bool] [:list :bool]]
                                   [:result :string :string]
                                   [:result :keyword :keyword]}
-                                request-type)
+                                  request-type)
+                         finite-record-list?)
                      (= result-type request-type))
                 {:id id
                  :module (str "cm32p2|kotoba:application/"
