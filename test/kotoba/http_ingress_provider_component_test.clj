@@ -1,9 +1,19 @@
 (ns kotoba.http-ingress-provider-component-test
-  "W5 family-3 second slice: synthetic http-ingress dual-export wasm provider."
-  (:require [clojure.test :refer [deftest is]]
+  "W5 family-3 second slice: synthetic http-ingress dual-export wasm provider.
+   Multi-step Wasmtime accept→none sequence added as deepen slice."
+  (:require [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
-            [kotoba.wasm.tools :as wasm-tools]))
+            [kotoba.wasm.tools :as wasm-tools])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(def ^:private wasmtime-binary
+  (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
+    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
 
 (defn- ref-ify
   [descriptor]
@@ -96,3 +106,121 @@
     (is (re-find #"i64.const 100" wat))
     (is (re-find #"i64.const 599" wat))
     (is (re-find #"i32.const 1\)" wat)))) ;; reply always true
+
+(defn- http-accept-sequence-driver-wit
+  "Application WIT importing http-ingress.accept only; scalar multi-step run."
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-http-accept-request {\n"
+   "    slot: s64,\n"
+   "  }\n"
+   "  record kotoba-http-header {\n"
+   "    name: string,\n"
+   "    value: string,\n"
+   "  }\n"
+   "  record kotoba-http-incoming-request {\n"
+   "    method: string,\n"
+   "    path: string,\n"
+   "    headers: list<kotoba-http-header>,\n"
+   "    body: string,\n"
+   "  }\n"
+   "}\n\n"
+   "interface http-ingress {\n"
+   "  use types.{kotoba-http-accept-request, kotoba-http-incoming-request};\n"
+   "  accept: func(request: kotoba-http-accept-request) -> option<kotoba-http-incoming-request>;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import http-ingress;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- http-accept-sequence-driver-wat
+  "Two accept(slot=0) calls; synthetic provider always returns option none
+  (disc=0). Return (1-d1)+(1-d2) = 2 when both none.
+  Canonical ABI: option result uses retptr as last param (slot i64, retptr)."
+  []
+  (let [mod "cm32p2|kotoba:application/http-ingress@1"
+        export-run "cm32p2||run"
+        r1-base 64
+        r2-base 128
+        push-accept
+        (fn [ret-base]
+          (str
+           "    i64.const 0\n"            ;; slot 0
+           "    i32.const " ret-base "\n"
+           "    call $accept\n"))]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"accept\""
+     " (func $accept (param i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $d1 i32) (local $d2 i32)\n"
+     (push-accept r1-base)
+     "    i32.const " r1-base " i32.load8_u offset=0 local.set $d1\n"
+     (push-accept r2-base)
+     "    i32.const " r2-base " i32.load8_u offset=0 local.set $d2\n"
+     ;; none disc=0 → count as 1 each
+     "    i32.const 1 local.get $d1 i32.sub\n"
+     "    i32.const 1 local.get $d2 i32.sub\n"
+     "    i32.add i64.extend_i32_s)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     ")\n")))
+
+(defn- package-http-accept-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-http-accept-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (http-accept-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (http-accept-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:http/accept]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest http-accept-sequence-driver-closes-and-wasmtime-returns-none-count
+  "Multi-step deepen (ADR 0109): compose real http-ingress provider with a
+   driver that performs two accepts; Wasmtime returns none-count 2."
+  (let [d (http-ingress-descriptors)
+        provider (composition/package-http-ingress-provider
+                  (:accept-req d) (:accept-res d)
+                  (:reply-req d) (:reply-res d)
+                  (:schemas d))
+        driver (package-http-accept-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-http-accept-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:http/accept] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
