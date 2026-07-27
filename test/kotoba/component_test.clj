@@ -937,6 +937,15 @@
            let trapped=false;
            try { e['cm32p2||echo'](1,items,17); } catch (_) { trapped=true; }
            if (!trapped) process.exit(2);
+           view.setUint32(items,bytes,true);view.setUint32(items+4,2,true);
+           view.setUint8(bytes,0xc0);view.setUint8(bytes+1,0x80);
+           trapped=false;
+           try { e['cm32p2||echo'](1,items,1); } catch (_) { trapped=true; }
+           if (!trapped) process.exit(4);
+           view.setUint32(items+4,3,true);
+           view.setUint8(bytes,0xe5);view.setUint8(bytes+1,0xae);
+           view.setUint8(bytes+2,0x89);
+           e['cm32p2||echo'](1,items,1);
          }).catch(error=>{ console.error(error); process.exit(3); });"]
     (try
       (Files/write path ^bytes core-bytes
