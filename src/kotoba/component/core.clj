@@ -285,6 +285,32 @@
          schema
          (canonical/layout descriptor schemas))))
 
+(defn- fixed-list-item-descriptor?
+  "True for one fixed-size list item admitted by the recursive item codec:
+  a Canonical scalar or a finite record containing only those scalars."
+  [descriptor schemas]
+  (letfn [(fixed? [value seen]
+            (cond
+              (contains? #{:i64 :f32 :f64 :bool} value)
+              true
+
+              (and (vector? value)
+                   (contains? #{:ref :record} (first value)))
+              (let [identity (second value)
+                    schema (if (= :ref (first value))
+                             (get schemas identity)
+                             value)]
+                (and (keyword? identity)
+                     (not (contains? seen identity))
+                     (vector? schema)
+                     (= :record (first schema))
+                     (every? (fn [[_ field-type]]
+                               (fixed? field-type (conj seen identity)))
+                             (nth schema 2))))
+
+              :else false))]
+    (fixed? descriptor #{})))
+
 (defn- structural-union-identity-function?
   "An identity export over a structural Component Model option/result.
   These layouts have the same discriminant-plus-joined-payload shape as a
@@ -299,28 +325,7 @@
         descriptor (first param-types)
         supported-payload?
         (fn supported-payload? [payload]
-          (letfn [(fixed-list-item? [value seen]
-                    (cond
-                      (contains? #{:i64 :f32 :f64 :bool} value)
-                      true
-
-                      (and (vector? value)
-                           (contains? #{:ref :record} (first value)))
-                      (let [identity (second value)
-                            schema (if (= :ref (first value))
-                                     (get schemas identity)
-                                     value)]
-                        (and (keyword? identity)
-                             (not (contains? seen identity))
-                             (vector? schema)
-                             (= :record (first schema))
-                             (every? (fn [[_ field-type]]
-                                       (fixed-list-item?
-                                        field-type (conj seen identity)))
-                                     (nth schema 2))))
-
-                      :else false))
-                  (supported? [value seen]
+          (letfn [(supported? [value seen]
                     (cond
                       (contains? #{:i64 :f32 :f64 :bool :string :keyword} value)
                       true
@@ -331,7 +336,7 @@
                       (and (vector? value)
                            (= :list (first value))
                            (= 2 (count value)))
-                      (fixed-list-item? (second value) seen)
+                      (fixed-list-item-descriptor? (second value) schemas)
 
                       (and (vector? value)
                            (= :option (first value))
@@ -1688,8 +1693,8 @@
 (defn- structural-union-capability-call
   "Admission for a direct named capability call that transports one bounded
   structural option/result type unchanged. Payloads recurse through structural
-  unions and admit Canonical scalar, string, keyword, and scalar-item list
-  leaves. Nominal records remain on the separately schema-aware variant path."
+  unions and admit Canonical scalar, string, keyword, and fixed-item list
+  leaves. A fixed list item is a scalar or a finite all-scalar record."
   [function schemas]
   (let [{:keys [params param-types result body]} function
         request-type (first param-types)
@@ -1715,6 +1720,10 @@
                  (= 3 (count payload)))
             (and (supported-payload? (second payload))
                  (supported-payload? (nth payload 2)))
+
+            (and (vector? payload) (= :list (first payload))
+                 (= 2 (count payload)))
+            (fixed-list-item-descriptor? (second payload) schemas)
 
             :else false))]
     (when (and (= 1 (count params))
@@ -3745,6 +3754,15 @@
         variant-layout (canonical/layout descriptor schemas)
         joined-types (vec (rest (:flat variant-layout)))
         [pages capacity needs-indirect-headroom?] (variant-capability-indirect-headroom variant-layout)
+        needs-list-item-validation?
+        (boolean
+         (some (fn [{:keys [layout]}]
+                 (some (fn [leaf]
+                         (and (:max-items leaf)
+                              (seq (fixed-list-item-bool-offsets
+                                    (:item-layout leaf)))))
+                       (variant-case-leaves layout)))
+               (:cases variant-layout)))
         params (apply str
                       (cons " (param $disc i32)"
                             (map-indexed
@@ -3760,7 +3778,10 @@
      "  (global $next (mut i32) (i32.const 8))\n"
      (bounded-bump-realloc-wat capacity)
      "  (func (export \"" export "\")" params " (result i32)\n"
-     "    (local $ret i32)" (when needs-indirect-headroom? " (local $end i32)") "\n"
+     "    (local $ret i32)" (when needs-indirect-headroom? " (local $end i32)")
+     (when needs-list-item-validation?
+       " (local $list-index i32) (local $item-base i32)")
+     "\n"
      "    i32.const 0 i32.const 0 i32.const " (:alignment variant-layout)
      " i32.const " (:size variant-layout) " call $realloc local.set $ret\n"
      "    local.get $disc i32.const " (count (:cases variant-layout)) " i32.ge_u if unreachable end\n"

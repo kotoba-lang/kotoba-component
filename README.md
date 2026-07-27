@@ -89,10 +89,11 @@ validated even when the projected field is different.
 
 A direct named capability may also transport one bounded structural
 `option`/`result` unchanged. Its leaves may be scalars, strings/keywords,
-`list<s64>`/`list<f64>`, or nested structural unions. Both application and
-provider use the same recursive Canonical ABI layout, validate the selected
-case and every active indirect bound, and allocate from a bounded arena sized
-for the widest possible active payload. Nominal records remain on the
+lists of scalars or sealed finite all-scalar records, or nested structural
+unions. Both application and provider use the same recursive Canonical ABI
+layout, validate the selected case and every active indirect bound (including
+every active record bool), and allocate from a bounded arena sized for the
+widest possible active payload. Bare nominal records remain on the
 schema-aware variant path; unsupported aggregate shapes fail closed instead
 of falling back to an ambient host ABI.
 

@@ -570,6 +570,54 @@
       (finally
         (Files/deleteIfExists path)))))
 
+(deftest structural-union-capability-transports-list-of-records
+  (let [descriptor [:option [:list [:ref :demo/point]]]
+        schemas {:demo/point
+                 [:record :demo/point
+                  [[:x :i64]
+                   [:visible :bool]]]}
+        kir {:format :kotoba.kir/v4
+             :exports ['echo]
+             :schemas schemas
+             :effects #{:clock/read}
+             :functions
+             [{:name 'echo
+               :params ['request]
+               :param-types [descriptor]
+               :result descriptor
+               :effects #{:clock/read}
+               :body (list 'typed-cap-call clock-now
+                           descriptor descriptor 'request)}]}
+        world (wit/emit kir)
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir world)
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor schemas)
+        closed (composition/compose-closed application [provider])
+        path (Files/createTempFile
+              "kotoba-aggregate-capability-record-list-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :structural-union-capability-call
+             (component-core/assert-supported! kir)))
+      (is (= [:clock/now] (:imports application)))
+      (doseq [[invoke expected]
+              [["echo(none)" "none"]
+               ["echo(some([]))" "some([])"]
+               ["echo(some([{x:7,visible:true},{x:-2,visible:false}]))"
+                "some([{x: 7, visible: true}, {x: -2, visible: false}])"]]]
+        (let [run (shell/sh "wasmtime" "run" "--invoke"
+                            invoke (str path))]
+          (is (zero? (:exit run)) (:err run))
+          (is (= expected (str/trim (:out run))) invoke)))
+      (finally
+        (Files/deleteIfExists path)))))
+
 (deftest structural-union-capability-transports-maximum-list
   (let [descriptor [:option :vector-i64]
         kir {:format :kotoba.kir/v4
