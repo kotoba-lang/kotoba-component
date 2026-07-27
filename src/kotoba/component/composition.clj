@@ -357,6 +357,16 @@
           (referenced-records [value seen]
             (cond
               (and (vector? value)
+                   (= :option (first value)))
+              (referenced-records (second value) seen)
+
+              (and (vector? value)
+                   (= :result (first value)))
+              (concat
+               (referenced-records (second value) seen)
+               (referenced-records (nth value 2) seen))
+
+              (and (vector? value)
                    (= :list (first value)))
               (referenced-records (second value) seen)
 
@@ -369,11 +379,12 @@
                 (if (or (contains? seen identity)
                         (not= :record (first schema)))
                   []
-                  (cons schema
-                        (mapcat (fn [[_ field-type]]
-                                  (referenced-records
-                                   field-type (conj seen identity)))
-                                (nth schema 2)))))
+                  (concat
+                   (mapcat (fn [[_ field-type]]
+                             (referenced-records
+                              field-type (conj seen identity)))
+                           (nth schema 2))
+                   [schema])))
 
               :else []))]
     (let [payloads (when (vector? descriptor)

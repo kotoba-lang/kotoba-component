@@ -800,6 +800,105 @@
         (Files/deleteIfExists component-path)
         (Files/deleteIfExists core-path)))))
 
+(deftest structural-recursive-list-match-validates-the-active-value-graph
+  (let [inner-type
+        [:record :demo/recursive-inner [[:tag :keyword] [:enabled :bool]]]
+        item-type
+        [:record :demo/recursive-item
+         [[:label :string]
+          [:choice [:result [:list :bool] [:ref :demo/recursive-inner]]]]]
+        schemas {:demo/recursive-inner inner-type
+                 :demo/recursive-item item-type}
+        descriptor [:option [:list [:ref :demo/recursive-item]]]
+        body
+        (list 'option-match descriptor 'value 9 'selected
+              (list 'option-match descriptor
+                    (list 'typed-cap-call
+                          clock-now descriptor descriptor
+                          (list 'option-some-of descriptor 'selected))
+                    9 'returned
+                    (list 'vector-count 'returned)))
+        kir {:format :kotoba.kir/v4
+             :exports ['choose 'echo]
+             :schemas schemas
+             :effects #{:clock/read}
+             :functions
+             [{:name 'choose :params ['value] :param-types [descriptor]
+               :result :i64 :effects #{:clock/read} :body body}
+              {:name 'echo :params ['value] :param-types [:i64]
+               :result :i64 :effects #{} :body 'value}]}
+        application
+        (artifact/package
+         (component-core/emit kir :wasm32-wasi-kotoba-v1)
+         kir (wit/emit kir))
+        provider
+        (composition/package-structural-union-identity-provider
+         :clock/now descriptor schemas)
+        closed (composition/compose-closed application [provider])
+        component-path
+        (Files/createTempFile
+         "kotoba-recursive-list-match-capability-" ".wasm"
+         (make-array FileAttribute 0))
+        core-path
+        (Files/createTempFile
+         "kotoba-recursive-list-provider-validation-" ".wasm"
+         (make-array FileAttribute 0))]
+    (try
+      (Files/write component-path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (Files/write core-path
+                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1)
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run
+            (shell/sh
+             "wasmtime" "run" "--invoke"
+             (str "choose(some([{label: \"outer\", "
+                  "choice: ok([true, false])}, "
+                  "{label: \"other\", choice: err({tag: \"safe\", "
+                  "enabled: true})}]))")
+             (str component-path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= "2" (str/trim (:out run)))))
+      (let [script
+            (str
+             "const fs=require('fs');let inst,mode=0,returned,shared,bools;"
+             "const imports={['cm32p2|kotoba:application/clock@1']:{"
+             "now:(disc,ptr,count,ret)=>{const v=new DataView(inst.exports.cm32p2_memory.buffer);"
+             "v.setUint8(ret,1);v.setUint32(ret+4,returned,true);"
+             "v.setUint32(ret+8,mode===4?17:1,true);"
+             "const fill=(p)=>{v.setUint32(p,shared,true);v.setUint32(p+4,0,true);"
+             "v.setUint8(p+8,1);v.setUint32(p+12,shared,true);"
+             "v.setUint32(p+16,0,true);v.setUint8(p+20,0);};"
+             "if(mode===4){for(let i=0;i<17;i++){const p=returned+i*24;fill(p);"
+             "v.setUint32(p,shared,true);v.setUint32(p+4,65536,true);}}"
+             "else{fill(returned);"
+             "if(mode===1){v.setUint32(returned,0xfffffff0,true);v.setUint32(returned+4,32,true);}"
+             "if(mode===2){v.setUint8(returned+8,0);v.setUint32(returned+12,bools,true);"
+             "v.setUint32(returned+16,1,true);v.setUint8(bools,2);}"
+             "if(mode===3){v.setUint8(returned+20,2);}"
+             "if(mode===5){v.setUint8(returned+8,0);v.setUint32(returned+12,bools,true);"
+             "v.setUint32(returned+16,16384,true);}}}}};"
+             "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),imports)"
+             ".then(({instance})=>{inst=instance;const e=instance.exports;"
+             "e.cm32p2_initialize();const alloc=(a,n)=>e.cm32p2_realloc(0,0,a,n);"
+             "const request=alloc(4,24);returned=alloc(4,17*24);"
+             "shared=alloc(1,65536);bools=alloc(1,16384);"
+             "const v=new DataView(e.cm32p2_memory.buffer);"
+             "v.setUint32(request,shared,true);v.setUint32(request+4,0,true);"
+             "v.setUint8(request+8,1);v.setUint32(request+12,shared,true);"
+             "v.setUint32(request+16,0,true);v.setUint8(request+20,0);"
+             "let outcomes=[];for(mode=0;mode<6;mode++){let trapped=false;"
+             "try{e['cm32p2||choose'](1,request,1);}catch(_){trapped=true;}"
+             "outcomes.push(trapped);}console.log(JSON.stringify(outcomes));"
+             "if(JSON.stringify(outcomes)!=='[false,true,true,true,true,true]')process.exit(1);});")
+            run (shell/sh "node" "-e" script (str core-path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= "[false,true,true,true,true,true]"
+               (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists component-path)
+        (Files/deleteIfExists core-path)))))
+
 (deftest structural-nested-list-match-shares-one-total-item-budget
   (doseq [[descriptor invoke expected]
           [[[:option [:list [:list :i64]]]

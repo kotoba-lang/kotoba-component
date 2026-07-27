@@ -536,6 +536,56 @@
                value/canonical-indirect-byte-limit]
               (mapcat identity cases))))))
 
+(defn- recursive-item-validation-plan
+  "Encode a finite Canonical layout as the closed kind-6 prefix plan.
+  Nil keeps recursive/unsupported layouts fail-closed. Numeric leaves and
+  empty records are no-ops; every bool, indirect string, product, active sum
+  case, and bounded list remains explicit."
+  [layout]
+  (letfn [(walk [node depth]
+            (when (< depth 32)
+              (cond
+                (contains? #{:i64 :f32 :f64} (:descriptor node)) [0]
+                (= :bool (:descriptor node)) [1]
+                (and (contains? #{:string :keyword} (:descriptor node))
+                     (integer? (:max-bytes node)))
+                [2 (:max-bytes node)]
+
+                (contains? node :fields)
+                (let [fields
+                      (mapv
+                       (fn [{:keys [offset layout]}]
+                         (when-let [plan (walk layout (inc depth))]
+                           (into [offset] plan)))
+                       (:fields node))]
+                  (when (every? some? fields)
+                    (if (empty? fields)
+                      [0]
+                      (into [3 (count fields)] (mapcat identity fields)))))
+
+                (seq (:cases node))
+                (let [cases
+                      (mapv #(walk (:layout %) (inc depth)) (:cases node))]
+                  (when (and (integer? (:payload-offset node))
+                             (every? some? cases))
+                    (into [4 (count cases) (:payload-offset node)]
+                          (mapcat identity cases))))
+
+                (and (vector? (:descriptor node))
+                     (= :list (first (:descriptor node)))
+                     (integer? (:max-items node))
+                     (map? (:item-layout node)))
+                (let [item-layout (:item-layout node)
+                      alignment (:alignment item-layout)
+                      stride (* alignment
+                                (quot (+ (:size item-layout) (dec alignment))
+                                      alignment))]
+                  (when-let [item-plan (walk item-layout (inc depth))]
+                    (into [5 (:max-items node) stride alignment] item-plan)))
+
+                :else nil)))]
+    (walk layout 0)))
+
 (defn- match-payload-leaves
   "Return admitted leaves keyed by record-get path for one match payload.
   Products may recurse through finite records. Strings and admitted bounded
@@ -567,6 +617,23 @@
                 :flat-index flat-index
                 :max-items (:max-items node)
                 :item-layout (:item-layout node)}]
+
+              (and (vector? (:descriptor node))
+                   (= :list (first (:descriptor node)))
+                   (integer? (:max-items node))
+                   (map? (:item-layout node))
+                   (some? (recursive-item-validation-plan
+                           (:item-layout node))))
+              [{:path path
+                :descriptor (:descriptor node)
+                :flat-index flat-index
+                :max-items (:max-items node)
+                :item-layout (:item-layout node)
+                :recursive-item-validation
+                (into [6 value/canonical-indirect-byte-limit
+                       value/canonical-list-total-item-limit]
+                      (recursive-item-validation-plan
+                       (:item-layout node)))}]
 
               (and (vector? (:descriptor node))
                    (= :list (first (:descriptor node)))
@@ -663,7 +730,9 @@
                             (contains? (get leaves-by-path [])
                                        :nested-list-layouts)
                             (contains? (get leaves-by-path [])
-                                       :union-item-validation))))
+                                       :union-item-validation)
+                            (contains? (get leaves-by-path [])
+                                       :recursive-item-validation))))
               (let [[_ descriptor call fallback result-binder result-body] node]
                 (let [leaf-descriptor
                       (:descriptor (get leaves-by-path []))
@@ -697,7 +766,9 @@
                              (contains? (get leaves-by-path [])
                                         :nested-list-layouts)
                              (contains? (get leaves-by-path [])
-                                        :union-item-validation)))
+                                        :union-item-validation)
+                             (contains? (get leaves-by-path [])
+                                        :recursive-item-validation)))
                      (valid? fallback))))))
           (result-list-capability-count? [node]
             (when (and (seq? node)
@@ -729,7 +800,9 @@
                              (contains? (get leaves-by-path [])
                                         :nested-list-layouts)
                              (contains? (get leaves-by-path [])
-                                        :union-item-validation)))
+                                        :union-item-validation)
+                             (contains? (get leaves-by-path [])
+                                        :recursive-item-validation)))
                      (= leaf-descriptor (second descriptor))
                      (seq? call)
                      (= 5 (count call))
@@ -1134,8 +1207,13 @@
                             (:nested-list-layouts request-leaf)
                             union-item-validation
                             (:union-item-validation request-leaf)
+                            recursive-item-validation
+                            (:recursive-item-validation request-leaf)
                             item-validation-args
                             (cond
+                              (seq recursive-item-validation)
+                              recursive-item-validation
+
                               indirect-string-items?
                               [1 value/canonical-indirect-byte-limit]
 
@@ -1219,8 +1297,13 @@
                             (:nested-list-layouts request-leaf)
                             union-item-validation
                             (:union-item-validation request-leaf)
+                            recursive-item-validation
+                            (:recursive-item-validation request-leaf)
                             item-validation-args
                             (cond
+                              (seq recursive-item-validation)
+                              recursive-item-validation
+
                               indirect-string-items?
                               [1 value/canonical-indirect-byte-limit]
 
@@ -1466,7 +1549,8 @@
                  (map (fn [{:keys [path descriptor flat-index max-bytes
                                    max-items item-layout
                                    record-bool-offsets nested-list-layouts
-                                   union-item-validation]}]
+                                   union-item-validation
+                                   recursive-item-validation]}]
                         [path
                          (if (or max-bytes max-items)
                            (let [i32-slot
@@ -1506,6 +1590,8 @@
                                 :record-bool-offsets record-bool-offsets
                                 :nested-list-layouts nested-list-layouts
                                 :union-item-validation union-item-validation
+                                :recursive-item-validation
+                                recursive-item-validation
                                 :count-form
                                 (list 'component-list-count
                                       (i32-slot flat-index)
@@ -1633,6 +1719,10 @@
                 (and list-payload-layout
                      (some? (finite-union-item-validation
                              (:item-layout list-payload-layout))))
+                recursive-list?
+                (and list-payload-layout
+                     (some? (recursive-item-validation-plan
+                             (:item-layout list-payload-layout))))
                 flat-byte {:i32 0x7f :i64 0x7e :f32 0x7d :f64 0x7c}]
             (when entry
               (cond
@@ -1678,7 +1768,8 @@
                                   request-type)
                          finite-record-list?
                          nested-scalar-list?
-                         finite-union-list?)
+                         finite-union-list?
+                         recursive-list?)
                      (= result-type request-type))
                 {:id id
                  :module (str "cm32p2|kotoba:application/"
