@@ -19,6 +19,27 @@
   (is (some? (find-ns 'kotoba.component.artifact)) "kotoba.component.artifact must load")
   (is (some? (find-ns 'kotoba.component.wit)) "kotoba.component.wit must load"))
 
+(deftest typed-v03-clock-lowering-produces-a-standard-component
+  (let [kir {:format :kotoba.kir/v4
+             :exports ['main]
+             :schemas {}
+             :effects #{[:cap/call 7]}
+             :functions [{:name 'main :params [] :param-types []
+                          :result :i64 :effects #{[:cap/call 7]}
+                          :body '(typed-cap-call 7 :i64 :i64 0)}]}
+        opts {:typed-capability-v3? true}
+        wit (wit/emit kir opts)
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1 opts)
+        packaged (artifact/package core-bytes kir wit)]
+    (is (= :wasm-component-kotoba-v2 (:target wit)))
+    (is (= "aiueos:capability/application@0.3.0" (:world wit)))
+    (is (= ["aiueos-clock-now"] (:imports wit)))
+    (is (= :wasm-component-kotoba-v2 (:target packaged)))
+    (is (= "aiueos:capability/application@0.3.0"
+           (:component-world packaged)))
+    (is (= [0 97 115 109 13 0 1 0]
+           (mapv #(bit-and (int %) 0xff) (take 8 (:bytes packaged)))))))
+
 (def multi-match-kir
   {:format :kotoba.kir/v4
    :exports ['choose-option 'choose-result 'negate]
