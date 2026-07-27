@@ -1,9 +1,23 @@
 (ns kotoba.object-write-provider-component-test
-  "W5 stream-object write-path wasm packaging: synthetic dual-export provider."
-  (:require [clojure.test :refer [deftest is]]
+  "W5 stream-object write-path wasm packaging: synthetic dual-export provider.
+   Multi-step Wasmtime put-block sequence (two always-true) added as deepen."
+  (:require [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
-            [kotoba.wasm.tools :as wasm-tools]))
+            [kotoba.wasm.tools :as wasm-tools])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(def ^:private wasmtime-binary
+  (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
+    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+
+(defn- wat-data
+  [bytes]
+  (apply str (map #(format "\\%02x" (bit-and (int %) 0xff)) bytes)))
 
 (defn- ref-ify
   [descriptor]
@@ -92,3 +106,117 @@
     (is (re-find #"cm32p2\|kotoba:application/object-store@1\|compare-and-set-ref" wat))
     (is (re-find #"i32.const 1\)" wat)) ;; always-true
     (is (re-find #"i32.const 2 i32.ge_u" wat)))) ;; option disc bound
+
+(defn- object-put-sequence-driver-wit
+  "Application WIT importing object-store.put-block only; scalar multi-step run."
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-object-put-block-request {\n"
+   "    binding: string,\n"
+   "    digest: string,\n"
+   "    bytes: string,\n"
+   "  }\n"
+   "}\n\n"
+   "interface object-store {\n"
+   "  use types.{kotoba-object-put-block-request};\n"
+   "  put-block: func(request: kotoba-object-put-block-request) -> bool;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import object-store;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- object-put-sequence-driver-wat
+  "Two put-block calls; synthetic provider always returns true.
+  Return (ok1 + ok2) = 2. Bool is a flat i32 result (no retptr)."
+  []
+  (let [mod "cm32p2|kotoba:application/object-store@1"
+        export-run "cm32p2||run"
+        binding-bytes (vec (.getBytes "b" "UTF-8"))
+        digest-bytes (vec (.getBytes "d" "UTF-8"))
+        binding-ptr 8
+        digest-ptr (+ binding-ptr (count binding-bytes))
+        push-put
+        (fn []
+          (str
+           "    i32.const " binding-ptr "\n"
+           "    i32.const " (count binding-bytes) "\n"
+           "    i32.const " digest-ptr "\n"
+           "    i32.const " (count digest-bytes) "\n"
+           "    i32.const 0\n"   ;; bytes ptr (empty payload ok)
+           "    i32.const 0\n"   ;; bytes len
+           "    call $put\n"))]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"put-block\""
+     " (func $put (param i32 i32 i32 i32 i32 i32) (result i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $a i32) (local $b i32)\n"
+     (push-put)
+     "    local.set $a\n"
+     (push-put)
+     "    local.set $b\n"
+     "    local.get $a local.get $b i32.add i64.extend_i32_u)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " binding-ptr ") \"" (wat-data binding-bytes) "\")\n"
+     "  (data (i32.const " digest-ptr ") \"" (wat-data digest-bytes) "\")\n"
+     ")\n")))
+
+(defn- package-object-put-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-object-put-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (object-put-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (object-put-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:object/put-block]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest object-put-sequence-driver-closes-and-wasmtime-returns-true-sum
+  "Multi-step deepen (ADR 0108): compose real object-write provider with a
+   driver that performs two put-blocks; Wasmtime returns true-sum 2."
+  (let [d (object-write-descriptors)
+        provider (composition/package-object-write-provider
+                  (:put-req d) (:put-res d)
+                  (:cas-req d) (:cas-res d)
+                  (:schemas d))
+        driver (package-object-put-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-object-put-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:object/put-block] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
