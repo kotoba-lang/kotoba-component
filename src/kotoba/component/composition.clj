@@ -1160,6 +1160,117 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+
+(defn- llm-wit
+  "WIT for llm-v1: record request -> variant result, with nested usage/error
+  records (same closure walk as http-wit)."
+  [entry request-descriptor result-descriptor schemas]
+  (let [req-name (second request-descriptor)
+        res-name (second result-descriptor)
+        wanted (atom #{req-name res-name})
+        changed (atom true)]
+    (while @changed
+      (reset! changed false)
+      (doseq [n (vec @wanted)
+              :let [schema (get schemas n)]
+              :when schema]
+        (case (first schema)
+          :record
+          (doseq [[_ ft] (nth schema 2)]
+            (let [refs (cond
+                         (and (vector? ft) (= :ref (first ft))) [(second ft)]
+                         (and (vector? ft) (#{:set :list} (first ft))
+                              (vector? (second ft)) (= :ref (first (second ft))))
+                         [(second (second ft))]
+                         :else [])]
+              (doseq [r refs]
+                (when-not (contains? @wanted r)
+                  (swap! wanted conj r)
+                  (reset! changed true)))))
+          :variant
+          (doseq [[_ payload] (nth schema 2)]
+            (when (and (vector? payload) (= :ref (first payload)))
+              (when-not (contains? @wanted (second payload))
+                (swap! wanted conj (second payload))
+                (reset! changed true))))
+          nil)))
+    (let [names (sort-by str @wanted)
+          interface (:interface entry)
+          record-names (filterv #(= :record (first (get schemas %))) names)
+          variant-names (filterv #(= :variant (first (get schemas %))) names)]
+      (str "package kotoba:application@1.0.0;\n\n"
+           "interface types {\n"
+           (apply str
+                  (map (fn [n]
+                         (let [schema (get schemas n)
+                               [_ id fields] schema]
+                           (str "  record " (wit-name id) " {\n"
+                                (apply str
+                                       (map (fn [[field ft]]
+                                              (str "    " (wit-name field) ": "
+                                                   (log-record-wit-type ft schemas) ",\n"))
+                                            fields))
+                                "  }\n")))
+                       record-names))
+           (apply str
+                  (map (fn [n]
+                         (let [schema (get schemas n)
+                               [_ id cases] schema]
+                           (str "  variant " (wit-name id) " {\n"
+                                (apply str
+                                       (map (fn [[tag payload]]
+                                              (str "    " (wit-name tag) "("
+                                                   (if (and (vector? payload) (= :ref (first payload)))
+                                                     (wit-name (second payload))
+                                                     (get record-field-wit-type payload "s64"))
+                                                   "),\n"))
+                                            cases))
+                                "  }\n")))
+                       variant-names))
+           "}\n\n"
+           "interface " interface " {\n"
+           "  use types.{" (str/join ", " (map wit-name [req-name res-name])) "};\n"
+           "  " (:function entry) ": func(request: " (wit-name req-name)
+           ") -> " (wit-name res-name) ";\n"
+           "}\n\n"
+           "world " interface "-provider {\n  export " interface ";\n}\n"))))
+
+(defn package-llm-provider
+  "Build a synthetic REAL provider for llm-v1 generate (budget bounds;
+  fixed ok completion; no ambient network/credentials/SDK)."
+  [request-descriptor result-descriptor schemas]
+  (let [entry (capability :llm/generate)
+        wit (llm-wit entry request-descriptor result-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-llm-provider-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/llm-provider-wat
+                     entry request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :llm/generate
+       :descriptor request-descriptor
+       :result-descriptor result-descriptor
+       :schemas schemas
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn compose-closed
   "Compose one application with provider definitions and reject any remaining
   instance import. `wasm-tools compose --no-imports` is the closure gate."
