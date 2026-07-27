@@ -485,6 +485,29 @@
                 :else nil))]
       (some-> (walk layout 0) vec))))
 
+(defn- nested-scalar-list-layouts
+  "Return content stride/alignment pairs for every nested list node below one
+  outer list. The terminal item is deliberately limited to i64/f64 here;
+  bool and indirect terminals need their own recursive active-item plan."
+  [outer-list-layout]
+  (loop [node (:item-layout outer-list-layout)
+         layouts []]
+    (when (and (map? node)
+               (vector? (:descriptor node))
+               (= :list (first (:descriptor node))))
+      (let [item-layout (:item-layout node)
+            alignment (:alignment item-layout)
+            stride (* alignment
+                      (quot (+ (:size item-layout) (dec alignment))
+                            alignment))
+            layouts (conj layouts [stride alignment])]
+        (cond
+          (contains? #{:i64 :f64} (:descriptor item-layout)) layouts
+          (and (vector? (:descriptor item-layout))
+               (= :list (first (:descriptor item-layout))))
+          (recur item-layout layouts)
+          :else nil)))))
+
 (defn- match-payload-leaves
   "Return admitted leaves keyed by record-get path for one match payload.
   Products may recurse through finite records. Strings and admitted bounded
@@ -530,6 +553,17 @@
                 :item-layout (:item-layout node)
                 :record-bool-offsets
                 (finite-inline-record-bool-offsets (:item-layout node))}]
+
+              (and (vector? (:descriptor node))
+                   (= :list (first (:descriptor node)))
+                   (integer? (:max-items node))
+                   (seq (nested-scalar-list-layouts node)))
+              [{:path path
+                :descriptor (:descriptor node)
+                :flat-index flat-index
+                :max-items (:max-items node)
+                :item-layout (:item-layout node)
+                :nested-list-layouts (nested-scalar-list-layouts node)}]
 
               (contains? node :fields)
               (loop [remaining (:fields node)
@@ -582,8 +616,10 @@
                                     [:option :string]
                                     [:option :keyword]}
                                    (second node))
-                        (contains? (get leaves-by-path [])
-                                   :record-bool-offsets)))
+                        (or (contains? (get leaves-by-path [])
+                                       :record-bool-offsets)
+                            (contains? (get leaves-by-path [])
+                                       :nested-list-layouts))))
               (let [[_ descriptor call fallback result-binder result-body] node]
                 (let [leaf-descriptor
                       (:descriptor (get leaves-by-path []))
@@ -612,8 +648,10 @@
                                       [:list :bool]
                                       :string :keyword}
                                     leaf-descriptor)
-                         (contains? (get leaves-by-path [])
-                                    :record-bool-offsets))
+                         (or (contains? (get leaves-by-path [])
+                                        :record-bool-offsets)
+                             (contains? (get leaves-by-path [])
+                                        :nested-list-layouts)))
                      (valid? fallback))))))
           (result-list-capability-count? [node]
             (when (and (seq? node)
@@ -640,8 +678,10 @@
                                       [:list :bool]
                                       :string :keyword}
                                     leaf-descriptor)
-                         (contains? (get leaves-by-path [])
-                                    :record-bool-offsets))
+                         (or (contains? (get leaves-by-path [])
+                                        :record-bool-offsets)
+                             (contains? (get leaves-by-path [])
+                                        :nested-list-layouts)))
                      (= leaf-descriptor (second descriptor))
                      (seq? call)
                      (= 5 (count call))
@@ -1042,6 +1082,8 @@
                             bool-items? (= [:list :bool] (second descriptor))
                             record-bool-offsets
                             (:record-bool-offsets request-leaf)
+                            nested-list-layouts
+                            (:nested-list-layouts request-leaf)
                             item-validation-args
                             (cond
                               indirect-string-items?
@@ -1052,6 +1094,11 @@
                               (seq record-bool-offsets)
                               (into [3 (count record-bool-offsets)]
                                     record-bool-offsets)
+
+                              (seq nested-list-layouts)
+                              (into [4 value/canonical-list-total-item-limit
+                                     (count nested-list-layouts)]
+                                    (mapcat identity nested-list-layouts))
 
                               :else [0 0])]
                         (when (and (= request-type descriptor)
@@ -1115,6 +1162,8 @@
                             bool-items? (= [:list :bool] (second descriptor))
                             record-bool-offsets
                             (:record-bool-offsets request-leaf)
+                            nested-list-layouts
+                            (:nested-list-layouts request-leaf)
                             item-validation-args
                             (cond
                               indirect-string-items?
@@ -1125,6 +1174,11 @@
                               (seq record-bool-offsets)
                               (into [3 (count record-bool-offsets)]
                                     record-bool-offsets)
+
+                              (seq nested-list-layouts)
+                              (into [4 value/canonical-list-total-item-limit
+                                     (count nested-list-layouts)]
+                                    (mapcat identity nested-list-layouts))
 
                               :else [0 0])]
                         (when (and (= constructor-type descriptor)
@@ -1353,7 +1407,7 @@
            (into {}
                  (map (fn [{:keys [path descriptor flat-index max-bytes
                                    max-items item-layout
-                                   record-bool-offsets]}]
+                                   record-bool-offsets nested-list-layouts]}]
                         [path
                          (if (or max-bytes max-items)
                            (let [i32-slot
@@ -1391,6 +1445,7 @@
                                 :stride stride
                                 :alignment alignment
                                 :record-bool-offsets record-bool-offsets
+                                :nested-list-layouts nested-list-layouts
                                 :count-form
                                 (list 'component-list-count
                                       (i32-slot flat-index)
@@ -1511,6 +1566,9 @@
                 (and list-payload-layout
                      (some? (finite-inline-record-bool-offsets
                              (:item-layout list-payload-layout))))
+                nested-scalar-list?
+                (and list-payload-layout
+                     (seq (nested-scalar-list-layouts list-payload-layout)))
                 flat-byte {:i32 0x7f :i64 0x7e :f32 0x7d :f64 0x7c}]
             (when entry
               (cond
@@ -1554,7 +1612,8 @@
                                   [:result :string :string]
                                   [:result :keyword :keyword]}
                                   request-type)
-                         finite-record-list?)
+                         finite-record-list?
+                         nested-scalar-list?)
                      (= result-type request-type))
                 {:id id
                  :module (str "cm32p2|kotoba:application/"

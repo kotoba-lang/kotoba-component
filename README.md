@@ -72,20 +72,23 @@ WASI authority.
 An `option<list<T>>` match may reconstruct its selected list, pass that bounded
 value to a named capability with the same request/result descriptor, and
 immediately match the returned option when `T` is `s64`, `float64`, `string`,
-`keyword`, `bool`, or a finite record recursively containing numeric and bool
-fields. The branch still compiles through the shared core-Wasm expression
-module; the generated standard32 adapter validates the request and returned
-list bounds and uses caller-allocated result storage. It visits every active
-inline bool field or indirect string-like item even though the branch observes
-only the outer count. Bool bytes must be 0/1; strings reject pointer overflow
-or out-of-memory ranges and share the 1 MiB byte budget. Other aggregate
+`keyword`, `bool`, a finite record recursively containing numeric and bool
+fields, or another bounded list recursively ending in `s64`/`float64`. The
+branch still compiles through the shared core-Wasm expression module; the
+generated standard32 adapter validates the request and returned list bounds
+and uses caller-allocated result storage. It visits every active inline bool,
+indirect string-like item, and nested pointer/count graph even though the
+branch observes only the outer count. Bool bytes must be 0/1; strings reject
+pointer overflow or out-of-memory ranges and share the 1 MiB byte budget;
+all nested nodes share the 16,384-item budget. Other aggregate
 branch/capability shapes fail closed until their Canonical codec is admitted
 explicitly.
 
 A symmetric `result<list<T>, list<T>>` match has the same property for both
-`ok` and `err`, including string-like and record bool-field validation. The
-request case is explicit, and the returned discriminant and complete active
-list graph are validated before either branch can observe its count.
+`ok` and `err`, including string-like, record bool-field, and nested-list
+validation. The request case is explicit, and the returned discriminant and
+complete active list graph are validated before either branch can observe its
+count.
 
 The same bounded indirect codec handles `string` and `keyword` payloads for
 option and symmetric result matches. UTF-8 byte bounds use payload alignment
