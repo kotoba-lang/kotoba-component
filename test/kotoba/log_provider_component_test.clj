@@ -1,6 +1,6 @@
 (ns kotoba.log-provider-component-test
   "W5 third slice: real log-v1 dual-export wasm component provider.
-   Multi-step Wasmtime: append, append+read, and ring-overflow oldest-drop walks."
+   Multi-step Wasmtime: append, append+read, ring oldest-drop, and truncation flag."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
@@ -496,6 +496,129 @@
         driver (package-log-ring-overflow-sequence-driver)
         closed (composition/compose-closed driver [provider])
         path (Files/createTempFile "kotoba-log-ring-overflow-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:log/append :log/read] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+
+(defn- log-truncation-sequence-driver-wit
+  "Same dual-import WIT as append+read; truncation-flag walk."
+  []
+  (log-append-read-sequence-driver-wit))
+
+(defn- log-truncation-sequence-driver-wat
+  "Capacity-2 ring: three appends drop seq 1 (oldest=2). Read after-sequence=0
+  reports truncated=true (after < oldest-1). Return truncated (u8 at offset 16)
+  as s64 → 1. Closes ADR 0111 deferred truncation multi-step slice."
+  []
+  (let [mod "cm32p2|kotoba:application/log@1"
+        export-run "cm32p2||run"
+        level-bytes (vec (.getBytes "info" "UTF-8"))
+        event-bytes (vec (.getBytes "boot" "UTF-8"))
+        msg-bytes (vec (.getBytes "hi" "UTF-8"))
+        level-ptr 8
+        event-ptr (+ level-ptr (count level-bytes))
+        msg-ptr (+ event-ptr (count event-bytes))
+        read-ret 256
+        push-append
+        (str
+         "    i32.const " level-ptr "\n"
+         "    i32.const " (count level-bytes) "\n"
+         "    i32.const " event-ptr "\n"
+         "    i32.const " (count event-bytes) "\n"
+         "    i32.const " msg-ptr "\n"
+         "    i32.const " (count msg-bytes) "\n"
+         "    i32.const 0\n"
+         "    i32.const 0\n"
+         "    call $append\n"
+         "    drop\n")]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"append\""
+     " (func $append (param i32 i32 i32 i32 i32 i32 i32 i32) (result i64)))\n"
+     "  (import \"" mod "\" \"read\""
+     " (func $read (param i64 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 512 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $t0 i32) (local $t1 i32)\n"
+     push-append
+     push-append
+     push-append
+     ;; after=0 → truncated true (cursor before retained window)
+     "    i64.const 0\n"
+     "    i64.const 8\n"
+     "    i32.const " read-ret "\n"
+     "    call $read\n"
+     "    i32.const " read-ret " i32.load8_u offset=16 local.set $t0\n"
+     ;; after=1 → truncated false (after >= oldest-1 with oldest=2)
+     "    i64.const 1\n"
+     "    i64.const 8\n"
+     "    i32.const " read-ret "\n"
+     "    call $read\n"
+     "    i32.const " read-ret " i32.load8_u offset=16 local.set $t1\n"
+     ;; true + (1-false) = 1 + 1 = 2
+     "    local.get $t0\n"
+     "    i32.const 1 local.get $t1 i32.sub\n"
+     "    i32.add i64.extend_i32_u)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " level-ptr ") \"" (wat-data level-bytes) "\")\n"
+     "  (data (i32.const " event-ptr ") \"" (wat-data event-bytes) "\")\n"
+     "  (data (i32.const " msg-ptr ") \"" (wat-data msg-bytes) "\")\n"
+     ")\n")))
+
+(defn- package-log-truncation-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-log-truncation-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (log-truncation-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (log-truncation-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:log/append :log/read]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest log-truncation-sequence-driver-closes-and-wasmtime-returns-trunc-sum
+  "Multi-step deepen (ADR 0116): capacity-2 ring three appends; read after=0
+   (truncated) and after=1 (not truncated); Wasmtime returns 1+(1-0)=2."
+  (let [d (log-v1-descriptors)
+        provider (composition/package-log-provider
+                  (:append-req d) (:append-res d)
+                  (:read-req d) (:read-res d)
+                  (:schemas d)
+                  2)
+        driver (package-log-truncation-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-log-truncation-sequence-" ".wasm"
                                    (make-array FileAttribute 0))]
     (try
       (is (= :wasm-component-closed/v1 (:format closed)))
