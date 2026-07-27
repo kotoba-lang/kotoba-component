@@ -5437,6 +5437,294 @@
      "  (data (i32.const " error-message-pointer ") \"" (wat-data error-message-bytes) "\")\n"
      ")\n")))
 
+
+(def log-provider-table-capacity
+  "Slot count for `log-provider-wat`'s bounded ring buffer. First wasm slice
+  defaults to 8 (cheap package/validate); pass 256 for kit parity."
+  8)
+
+(def ^:private log-max-fields 4)
+(def ^:private log-max-read-entries 8)
+
+(defn- log-provider-shape
+  "True when append/read request+result descriptors match log-v1's literal
+  shapes (including nested [:set record] for fields/entries)."
+  [append-req append-res read-req read-res schemas]
+  (letfn [(rec [d] (get schemas (second d)))
+          (field-map [schema] (into {} (nth schema 2)))
+          (set-of-ref? [t name]
+            (and (vector? t) (= :set (first t))
+                 (vector? (second t)) (= :ref (first (second t)))
+                 (= name (second (second t)))))]
+    (boolean
+     (when (every? #(and (vector? %) (= :ref (first %)))
+                   [append-req append-res read-req read-res])
+       (let [ar (rec append-req) as (rec append-res)
+             rr (rec read-req) rs (rec read-res)
+             field (get schemas :kotoba.log/field)
+             entry (get schemas :kotoba.log/entry)]
+         (and ar as rr rs field entry
+              (= :record (first ar) (first as) (first rr) (first rs)
+                 (first field) (first entry))
+              (= (field-map field) {:key :keyword :value :string})
+              (= (field-map ar)
+                 {:level :keyword :event :keyword :message :string
+                  :fields [:set [:ref :kotoba.log/field]]})
+              (= (field-map as) {:sequence :i64})
+              (= (field-map rr) {:after-sequence :i64 :limit :i64})
+              (let [rsf (field-map rs)]
+                (and (= (:oldest-sequence rsf) :i64)
+                     (= (:latest-sequence rsf) :i64)
+                     (= (:truncated rsf) :bool)
+                     (set-of-ref? (:entries rsf) :kotoba.log/entry)))
+              (let [ef (field-map entry)]
+                (and (= (:sequence ef) :i64)
+                     (= (:level ef) :keyword)
+                     (= (:event ef) :keyword)
+                     (= (:message ef) :string)
+                     (set-of-ref? (:fields ef) :kotoba.log/field)))))))))
+
+(defn- log-slot-layout
+  [capacity]
+  (let [kw value/keyword-value-byte-limit
+        st value/string-value-byte-limit
+        occupied 0
+        seq-off (align-up (+ occupied 4) 8)
+        level-len (+ seq-off 8)
+        level-bytes (align-up (+ level-len 4) 4)
+        event-len (+ level-bytes kw)
+        event-bytes (align-up (+ event-len 4) 4)
+        msg-len (+ event-bytes kw)
+        msg-bytes (align-up (+ msg-len 4) 4)
+        field-count (+ msg-bytes st)
+        field-slot-size (align-up (+ 4 kw 4 st) 4)
+        fields-base (align-up (+ field-count 4) 4)
+        slot-size (align-up (+ fields-base (* log-max-fields field-slot-size)) 8)
+        table-base 8
+        table-size (* capacity slot-size)]
+    {:occupied-offset occupied :seq-offset seq-off
+     :level-len-offset level-len :level-bytes-offset level-bytes
+     :event-len-offset event-len :event-bytes-offset event-bytes
+     :msg-len-offset msg-len :msg-bytes-offset msg-bytes
+     :field-count-offset field-count :fields-base fields-base
+     :field-slot-size field-slot-size :kw-size kw :str-size st
+     :slot-size slot-size :table-base table-base :table-size table-size
+     :capacity capacity}))
+
+(defn log-provider-wat
+  "REAL dual-export provider for log-v1: append + read share one ring buffer.
+  Append returns i64 sequence (Canonical flat of append-result). Read returns
+  an i32 pointer to the result record. Default capacity 8; pass 256 for kit
+  parity. :wasm-aot stays pending."
+  ([append-entry read-entry append-req append-res read-req read-res schemas]
+   (log-provider-wat append-entry read-entry append-req append-res
+                     read-req read-res schemas log-provider-table-capacity))
+  ([append-entry read-entry append-req append-res read-req read-res schemas capacity]
+   (when-not (log-provider-shape append-req append-res read-req read-res schemas)
+     (reject "log provider requires log-v1's own literal request/result shapes"
+             {:append-req append-req :append-res append-res
+              :read-req read-req :read-res read-res}))
+   (let [append-export (str "cm32p2|kotoba:application/" (:interface append-entry)
+                            "@1|" (:function append-entry))
+         read-export (str "cm32p2|kotoba:application/" (:interface read-entry)
+                          "@1|" (:function read-entry))
+         append-req-layout (canonical/layout append-req schemas)
+         read-res-layout (canonical/layout read-res schemas)
+         slot (log-slot-layout capacity)
+         {:keys [table-base table-size slot-size capacity
+                 occupied-offset seq-offset
+                 level-len-offset level-bytes-offset
+                 event-len-offset event-bytes-offset
+                 msg-len-offset msg-bytes-offset
+                 field-count-offset fields-base field-slot-size
+                 kw-size str-size]} slot
+         arena-base (align-up (+ table-base table-size) 8)
+         result-headroom (* log-max-read-entries
+                            (+ 64 (* log-max-fields (+ kw-size str-size 16))
+                               kw-size kw-size str-size 32))
+         required-bytes (+ arena-base result-headroom
+                           (:size read-res-layout) 65536)
+         pages (max 1 (quot (+ required-bytes 65535) 65536))
+         capacity-bytes (* pages 65536)
+         append-params
+         (apply str
+                (map-indexed
+                 (fn [i t]
+                   (str " (param $a" i " " (core-type-name t) ")"))
+                 (vec (:flat append-req-layout))))
+         read-params " (param $r0 i64) (param $r1 i64)"]
+     (str
+      "(module\n"
+      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+      "  (global $next (mut i32) (i32.const " arena-base "))\n"
+      "  (global $seq (mut i64) (i64.const 0))\n"
+      "  (global $count (mut i32) (i32.const 0))\n"
+      "  (global $head (mut i32) (i32.const 0))\n"
+      (bounded-bump-realloc-wat capacity-bytes)
+      ;; append -> i64
+      "  (func (export \"" append-export "\")" append-params " (result i64)\n"
+      "    (local $slot i32) (local $addr i32) (local $i i32)\n"
+      "    (local $fp i32) (local $fa i32)\n"
+      "    (local $kptr i32) (local $klen i32) (local $vptr i32) (local $vlen i32)\n"
+      "    local.get $a7 i32.const " log-max-fields " i32.gt_u if unreachable end\n"
+      "    local.get $a1 i32.const " kw-size " i32.gt_u if unreachable end\n"
+      "    local.get $a3 i32.const " kw-size " i32.gt_u if unreachable end\n"
+      "    local.get $a5 i32.const " str-size " i32.gt_u if unreachable end\n"
+      "    global.get $count i32.const " capacity " i32.ge_u\n"
+      "    if\n"
+      "      global.get $head local.set $slot\n"
+      "    else\n"
+      "      global.get $count local.set $slot\n"
+      "      global.get $count i32.const 1 i32.add global.set $count\n"
+      "    end\n"
+      "    local.get $slot i32.const " slot-size " i32.mul i32.const " table-base
+      " i32.add local.set $addr\n"
+      "    local.get $addr i32.const 1 i32.store offset=" occupied-offset "\n"
+      "    global.get $seq i64.const 1 i64.add global.set $seq\n"
+      "    local.get $addr global.get $seq i64.store offset=" seq-offset "\n"
+      "    local.get $addr local.get $a1 i32.store offset=" level-len-offset "\n"
+      "    local.get $addr i32.const " level-bytes-offset " i32.add"
+      " local.get $a0 local.get $a1 memory.copy\n"
+      "    local.get $addr local.get $a3 i32.store offset=" event-len-offset "\n"
+      "    local.get $addr i32.const " event-bytes-offset " i32.add"
+      " local.get $a2 local.get $a3 memory.copy\n"
+      "    local.get $addr local.get $a5 i32.store offset=" msg-len-offset "\n"
+      "    local.get $addr i32.const " msg-bytes-offset " i32.add"
+      " local.get $a4 local.get $a5 memory.copy\n"
+      "    local.get $addr local.get $a7 i32.store offset=" field-count-offset "\n"
+      "    i32.const 0 local.set $i\n"
+      "    block $fields-done\n"
+      "      loop $fields\n"
+      "        local.get $i local.get $a7 i32.ge_u br_if $fields-done\n"
+      "        local.get $a6 local.get $i i32.const 16 i32.mul i32.add local.set $fp\n"
+      "        local.get $fp i32.load local.set $kptr\n"
+      "        local.get $fp i32.load offset=4 local.set $klen\n"
+      "        local.get $fp i32.load offset=8 local.set $vptr\n"
+      "        local.get $fp i32.load offset=12 local.set $vlen\n"
+      "        local.get $klen i32.const " kw-size " i32.gt_u if unreachable end\n"
+      "        local.get $vlen i32.const " str-size " i32.gt_u if unreachable end\n"
+      "        local.get $addr i32.const " fields-base " i32.add\n"
+      "          local.get $i i32.const " field-slot-size " i32.mul i32.add local.set $fa\n"
+      "        local.get $fa local.get $klen i32.store\n"
+      "        local.get $fa i32.const 4 i32.add local.get $kptr local.get $klen memory.copy\n"
+      "        local.get $fa i32.const " (+ 4 kw-size) " i32.add local.get $vlen i32.store\n"
+      "        local.get $fa i32.const " (+ 8 kw-size) " i32.add"
+      " local.get $vptr local.get $vlen memory.copy\n"
+      "        local.get $i i32.const 1 i32.add local.set $i\n"
+      "        br $fields\n"
+      "      end\n"
+      "    end\n"
+      "    global.get $head i32.const 1 i32.add i32.const " capacity
+      " i32.rem_u global.set $head\n"
+      "    global.get $seq)\n"
+      "  (func (export \"" append-export "_post\") (param i64)\n"
+      "    i32.const " arena-base " global.set $next)\n"
+      ;; read -> i32 pointer
+      "  (func (export \"" read-export "\")" read-params " (result i32)\n"
+      "    (local $ret i32) (local $oldest i64) (local $latest i64)\n"
+      "    (local $trunc i32) (local $i i32) (local $j i32)\n"
+      "    (local $idx i32) (local $addr i32) (local $seqv i64)\n"
+      "    (local $out i32) (local $ep i32) (local $fc i32)\n"
+      "    (local $fa i32) (local $fp i32) (local $taken i32)\n"
+      "    (local $lim i32) (local $tmp i32)\n"
+      "    local.get $r0 i64.const 0 i64.lt_s if unreachable end\n"
+      "    local.get $r1 i64.const 1 i64.lt_s if unreachable end\n"
+      "    local.get $r1 i64.const " log-max-read-entries " i64.gt_s if unreachable end\n"
+      "    local.get $r1 i32.wrap_i64 local.set $lim\n"
+      "    global.get $seq local.set $latest\n"
+      "    global.get $count i32.eqz\n"
+      "    if\n"
+      "      global.get $seq i64.const 1 i64.add local.set $oldest\n"
+      "    else\n"
+      "      global.get $count i32.const " capacity " i32.ge_u\n"
+      "      if\n"
+      "        global.get $head local.set $idx\n"
+      "      else\n"
+      "        i32.const 0 local.set $idx\n"
+      "      end\n"
+      "      local.get $idx i32.const " slot-size " i32.mul i32.const " table-base
+      " i32.add i64.load offset=" seq-offset " local.set $oldest\n"
+      "    end\n"
+      "    local.get $r0 local.get $oldest i64.const 1 i64.sub i64.lt_s\n"
+      "    if (result i32) i32.const 1 else i32.const 0 end local.set $trunc\n"
+      "    i32.const 0 i32.const 0 i32.const " (:alignment read-res-layout)
+      " i32.const " (:size read-res-layout) " call $realloc local.set $ret\n"
+      "    local.get $ret local.get $oldest i64.store\n"
+      "    local.get $ret local.get $latest i64.store offset=8\n"
+      "    local.get $ret local.get $trunc i32.store8 offset=16\n"
+      "    i32.const 0 i32.const 0 i32.const 4\n"
+      "      i32.const 40 local.get $lim i32.mul call $realloc local.set $out\n"
+      "    i32.const 0 local.set $taken\n"
+      "    i32.const 0 local.set $i\n"
+      "    block $scan-done\n"
+      "      loop $scan\n"
+      "        local.get $i global.get $count i32.ge_u br_if $scan-done\n"
+      "        local.get $taken local.get $lim i32.ge_u br_if $scan-done\n"
+      "        global.get $count i32.const " capacity " i32.ge_u\n"
+      "        if\n"
+      "          global.get $head local.get $i i32.add i32.const " capacity
+      " i32.rem_u local.set $idx\n"
+      "        else\n"
+      "          local.get $i local.set $idx\n"
+      "        end\n"
+      "        local.get $idx i32.const " slot-size " i32.mul i32.const " table-base
+      " i32.add local.set $addr\n"
+      "        local.get $addr i64.load offset=" seq-offset " local.set $seqv\n"
+      "        local.get $seqv local.get $r0 i64.le_s\n"
+      "        if\n"
+      "          local.get $i i32.const 1 i32.add local.set $i\n"
+      "          br $scan\n"
+      "        end\n"
+      "        local.get $out local.get $taken i32.const 40 i32.mul i32.add local.set $ep\n"
+      "        local.get $ep local.get $seqv i64.store\n"
+      "        local.get $ep local.get $addr i32.const " level-bytes-offset
+      " i32.add i32.store offset=8\n"
+      "        local.get $ep local.get $addr i32.load offset=" level-len-offset
+      " i32.store offset=12\n"
+      "        local.get $ep local.get $addr i32.const " event-bytes-offset
+      " i32.add i32.store offset=16\n"
+      "        local.get $ep local.get $addr i32.load offset=" event-len-offset
+      " i32.store offset=20\n"
+      "        local.get $ep local.get $addr i32.const " msg-bytes-offset
+      " i32.add i32.store offset=24\n"
+      "        local.get $ep local.get $addr i32.load offset=" msg-len-offset
+      " i32.store offset=28\n"
+      "        local.get $addr i32.load offset=" field-count-offset " local.set $fc\n"
+      "        i32.const 0 i32.const 0 i32.const 4\n"
+      "          i32.const 16 local.get $fc i32.mul call $realloc local.set $fp\n"
+      "        i32.const 0 local.set $j\n"
+      "        block $fcopy-done\n"
+      "          loop $fcopy\n"
+      "            local.get $j local.get $fc i32.ge_u br_if $fcopy-done\n"
+      "            local.get $addr i32.const " fields-base " i32.add\n"
+      "              local.get $j i32.const " field-slot-size " i32.mul i32.add local.set $fa\n"
+      "            local.get $fp local.get $j i32.const 16 i32.mul i32.add local.set $tmp\n"
+      "            local.get $tmp local.get $fa i32.const 4 i32.add i32.store\n"
+      "            local.get $tmp local.get $fa i32.load i32.store offset=4\n"
+      "            local.get $tmp local.get $fa i32.const " (+ 8 kw-size)
+      " i32.add i32.store offset=8\n"
+      "            local.get $tmp local.get $fa i32.load offset=" (+ 4 kw-size)
+      " i32.store offset=12\n"
+      "            local.get $j i32.const 1 i32.add local.set $j\n"
+      "            br $fcopy\n"
+      "          end\n"
+      "        end\n"
+      "        local.get $out local.get $taken i32.const 40 i32.mul i32.add local.set $ep\n"
+      "        local.get $ep local.get $fp i32.store offset=32\n"
+      "        local.get $ep local.get $fc i32.store offset=36\n"
+      "        local.get $taken i32.const 1 i32.add local.set $taken\n"
+      "        local.get $i i32.const 1 i32.add local.set $i\n"
+      "        br $scan\n"
+      "      end\n"
+      "    end\n"
+      "    local.get $ret local.get $out i32.store offset=20\n"
+      "    local.get $ret local.get $taken i32.store offset=24\n"
+      "    local.get $ret)\n"
+      "  (func (export \"" read-export "_post\") (param i32)\n"
+      "    i32.const " arena-base " global.set $next)\n"
+      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+      ")\n"))))
+
 (defn fuel-enforcement
   "Where a component's declared `:fuel` budget is actually enforced.
 
