@@ -428,9 +428,9 @@
         (finally
           (Files/deleteIfExists path))))))
 
-(deftest structural-indirect-list-match-calls-a-named-capability
+(deftest structural-admitted-list-match-calls-a-named-capability
   (doseq [[descriptor body calls]
-          (for [leaf [:string :keyword]
+          (for [leaf [:string :keyword :bool]
                 kind [:option :result]
                 :let [list-type [:list leaf]
                       descriptor (if (= kind :option)
@@ -461,12 +461,16 @@
                                    (inner 'result-ok-of 'selected-ok)
                                    'selected-err
                                    (inner 'result-err-of 'selected-err)))
+                      items (if (= leaf :bool)
+                              "[true, false]"
+                              "[\"安全\", \"abc\"]")
+                      one-item (if (= leaf :bool) "[true]" "[\"x\"]")
                       calls (if (= kind :option)
                               [["choose(none)" "9"]
                                ["choose(some([]))" "0"]
-                               ["choose(some([\"安全\", \"abc\"]))" "2"]]
-                              [["choose(ok([\"安全\", \"abc\"]))" "2"]
-                               ["choose(err([\"x\"]))" "1"]])]]
+                               [(str "choose(some(" items "))") "2"]]
+                              [[(str "choose(ok(" items "))") "2"]
+                               [(str "choose(err(" one-item "))") "1"]])]]
             [descriptor body calls])]
     (let [kir {:format :kotoba.kir/v4
                :exports ['choose 'echo]
@@ -568,6 +572,58 @@
         (is (zero? (:exit run)) (:err run))
         (is (= "{\"malformed\":true,\"aggregate\":true}"
                (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest structural-bool-list-match-rejects-noncanonical-provider-items
+  (let [descriptor [:option [:list :bool]]
+        kir {:format :kotoba.kir/v4
+             :exports ['choose 'echo]
+             :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'choose
+               :params ['value]
+               :param-types [descriptor]
+               :result :i64
+               :effects #{:clock/read}
+               :body
+               (list 'option-match descriptor 'value 9 'selected
+                     (list 'option-match descriptor
+                           (list 'typed-cap-call
+                                 clock-now descriptor descriptor
+                                 (list 'option-some-of descriptor 'selected))
+                           9 'returned
+                           (list 'vector-count 'returned)))}
+              {:name 'echo
+               :params ['value]
+               :param-types [:i64]
+               :result :i64
+               :effects #{}
+               :body 'value}]}
+        core (component-core/emit kir :wasm32-wasi-kotoba-v1)
+        path (Files/createTempFile
+              "kotoba-bool-list-provider-validation-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes core (make-array java.nio.file.OpenOption 0))
+      (let [script
+            (str
+             "const fs=require('fs');let inst,bad;"
+             "const imports={['cm32p2|kotoba:application/clock@1']:{"
+             "now:(disc,ptr,count,ret)=>{const v=new DataView(inst.exports.cm32p2_memory.buffer);"
+             "v.setUint8(ret,1);v.setUint32(ret+4,bad,true);v.setUint32(ret+8,1,true);}}};"
+             "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),imports)"
+             ".then(({instance})=>{inst=instance;const e=instance.exports;"
+             "e.cm32p2_initialize();const alloc=(a,n)=>e.cm32p2_realloc(0,0,a,n);"
+             "const request=alloc(1,1);bad=alloc(1,1);"
+             "const v=new DataView(e.cm32p2_memory.buffer);"
+             "v.setUint8(request,1);v.setUint8(bad,2);let trapped=false;"
+             "try{e['cm32p2||choose'](1,request,1);}catch(_){trapped=true;}"
+             "console.log(trapped);if(!trapped)process.exit(1);});")
+            run (shell/sh "node" "-e" script (str path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= "true" (str/trim (:out run)))))
       (finally
         (Files/deleteIfExists path)))))
 

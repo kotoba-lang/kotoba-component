@@ -487,7 +487,7 @@
 
               (and (contains? #{:vector-i64 :vector-f64
                                 [:list :i64] [:list :f64]
-                                [:list :string] [:list :keyword]}
+                                [:list :string] [:list :keyword] [:list :bool]}
                               (:descriptor node))
                    (integer? (:max-items node))
                    (map? (:item-layout node)))
@@ -543,6 +543,7 @@
                                     [:option [:list :f64]]
                                     [:option [:list :string]]
                                     [:option [:list :keyword]]
+                                    [:option [:list :bool]]
                                     [:option :string]
                                     [:option :keyword]}
                                   (second node)))
@@ -571,6 +572,7 @@
                      (contains? #{:vector-i64 :vector-f64
                                   [:list :i64] [:list :f64]
                                   [:list :string] [:list :keyword]
+                                  [:list :bool]
                                   :string :keyword}
                                 leaf-descriptor)
                      (valid? fallback))))))
@@ -596,6 +598,7 @@
                      (contains? #{:vector-i64 :vector-f64
                                   [:list :i64] [:list :f64]
                                   [:list :string] [:list :keyword]
+                                  [:list :bool]
                                   :string :keyword}
                                 leaf-descriptor)
                      (= leaf-descriptor (second descriptor))
@@ -974,6 +977,7 @@
                                     [:option [:list :f64]]
                                     [:option [:list :string]]
                                     [:option [:list :keyword]]
+                                    [:option [:list :bool]]
                                     [:option :string]
                                     [:option :keyword]}
                                   (second node)))
@@ -1001,7 +1005,8 @@
                                         (:max-items request-leaf))
                             indirect-string-items?
                             (contains? #{[:list :string] [:list :keyword]}
-                                       (second descriptor))]
+                                       (second descriptor))
+                            bool-items? (= [:list :bool] (second descriptor))]
                         (when (and (= request-type descriptor)
                                    (= result-type descriptor)
                                    (= constructor-type descriptor)
@@ -1022,7 +1027,9 @@
                                 (:size result-layout)
                                 (:payload-offset result-layout)
                                 (:alignment result-layout)
-                                (if indirect-string-items? 1 0)
+                                (cond indirect-string-items? 1
+                                      bool-items? 2
+                                      :else 0)
                                 (if indirect-string-items?
                                   value/canonical-indirect-byte-limit
                                   0))))))))))
@@ -1061,7 +1068,8 @@
                                         (:max-items request-leaf))
                             indirect-string-items?
                             (contains? #{[:list :string] [:list :keyword]}
-                                       (second descriptor))]
+                                       (second descriptor))
+                            bool-items? (= [:list :bool] (second descriptor))]
                         (when (and (= constructor-type descriptor)
                                    (= request-value binder)
                                    (symbol? ok-binder)
@@ -1081,7 +1089,9 @@
                                 (:size result-layout)
                                 (:payload-offset result-layout)
                                 (:alignment result-layout)
-                                (if indirect-string-items? 1 0)
+                                (cond indirect-string-items? 1
+                                      bool-items? 2
+                                      :else 0)
                                 (if indirect-string-items?
                                   value/canonical-indirect-byte-limit
                                   0))))))))))
@@ -1460,6 +1470,7 @@
                                   [:option [:list :f64]]
                                   [:option [:list :string]]
                                   [:option [:list :keyword]]
+                                  [:option [:list :bool]]
                                   [:option :string]
                                   [:option :keyword]
                                   [:result :vector-i64 :vector-i64]
@@ -1468,6 +1479,7 @@
                                   [:result [:list :f64] [:list :f64]]
                                   [:result [:list :string] [:list :string]]
                                   [:result [:list :keyword] [:list :keyword]]
+                                  [:result [:list :bool] [:list :bool]]
                                   [:result :string :string]
                                   [:result :keyword :keyword]}
                                 request-type)
