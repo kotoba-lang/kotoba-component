@@ -5725,6 +5725,144 @@
       "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
       ")\n"))))
 
+
+(defn- http-provider-shape
+  "True when request/result match http-v1: post-request record with
+  url/headers/body/timeout-ms and result variant ok|error."
+  [request-descriptor result-descriptor schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))
+          (set-of-ref? [t name]
+            (and (vector? t) (= :set (first t))
+                 (vector? (second t)) (= :ref (first (second t)))
+                 (= name (second (second t)))))]
+    (boolean
+     (when-let [req (rec request-descriptor)]
+       (when-let [res (rec result-descriptor)]
+         (let [header (get schemas :kotoba.http/header)
+               response (get schemas :kotoba.http/response)
+               error (get schemas :kotoba.http/error)
+               rmf (field-map req)
+               cases (when (= :variant (first res)) (nth res 2))]
+           (and header response error
+                (= :record (first req) (first header) (first response) (first error))
+                (= (field-map header) {:name :keyword :value :string})
+                (= (:url rmf) :string)
+                (set-of-ref? (:headers rmf) :kotoba.http/header)
+                (= (:body rmf) :string)
+                (= (:timeout-ms rmf) :i64)
+                (= 2 (count cases))
+                (= [:ok :error] (mapv first cases))
+                (= (second (first cases)) [:ref :kotoba.http/response])
+                (= (second (second cases)) [:ref :kotoba.http/error])
+                (let [rf (field-map response)]
+                  (and (= (:status rf) :i64)
+                       (set-of-ref? (:headers rf) :kotoba.http/header)
+                       (= (:body rf) :string)))
+                (let [ef (field-map error)]
+                  (and (= (:code ef) :keyword)
+                       (= (:message ef) :string)
+                       (= (:retryable ef) :bool))))))))))
+
+(defn http-provider-wat
+  "Synthetic REAL-semantics provider core for http-v1's post shape.
+  Enforces timeout range [1,30000], header count ≤ 32, URL/body byte
+  bounds, and a minimal `https://` prefix check. On success returns a
+  fixed ok response (status 200, empty headers, body \"ok\") — no ambient
+  network. Production host transport remains ADR 0066 (JVM) / dual-runtime
+  mock path (ADR 0086). :wasm-aot stays pending."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (http-provider-shape request-descriptor result-descriptor schemas)
+    (reject "http provider requires http-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|" (:function entry))
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined (vec (:flat request-layout))
+        params (apply str
+                      (map-indexed
+                       (fn [i t]
+                         (str " (param $p" i " " (core-type-name t) ")"))
+                       joined))
+        result-cases (:cases result-layout)
+        ok-layout (:layout (nth result-cases 0))
+        err-layout (:layout (nth result-cases 1))
+        payload-offset (:payload-offset result-layout)
+        disc-store (variant-disc-store (:discriminant-size result-layout))
+        ok-status (field-by-name ok-layout :status)
+        ok-headers (field-by-name ok-layout :headers)
+        ok-body (field-by-name ok-layout :body)
+        body-bytes (vec (.getBytes "ok" "UTF-8"))
+        https-bytes (vec (.getBytes "https://" "UTF-8"))
+        literal-base 8
+        body-pointer literal-base
+        arena-base (align-up (+ body-pointer (count body-bytes)) 8)
+        result-size (:size result-layout)
+        required-bytes (+ arena-base result-size 256)
+        pages (max 1 (quot (+ required-bytes 65535) 65536))
+        capacity-bytes (* pages 65536)
+        max-timeout 30000
+        max-headers 32
+        max-url 4096
+        max-body value/string-value-byte-limit]
+    ;; flat: p0/p1 url, p2/p3 headers, p4/p5 body, p6 timeout i64
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32) (local $i i32) (local $b i32)\n"
+     ;; timeout in [1, max]
+     "    local.get $p6 i64.const 1 i64.lt_s if unreachable end\n"
+     "    local.get $p6 i64.const " max-timeout " i64.gt_s if unreachable end\n"
+     ;; header count, url/body lengths
+     "    local.get $p3 i32.const " max-headers " i32.gt_u if unreachable end\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-url " i32.gt_u if unreachable end\n"
+     "    local.get $p5 i32.const " max-body " i32.gt_u if unreachable end\n"
+     ;; url must be at least 8 bytes and equal https://
+     "    local.get $p1 i32.const 8 i32.lt_u if unreachable end\n"
+     (apply str
+            (map-indexed
+             (fn [i byte]
+               (str "    local.get $p0 i32.load8_u offset=" i "\n"
+                    "    i32.const " byte " i32.ne if unreachable end\n"))
+             https-bytes))
+     ;; no fragment '#' in url
+     "    i32.const 0 local.set $i\n"
+     "    block $url-done\n"
+     "      loop $url-scan\n"
+     "        local.get $i local.get $p1 i32.ge_u br_if $url-done\n"
+     "        local.get $p0 local.get $i i32.add i32.load8_u local.set $b\n"
+     "        local.get $b i32.const 35 i32.eq if unreachable end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $url-scan\n"
+     "      end\n"
+     "    end\n"
+     ;; allocate result, write ok
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     "    local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "    local.get $ret i64.const 200 i64.store offset="
+     (+ payload-offset (:offset ok-status)) "\n"
+     ;; empty headers list at payload+headers offset (ptr=0,len=0) — use 0,0
+     "    local.get $ret i32.const 0 i32.store offset="
+     (+ payload-offset (:offset ok-headers)) "\n"
+     "    local.get $ret i32.const 0 i32.store offset="
+     (+ payload-offset (:offset ok-headers) 4) "\n"
+     "    local.get $ret i32.const " body-pointer " i32.store offset="
+     (+ payload-offset (:offset ok-body)) "\n"
+     "    local.get $ret i32.const " (count body-bytes) " i32.store offset="
+     (+ payload-offset (:offset ok-body) 4) "\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     "  (data (i32.const " body-pointer ") \"" (wat-data body-bytes) "\")\n"
+     ")\n")))
+
 (defn fuel-enforcement
   "Where a component's declared `:fuel` budget is actually enforced.
 
