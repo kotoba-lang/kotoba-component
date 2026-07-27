@@ -34,6 +34,9 @@
     (is (= :wasm-component-kotoba-v2 (:target wit)))
     (is (= "aiueos:capability/application@0.3.0" (:world wit)))
     (is (= ["aiueos-clock-now"] (:imports wit)))
+    (is (= [:poll :cancel]
+           (get-in wit [:capability-transport :bytes-task :operations])))
+    (is (false? (get-in wit [:capability-transport :ambient-executor])))
     (is (= :wasm-component-kotoba-v2 (:target packaged)))
     (is (= "aiueos:capability/application@0.3.0"
            (:component-world packaged)))

@@ -1,5 +1,27 @@
 {:kotoba.component-model/format :v1
  :target :wasm-component-kotoba-v1
+ :profiles
+ {:legacy-application
+  {:target :wasm-component-kotoba-v1
+   :world "kotoba:application/application@1.0.0"
+   :capability-transport :per-application-functions}
+  :typed-capability-v3
+  {:target :wasm-component-kotoba-v2
+   :world "aiueos:capability/application@0.3.0"
+   :capability-transport
+   {:grant {:resource "grant"
+            :acquire :named-operation
+            :provider-argument :borrow
+            :provider-result-error "denial"}
+    :bytes-task {:wit-resource "bytes-task"
+                 :operations [:poll :cancel]
+                 :ownership :linear}
+    :bytes-stream {:wit-resource "bytes-stream"
+                   :operations [:read :cancel]
+                   :ownership :linear
+                   :max-pull-bytes 65536}
+    :ambient-executor false}
+   :wasi-native-future-stream false}}
  :spec-baseline
  {:component-model {:source "https://github.com/WebAssembly/component-model"
                     :revision "e6bb1e456e946abd01173755468134d7c75c9f07"

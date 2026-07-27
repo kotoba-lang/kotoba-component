@@ -16,6 +16,19 @@
                 :body '(typed-cap-call 4 [:ref :app/request]
                                         [:ref :app/result] request)}]})
 
+(deftest typed-v03-profile-uses-explicit-bounded-resources
+  (let [profile (get-in wit/contract [:profiles :typed-capability-v3])
+        transport (:capability-transport profile)]
+    (is (= :wasm-component-kotoba-v2 (:target profile)))
+    (is (= "aiueos:capability/application@0.3.0" (:world profile)))
+    (is (= :named-operation (get-in transport [:grant :acquire])))
+    (is (= :borrow (get-in transport [:grant :provider-argument])))
+    (is (= [:poll :cancel] (get-in transport [:bytes-task :operations])))
+    (is (= [:read :cancel] (get-in transport [:bytes-stream :operations])))
+    (is (= 65536 (get-in transport [:bytes-stream :max-pull-bytes])))
+    (is (false? (:ambient-executor transport)))
+    (is (false? (:wasi-native-future-stream profile)))))
+
 (deftest emits-deterministic-closed-wit-world
   (let [a (wit/emit kir)
         b (wit/emit kir)]

@@ -154,16 +154,25 @@
   (when-not (contains? #{:kotoba.kir/v3 :kotoba.kir/v4} (:format kir))
     (reject "WIT generation requires checked KIR" {:format (:format kir)}))
   (if typed-capability-v3?
-    (let [source (abi/typed-capability-wit-v3)]
+    (let [source (abi/typed-capability-wit-v3)
+          profile (get-in contract [:profiles :typed-capability-v3])]
+      (when-not (= {:target abi/component-target-v2
+                    :world abi/typed-capability-world-v3}
+                   (select-keys profile [:target :world]))
+        (reject "typed capability profile diverges from the shared ABI"
+                {:profile (select-keys profile [:target :world])
+                 :abi {:target abi/component-target-v2
+                       :world abi/typed-capability-world-v3}}))
       {:format :kotoba.wit-package/v1
-       :target abi/component-target-v2
-       :world abi/typed-capability-world-v3
+       :target (:target profile)
+       :world (:world profile)
        :wasi-version abi/wasi-version
        :source source
        :sha256 (text-sha256 source)
        :imports (mapv abi/capability-import-name
                       (sort (map :id (capability-contracts kir))))
-       :capability-mode :linear-resource})
+       :capability-mode :linear-resource
+       :capability-transport (:capability-transport profile)})
     (let [schemas (or (:schemas kir) {})
         schema-names (keys schemas)
         canonical-names (map wit-name schema-names)]
