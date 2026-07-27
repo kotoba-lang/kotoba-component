@@ -1,9 +1,23 @@
 (ns kotoba.llm-provider-component-test
-  "W5 remaining kit wasm packaging: synthetic llm-v1 component provider."
-  (:require [clojure.test :refer [deftest is]]
+  "W5 remaining kit wasm packaging: synthetic llm-v1 component provider.
+   Multi-step Wasmtime generate sequence (two fixed-ok) added as deepen slice."
+  (:require [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]
+            [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
-            [kotoba.wasm.tools :as wasm-tools]))
+            [kotoba.wasm.tools :as wasm-tools])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(def ^:private wasmtime-binary
+  (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
+    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+
+(defn- wat-data
+  [bytes]
+  (apply str (map #(format "\\%02x" (bit-and (int %) 0xff)) bytes)))
 
 (defn- ref-ify
   "Lift nested records/variants into :ref schemas."
@@ -94,3 +108,139 @@
     ;; budget bounds: max-output-tokens 4096, temperature 2000
     (is (re-find #"i64.const 4096" wat))
     (is (re-find #"i64.const 2000" wat))))
+
+(defn- llm-generate-sequence-driver-wit
+  "Application WIT importing llm.generate; exports scalar multi-step run."
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-llm-generate-request {\n"
+   "    model: string,\n"
+   "    system: string,\n"
+   "    prompt: string,\n"
+   "    max-output-tokens: s64,\n"
+   "    temperature-milli: s64,\n"
+   "  }\n"
+   "  record kotoba-llm-usage {\n"
+   "    input-tokens: s64,\n"
+   "    output-tokens: s64,\n"
+   "  }\n"
+   "  record kotoba-llm-completion {\n"
+   "    text: string,\n"
+   "    finish-reason: string,\n"
+   "    usage: kotoba-llm-usage,\n"
+   "  }\n"
+   "  record kotoba-llm-error {\n"
+   "    code: string,\n"
+   "    message: string,\n"
+   "    retryable: bool,\n"
+   "  }\n"
+   "  variant kotoba-llm-result {\n"
+   "    ok(kotoba-llm-completion),\n"
+   "    error(kotoba-llm-error),\n"
+   "  }\n"
+   "}\n\n"
+   "interface llm {\n"
+   "  use types.{kotoba-llm-generate-request, kotoba-llm-result};\n"
+   "  generate: func(request: kotoba-llm-generate-request) -> kotoba-llm-result;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import llm;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- llm-generate-sequence-driver-wat
+  "Two generate calls with model \"m\"; return sum of fixed text lengths (2+2=4).
+  Canonical ABI: MAX_FLAT_RESULTS=1 so variant result uses retptr as last
+  param. Text length sits at retptr + 12 (disc at 0, text ptr at 8)."
+  []
+  (let [mod "cm32p2|kotoba:application/llm@1"
+        export-run "cm32p2||run"
+        model-bytes (vec (.getBytes "m" "UTF-8"))
+        model-ptr 8
+        r1-base 64
+        r2-base 160
+        text-len-offset 12
+        push-gen
+        (fn [ret-base]
+          (str
+           "    i32.const " model-ptr "\n"
+           "    i32.const " (count model-bytes) "\n"
+           "    i32.const 0\n"            ;; system ptr
+           "    i32.const 0\n"            ;; system len
+           "    i32.const 0\n"            ;; prompt ptr
+           "    i32.const 0\n"            ;; prompt len
+           "    i64.const 64\n"           ;; max-output-tokens
+           "    i64.const 0\n"            ;; temperature-milli
+           "    i32.const " ret-base "\n"
+           "    call $generate\n"))]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"generate\""
+     " (func $generate (param i32 i32 i32 i32 i32 i32 i64 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $l1 i32) (local $l2 i32)\n"
+     (push-gen r1-base)
+     "    i32.const " r1-base " i32.load offset=" text-len-offset " local.set $l1\n"
+     (push-gen r2-base)
+     "    i32.const " r2-base " i32.load offset=" text-len-offset " local.set $l2\n"
+     "    local.get $l1 local.get $l2 i32.add i64.extend_i32_u)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " model-ptr ") \"" (wat-data model-bytes) "\")\n"
+     ")\n")))
+
+(defn- package-llm-generate-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-llm-generate-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (llm-generate-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (llm-generate-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:llm/generate]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest llm-generate-sequence-driver-closes-and-wasmtime-returns-text-len-sum
+  "Multi-step deepen (ADR 0107): compose real llm provider with a driver that
+   performs two generates; Wasmtime returns fixed text-length sum 4."
+  (let [d (llm-v1-descriptors)
+        provider (composition/package-llm-provider
+                  (:request d) (:result d) (:schemas d))
+        driver (package-llm-generate-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-llm-generate-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:llm/generate] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "4" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
