@@ -1,6 +1,6 @@
 (ns kotoba.ui-provider-component-test
   "W5 remaining wasm packaging: synthetic ui-v1 dual-export component provider.
-   Multi-step Wasmtime commit sequence (rev0→rev1→rev2) added as deepen slice."
+   Multi-step Wasmtime: commit sequence and commit+next-event dual-export walk."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
@@ -217,5 +217,133 @@
       (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
         (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
         (is (= "1" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(defn- ui-commit-event-sequence-driver-wit
+  "Application WIT importing ui.commit + ui.next-event; multi-step walk."
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-ui-node {\n"
+   "    id: string,\n"
+   "    parent: option<string>,\n"
+   "    kind: string,\n"
+   "    text: string,\n"
+   "  }\n"
+   "  record kotoba-ui-commit-request {\n"
+   "    base-revision: s64,\n"
+   "    nodes: list<kotoba-ui-node>,\n"
+   "  }\n"
+   "  record kotoba-ui-commit-result {\n"
+   "    revision: s64,\n"
+   "    node-count: s64,\n"
+   "  }\n"
+   "  record kotoba-ui-event-request {\n"
+   "    after-revision: s64,\n"
+   "  }\n"
+   "  record kotoba-ui-event {\n"
+   "    revision: s64,\n"
+   "    target: string,\n"
+   "    kind: string,\n"
+   "    value: string,\n"
+   "  }\n"
+   "}\n\n"
+   "interface ui {\n"
+   "  use types.{kotoba-ui-commit-request, kotoba-ui-commit-result,\n"
+   "             kotoba-ui-event-request, kotoba-ui-event};\n"
+   "  commit: func(request: kotoba-ui-commit-request) -> kotoba-ui-commit-result;\n"
+   "  next-event: func(request: kotoba-ui-event-request) -> option<kotoba-ui-event>;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import ui;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- ui-commit-event-sequence-driver-wat
+  "One empty commit (base-rev 0) then next-event (after-rev 0).
+  Return revision + none-count: rev=1, next-event always none (disc 0) → 2.
+  Requires dual-export compose-closed (ADR 0111)."
+  []
+  (let [mod "cm32p2|kotoba:application/ui@1"
+        export-run "cm32p2||run"
+        commit-ret 64
+        event-ret 128]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"commit\""
+     " (func $commit (param i64 i32 i32 i32)))\n"
+     "  (import \"" mod "\" \"next-event\""
+     " (func $next-event (param i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $rev i64) (local $disc i32)\n"
+     ;; commit base-rev=0, empty nodes
+     "    i64.const 0 i32.const 0 i32.const 0 i32.const " commit-ret " call $commit\n"
+     "    i32.const " commit-ret " i64.load offset=0 local.set $rev\n"
+     ;; next-event after-rev=0 → option none
+     "    i64.const 0 i32.const " event-ret " call $next-event\n"
+     "    i32.const " event-ret " i32.load8_u offset=0 local.set $disc\n"
+     ;; rev + (1 - disc) when disc is 0 for none
+     "    local.get $rev\n"
+     "    i32.const 1 local.get $disc i32.sub i64.extend_i32_s\n"
+     "    i64.add)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     ")\n")))
+
+(defn- package-ui-commit-event-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-ui-commit-event-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (ui-commit-event-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (ui-commit-event-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:ui/commit :ui/next-event]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest ui-commit-event-sequence-driver-closes-and-wasmtime-returns-rev-plus-none
+  "Multi-step deepen (ADR 0113): dual-export commit then next-event;
+   Wasmtime returns rev(1)+none(1)=2."
+  (let [d (ui-v1-descriptors)
+        provider (composition/package-ui-provider
+                  (:commit-req d) (:commit-res d)
+                  (:event-req d) (:event-res d)
+                  (:schemas d))
+        driver (package-ui-commit-event-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-ui-commit-event-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:ui/commit :ui/next-event] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))))
       (finally
         (Files/deleteIfExists path)))))
