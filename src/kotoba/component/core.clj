@@ -2000,6 +2000,34 @@
       {:capability capability
        :key (first values) :expected-etag (second values) :bytes (nth values 2)})))
 
+(def ^:private typed-v3-projections
+  {'bytes-response-byte-count
+   {1 {:request :bytes-request :response :bytes-response :result-offset 8 :load "i32.load"}
+    3 {:request :bytes-request :response :bytes-response :result-offset 8 :load "i32.load"}}
+   'bool-result
+   {2 {:request :bytes-request :response :bool :result-offset 4 :load "i32.load8_u"}}
+   'http-response-status
+   {4 {:request :http-post-request :response :http-post-response
+       :result-offset 4 :load "i32.load16_u"}}
+   'log-read-byte-count
+   {5 {:request :log-read-request :response :log-read-response
+       :result-offset 20 :load "i32.load"}}})
+
+(defn- typed-v3-projected-call [function]
+  (let [{:keys [params param-types result body]} function
+        projection (when (and (seq? body) (= 2 (count body))) (first body))
+        call (when (contains? typed-v3-projections projection) (second body))
+        [_ id request-type result-type request] (when (seq? call) call)
+        {:keys [descriptor values]} (literal-record-values request)
+        capability (some #(when (= id (:id %)) %) (:capabilities component-wit/contract))
+        lowering (get-in typed-v3-projections [projection id])]
+    (when (and (empty? params) (empty? param-types) (= :i64 result)
+               lowering capability (seq? call) (= 'typed-cap-call (first call))
+               (= descriptor request-type) (vector? result-type)
+               (= :record (first result-type)))
+      {:capability capability :projection projection :request-values values
+       :request-type request-type :result-type result-type :lowering lowering})))
+
 (defn- record-capability-call [function schemas]
   (let [{:keys [params param-types result body]} function
         request-type (first param-types)
@@ -2314,6 +2342,10 @@
            (= 1 (count exports))
            (object-compare-and-set-call (first exports)))
       :object-compare-and-set-call
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
+           (typed-v3-projected-call (first exports)))
+      :typed-v3-projected-call
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (scalar-capability-call (first exports))) :scalar-capability-call
@@ -5492,6 +5524,78 @@
      "  (data (i32.const " value-pointer ") \"" (wat-data value-bytes) "\")\n"
      ")\n")))
 
+(defn- typed-v3-projected-wat [function plan]
+  (let [id (get-in plan [:capability :id])
+        operation (abi/typed-capability-operation id)
+        {:keys [request response result-offset load]} (:lowering plan)
+        values (:request-values plan)
+        string-bytes (mapv #(when (string? %) (.getBytes ^String % StandardCharsets/UTF_8))
+                           values)
+        ptrs [256 1024 2048]
+        provider-signature
+        (cond
+          (contains? #{1 2 3} id) "(param i32 i32 i32 i32)"
+          (= 4 id) "(param i32 i32 i32 i32 i32 i32 i32 i32)"
+          (= 5 id) "(param i32 i64 i32 i32)")
+        provider-args
+        (cond
+          (contains? #{1 2 3} id)
+          (str " i32.const " (first ptrs) " i32.const " (alength ^bytes (first string-bytes))
+               " i32.const 0")
+          (= 4 id)
+          (str " i32.const " (first ptrs) " i32.const " (alength ^bytes (first string-bytes))
+               " i32.const 0 i32.const 0"
+               " i32.const " (nth ptrs 2) " i32.const " (alength ^bytes (nth string-bytes 2))
+               " i32.const 0")
+          (= 5 id)
+          (str " i64.const " (long (first values))
+               " i32.const " (long (second values)) " i32.const 0"))]
+    (when-not (and (= request (:request operation)) (= response (:response operation)))
+      (reject "typed v0.3 projected lowering does not match operation types"
+              {:capability id :request (:request operation) :response (:response operation)}))
+    (when-not (cond
+                (contains? #{1 2 3} id)
+                (and (= 1 (count values)) (string? (first values)))
+                (= 4 id)
+                (and (= 3 (count values)) (string? (first values))
+                     (seq? (second values)) (= 'vector-new (first (second values)))
+                     (string? (nth values 2)))
+                (= 5 id) (and (= 2 (count values)) (every? integer? values))
+                :else false)
+      (reject "typed v0.3 projected request must be a bounded literal"
+              {:capability id :values values}))
+    (str
+     "(module\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"acquire\"\n"
+     "    (func $acquire (param i32 i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/capability@0.3\" \"grant_drop\"\n"
+     "    (func $drop-grant (param i32)))\n"
+     "  (import \"cm32p2|aiueos:capability/" (:interface operation) "@0.3\" \""
+     (:function operation) "\" (func $provider " provider-signature "))\n"
+     "  (memory (export \"cm32p2_memory\") 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32) local.get $old i32.eqz\n"
+     "    if (result i32) i32.const 4096 else local.get $old end)\n"
+     "  (func (export \"cm32p2||" (name (:name function)) "\") (result i64)\n"
+     "    (local $grant i32)\n"
+     "    i32.const " (:grant-index operation) " i32.const 0 call $acquire\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    i32.const 4 i32.load local.set $grant\n"
+     "    local.get $grant" provider-args " call $provider\n"
+     "    i32.const 0 i32.load8_u if unreachable end\n"
+     "    local.get $grant call $drop-grant\n"
+     "    i32.const " result-offset " " load " i64.extend_i32_u)\n"
+     "  (func (export \"cm32p2||" (name (:name function)) "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     (apply str
+            (keep-indexed
+             (fn [index bytes]
+               (when bytes
+                 (str "  (data (i32.const " (nth ptrs index) ") \"" (wat-data bytes) "\")\n")))
+             string-bytes))
+     ")\n")))
+
 (defn- typed-v3-scalar-literal-wat [function plan]
   (let [id (get-in plan [:capability :id])
         operation (abi/typed-capability-operation id)]
@@ -5534,6 +5638,12 @@
   ([kir target] (emit kir target {}))
   ([kir target opts]
   (case (assert-supported! kir)
+    :typed-v3-projected-call
+    (let [function (first (exported-functions kir))]
+      (if (:typed-capability-v3? opts)
+        (wasm-tools/parse-wat
+         (typed-v3-projected-wat function (typed-v3-projected-call function)))
+        (reject "projected capability requires typed v0.3" {:target target})))
     :object-compare-and-set-call
     (let [function (first (exported-functions kir))]
       (if (:typed-capability-v3? opts)
