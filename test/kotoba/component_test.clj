@@ -81,6 +81,26 @@
     (is (= :linear-resource (:capability-mode wit)))
     (is (pos? (alength ^bytes (:bytes packaged))))))
 
+(deftest typed-v03-object-stream-consumer-lowers-linear-resources
+  (let [kir {:format :kotoba.kir/v4
+             :exports ['main]
+             :schemas {}
+             :effects #{[:cap/call 14]}
+             :functions [{:name 'main :params [] :param-types []
+                          :result :i64 :effects #{[:cap/call 14]}
+                          :body
+                          '(bytes-task-byte-count
+                            (typed-cap-call
+                             14 :string [:task [:stream :bytes]] "blocks/key"))}]}
+        opts {:typed-capability-v3? true}
+        wit (wit/emit kir opts)
+        core-bytes (core/emit kir :wasm32-wasi-kotoba-v1 opts)
+        packaged (artifact/package core-bytes kir wit)]
+    (is (= ["aiueos-object-get-stream"] (:imports wit)))
+    (is (= :stream-byte-count-call (:canonical-lowering packaged)))
+    (is (= :linear-resource (:capability-mode wit)))
+    (is (pos? (alength ^bytes (:bytes packaged))))))
+
 (def multi-match-kir
   {:format :kotoba.kir/v4
    :exports ['choose-option 'choose-result 'negate]

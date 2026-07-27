@@ -5281,8 +5281,11 @@
   (let [id (get-in plan [:capability :id])
         operation (abi/typed-capability-operation id)
         request-bytes (.getBytes ^String (:request plan) StandardCharsets/UTF_8)
-        request-pointer 128]
-    (when-not (and (= :http-get-stream-request (:request operation))
+        request-pointer 128
+        request-kind (:request operation)]
+    (when-not (and (contains? #{:http-get-stream-request
+                                :object-get-stream-request}
+                              request-kind)
                    (= :bytes-task (:response operation)))
       (reject "typed v0.3 stream consumer does not match operation types"
               {:capability id
@@ -5308,7 +5311,9 @@
      "    (func $drop-task (param i32)))\n"
      "  (import \"cm32p2|aiueos:capability/" (:interface operation) "@0.3\" \""
      (:function operation) "\"\n"
-     "    (func $provider (param i32 i32 i32 i32 i32 i32)))\n"
+     (if (= :http-get-stream-request request-kind)
+       "    (func $provider (param i32 i32 i32 i32 i32 i32)))\n"
+       "    (func $provider (param i32 i32 i32 i32)))\n")
      "  (memory (export \"cm32p2_memory\") 2 2)\n"
      "  (func (export \"cm32p2_realloc\")\n"
      "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
@@ -5321,7 +5326,10 @@
      "    i32.const 0 i32.load8_u if unreachable end\n"
      "    i32.const 4 i32.load local.set $grant\n"
      "    local.get $grant i32.const " request-pointer " i32.const "
-     (alength request-bytes) " i32.const 0 i32.const 0 i32.const 0 call $provider\n"
+     (alength request-bytes)
+     (if (= :http-get-stream-request request-kind)
+       " i32.const 0 i32.const 0 i32.const 0 call $provider\n"
+       " i32.const 0 call $provider\n")
      "    i32.const 0 i32.load8_u if unreachable end\n"
      "    i32.const 4 i32.load local.set $task\n"
      "    local.get $grant call $drop-grant\n"
