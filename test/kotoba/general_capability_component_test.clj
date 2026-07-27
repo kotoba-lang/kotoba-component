@@ -428,6 +428,149 @@
         (finally
           (Files/deleteIfExists path))))))
 
+(deftest structural-indirect-list-match-calls-a-named-capability
+  (doseq [[descriptor body calls]
+          (for [leaf [:string :keyword]
+                kind [:option :result]
+                :let [list-type [:list leaf]
+                      descriptor (if (= kind :option)
+                                   [:option list-type]
+                                   [:result list-type list-type])
+                      inner
+                      (fn [constructor binder]
+                        (if (= kind :option)
+                          (list 'option-match descriptor
+                                (list 'typed-cap-call
+                                      clock-now descriptor descriptor
+                                      (list constructor descriptor binder))
+                                9 'returned
+                                (list 'vector-count 'returned))
+                          (list 'result-match-of descriptor
+                                (list 'typed-cap-call
+                                      clock-now descriptor descriptor
+                                      (list constructor descriptor binder))
+                                'returned-ok
+                                (list 'vector-count 'returned-ok)
+                                'returned-err
+                                (list 'vector-count 'returned-err))))
+                      body (if (= kind :option)
+                             (list 'option-match descriptor 'value 9 'selected
+                                   (inner 'option-some-of 'selected))
+                             (list 'result-match-of descriptor 'value
+                                   'selected-ok
+                                   (inner 'result-ok-of 'selected-ok)
+                                   'selected-err
+                                   (inner 'result-err-of 'selected-err)))
+                      calls (if (= kind :option)
+                              [["choose(none)" "9"]
+                               ["choose(some([]))" "0"]
+                               ["choose(some([\"安全\", \"abc\"]))" "2"]]
+                              [["choose(ok([\"安全\", \"abc\"]))" "2"]
+                               ["choose(err([\"x\"]))" "1"]])]]
+            [descriptor body calls])]
+    (let [kir {:format :kotoba.kir/v4
+               :exports ['choose 'echo]
+               :schemas {}
+               :effects #{:clock/read}
+               :functions
+               [{:name 'choose
+                 :params ['value]
+                 :param-types [descriptor]
+                 :result :i64
+                 :effects #{:clock/read}
+                 :body body}
+                {:name 'echo
+                 :params ['value]
+                 :param-types [:i64]
+                 :result :i64
+                 :effects #{}
+                 :body 'value}]}
+          application
+          (artifact/package
+           (component-core/emit kir :wasm32-wasi-kotoba-v1)
+           kir (wit/emit kir))
+          provider
+          (composition/package-structural-union-identity-provider
+           :clock/now descriptor)
+          closed (composition/compose-closed application [provider])
+          path (Files/createTempFile
+                "kotoba-indirect-list-match-capability-" ".wasm"
+                (make-array FileAttribute 0))]
+      (try
+        (Files/write path ^bytes (:bytes closed)
+                     (make-array java.nio.file.OpenOption 0))
+        (is (= :structural-union-match-module
+               (component-core/assert-supported! kir)))
+        (is (= [:clock/now] (:imports application)))
+        (doseq [[invoke expected] calls]
+          (let [run (shell/sh "wasmtime" "run" "--invoke"
+                              invoke (str path))]
+            (is (zero? (:exit run)) (:err run))
+            (is (= expected (str/trim (:out run))) invoke)))
+        (finally
+          (Files/deleteIfExists path))))))
+
+(deftest structural-indirect-list-match-validates-untrusted-provider-results
+  (let [descriptor [:option [:list :string]]
+        kir {:format :kotoba.kir/v4
+             :exports ['choose 'echo]
+             :schemas {}
+             :effects #{:clock/read}
+             :functions
+             [{:name 'choose
+               :params ['value]
+               :param-types [descriptor]
+               :result :i64
+               :effects #{:clock/read}
+               :body
+               (list 'option-match descriptor 'value 9 'selected
+                     (list 'option-match descriptor
+                           (list 'typed-cap-call
+                                 clock-now descriptor descriptor
+                                 (list 'option-some-of descriptor 'selected))
+                           9 'returned
+                           (list 'vector-count 'returned)))}
+              {:name 'echo
+               :params ['value]
+               :param-types [:i64]
+               :result :i64
+               :effects #{}
+               :body 'value}]}
+        core (component-core/emit kir :wasm32-wasi-kotoba-v1)
+        path (Files/createTempFile
+              "kotoba-indirect-list-provider-validation-" ".wasm"
+              (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes core (make-array java.nio.file.OpenOption 0))
+      (let [script
+            (str
+             "const fs=require('fs');let inst,mode=0,bad,over;"
+             "const imports={['cm32p2|kotoba:application/clock@1']:{"
+             "now:(disc,ptr,count,ret)=>{const v=new DataView(inst.exports.cm32p2_memory.buffer);"
+             "v.setUint8(ret,1);v.setUint32(ret+4,mode===0?bad:over,true);"
+             "v.setUint32(ret+8,mode===0?1:17,true);}}};"
+             "WebAssembly.instantiate(fs.readFileSync(process.argv[1]),imports)"
+             ".then(({instance})=>{inst=instance;const e=instance.exports;"
+             "e.cm32p2_initialize();const alloc=(a,n)=>e.cm32p2_realloc(0,0,a,n);"
+             "const request=alloc(4,8),byte=alloc(1,1);"
+             "bad=alloc(4,8);over=alloc(4,17*8);const shared=alloc(1,65536);"
+             "const v=new DataView(e.cm32p2_memory.buffer);"
+             "v.setUint8(byte,65);v.setUint32(request,byte,true);v.setUint32(request+4,1,true);"
+             "v.setUint32(bad,0xfffffff0,true);v.setUint32(bad+4,32,true);"
+             "for(let i=0;i<17;i++){v.setUint32(over+i*8,shared,true);"
+             "v.setUint32(over+i*8+4,65536,true);}"
+             "let malformed=false,aggregate=false;"
+             "try{e['cm32p2||choose'](1,request,1);}catch(_){malformed=true;}"
+             "mode=1;try{e['cm32p2||choose'](1,request,1);}catch(_){aggregate=true;}"
+             "console.log(JSON.stringify({malformed,aggregate}));"
+             "if(!malformed||!aggregate)process.exit(1);});")
+            run (shell/sh "node" "-e" script (str path))]
+        (is (zero? (:exit run)) (:err run))
+        (is (= "{\"malformed\":true,\"aggregate\":true}"
+               (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
 (deftest structural-option-record-match-calls-a-named-capability
   (let [record-type
         [:record :demo/cap-record
