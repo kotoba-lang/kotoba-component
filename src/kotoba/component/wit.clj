@@ -2,7 +2,8 @@
   "Deterministic WIT package/world generation from checked KIR."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str])
+            [clojure.string :as str]
+            [kotoba.abi.contract :as abi])
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest]))
 
@@ -148,10 +149,22 @@
 (defn emit
   "Return a deterministic WIT v1 package and receipt for checked KIR."
   ([kir] (emit kir {}))
-  ([kir {:keys [capability-mode] :or {capability-mode :function}}]
+  ([kir {:keys [capability-mode typed-capability-v3?]
+         :or {capability-mode :function}}]
   (when-not (contains? #{:kotoba.kir/v3 :kotoba.kir/v4} (:format kir))
     (reject "WIT generation requires checked KIR" {:format (:format kir)}))
-  (let [schemas (or (:schemas kir) {})
+  (if typed-capability-v3?
+    (let [source (abi/typed-capability-wit-v3)]
+      {:format :kotoba.wit-package/v1
+       :target abi/component-target-v2
+       :world abi/typed-capability-world-v3
+       :wasi-version abi/wasi-version
+       :source source
+       :sha256 (text-sha256 source)
+       :imports (mapv abi/capability-import-name
+                      (sort (map :id (capability-contracts kir))))
+       :capability-mode :linear-resource})
+    (let [schemas (or (:schemas kir) {})
         schema-names (keys schemas)
         canonical-names (map wit-name schema-names)]
     (when-not (= (count canonical-names) (count (distinct canonical-names)))
@@ -208,4 +221,4 @@
        :sha256 (text-sha256 text)
        :imports (mapv :name capabilities)
        :capability-mode capability-mode
-       :exports (mapv :name exports)}))))
+       :exports (mapv :name exports)})))))

@@ -1,5 +1,8 @@
 {:paths ["src" "resources"]
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
+        io.github.kotoba-lang/abi
+        {:git/url "https://github.com/kotoba-lang/abi.git"
+         :git/sha "129b0b2fe26ddd1a3917132515bf1b903c7b763d"}
         io.github.kotoba-lang/kotoba-kir
         {:git/url "https://github.com/kotoba-lang/kotoba-kir.git"
          :git/sha "e2cabbc6773ae24f407f61aa0a50844f0fabc377"}

@@ -56,15 +56,19 @@
     (try
       (Files/writeString world ^String (:source wit) (make-array java.nio.file.OpenOption 0))
       (Files/write core ^bytes core-bytes (make-array java.nio.file.OpenOption 0))
-      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
-                                "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       (cond-> ["wasm-tools" "component" "embed" (str world) (str core)
+                "--encoding" "utf8" "-o" (str embedded)]
+         (:world wit) (into ["--world" (:world wit)])))
       (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
                                 "--reject-legacy-names" "-o" (str component)])
       (let [bytes (Files/readAllBytes component)]
         (when-not (= [0 97 115 109 13 0 1 0]
                      (mapv #(bit-and (int %) 0xff) (take 8 bytes)))
           (reject "component binary preamble is invalid" {}))
-        {:format :wasm-component/v1 :target target :wasi-version "0.3.0"
+        {:format :wasm-component/v1 :target (or (:target wit) target)
+         :component-world (:world wit)
+         :wasi-version "0.3.0"
          :bytes bytes :sha256 (sha256 bytes) :wit-sha256 (:sha256 wit)
          :imports (:imports wit) :exports (:exports wit)
          :canonical-name-encoding :component-model/standard32
