@@ -5933,6 +5933,68 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+
+(defn- storage-provider-shape
+  "True when request/result match storage-v1 variant shapes (get/put/delete
+  with optional expected-version; found/missing/written/deleted/conflict/error)."
+  [request-descriptor result-descriptor schemas]
+  (letfn [(rec [d]
+            (when (and (vector? d) (= :ref (first d)))
+              (get schemas (second d))))]
+    (boolean
+     (let [req (rec request-descriptor)
+           res (rec result-descriptor)]
+       (and req res
+            (= :variant (first req) (first res))
+            (= [:get :put :delete] (mapv first (nth req 2)))
+            (= [:found :missing :written :deleted :conflict :error]
+               (mapv first (nth res 2))))))))
+
+(defn storage-provider-wat
+  "Synthetic provider for storage-v1. Range-checks the request discriminant
+  and always returns `:missing` (no ambient backend). Packaging/ABI
+  qualification only — production transport remains ADR 0071. :wasm-aot
+  stays pending."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (storage-provider-shape request-descriptor result-descriptor schemas)
+    (reject "storage provider requires storage-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|"
+                    (:function entry))
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined-types (vec (rest (:flat request-layout)))
+        params (apply str
+                      (cons " (param $disc i32)"
+                            (map-indexed
+                             (fn [i t]
+                               (str " (param $p" i " " (core-type-name t) ")"))
+                             joined-types)))
+        disc-store (variant-disc-store (:discriminant-size result-layout))
+        payload-offset (:payload-offset result-layout)
+        result-size (:size result-layout)
+        arena-base 8
+        pages 1
+        capacity-bytes (* pages 65536)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32)\n"
+     "    local.get $disc i32.const 3 i32.ge_u if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     ;; missing = case 1, payload false
+     "    local.get $ret i32.const 1 " disc-store " offset=0\n"
+     "    local.get $ret i32.const 0 i32.store8 offset=" payload-offset "\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 (defn fuel-enforcement
   "Where a component's declared `:fuel` budget is actually enforced.
 
