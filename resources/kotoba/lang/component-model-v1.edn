@@ -111,7 +111,11 @@
   {:name :object/put-block :id 15 :interface "object-store" :function "put-block"
    :kit :object-stream :provider-wasi []}
   {:name :object/compare-and-set-ref :id 16 :interface "object-store"
-   :function "compare-and-set-ref" :kit :object-stream :provider-wasi []}]
+   :function "compare-and-set-ref" :kit :object-stream :provider-wasi []}
+  {:name :http/accept :id 17 :interface "http-ingress" :function "accept"
+   :kit :http-ingress :provider-wasi []}
+  {:name :http/reply :id 18 :interface "http-ingress" :function "reply"
+   :kit :http-ingress :provider-wasi []}]
  :provider-authority
  {:rule :kit-declared-only
   :no-inferred-wasi true
