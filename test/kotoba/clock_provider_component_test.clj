@@ -1,11 +1,20 @@
 (ns kotoba.clock-provider-component-test
-  "W5 second slice: real clock-v1 wasm component provider (composition + validate)."
+  "W5 second slice: real clock-v1 wasm component provider (composition + validate).
+   Multi-step Wasmtime sequence driver (wall then mono) added as deepen slice."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]
             [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
-            [kotoba.wasm.tools :as wasm-tools]))
+            [kotoba.wasm.tools :as wasm-tools])
+  (:import [java.nio.file Files]
+           [java.nio.file.attribute FileAttribute]))
+
+(def ^:private wasmtime-binary
+  (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
+    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
 
 (defn- ref-ify
   [variant-descriptor]
@@ -98,3 +107,119 @@
     (is (re-find #"global \$mono" wat))
     (is (re-find #"1700000000000" wat))
     (is (re-find #"cm32p2\|kotoba:application/clock@1\|now" wat))))
+
+(defn- clock-sequence-driver-wit
+  "Application WIT that imports clock and exports a scalar multi-step run."
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-clock-wall {\n"
+   "    unix-millis: s64,\n"
+   "    observation-sequence: s64,\n"
+   "  }\n"
+   "  record kotoba-clock-monotonic {\n"
+   "    nanos: s64,\n"
+   "    observation-sequence: s64,\n"
+   "  }\n"
+   "  record kotoba-clock-error {\n"
+   "    code: string,\n"
+   "    message: string,\n"
+   "  }\n"
+   "  variant kotoba-clock-request {\n"
+   "    wall(bool),\n"
+   "    monotonic(bool),\n"
+   "  }\n"
+   "  variant kotoba-clock-result {\n"
+   "    wall(kotoba-clock-wall),\n"
+   "    monotonic(kotoba-clock-monotonic),\n"
+   "    error(kotoba-clock-error),\n"
+   "  }\n"
+   "}\n\n"
+   "interface clock {\n"
+   "  use types.{kotoba-clock-request, kotoba-clock-result};\n"
+   "  now: func(request: kotoba-clock-request) -> kotoba-clock-result;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import clock;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- clock-sequence-driver-wat
+  "Core module: wall observation then monotonic observation; return
+  (obs2 - obs1). Canonical ABI import for WIT
+  `now: func(request) -> result` is `[disc, bool, retptr] -> []`.
+  observation-sequence sits at retptr + 16."
+  []
+  (let [mod "cm32p2|kotoba:application/clock@1"
+        export-run "cm32p2||run"
+        obs-offset 16
+        r1-base 64
+        r2-base 128]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"now\" (func $now (param i32 i32 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $o1 i64) (local $o2 i64)\n"
+     "    i32.const 0 i32.const 0 i32.const " r1-base " call $now\n"
+     "    i32.const " r1-base " i64.load offset=" obs-offset " local.set $o1\n"
+     "    i32.const 1 i32.const 0 i32.const " r2-base " call $now\n"
+     "    i32.const " r2-base " i64.load offset=" obs-offset " local.set $o2\n"
+     "    local.get $o2 local.get $o1 i64.sub)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     ")\n")))
+
+(defn- package-clock-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-clock-sequence-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (clock-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (clock-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:clock/now]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest clock-sequence-driver-closes-and-wasmtime-advances-observation
+  "Multi-step deepen (ADR 0101): compose real clock provider with a driver
+   that performs wall then mono observations; Wasmtime returns obs delta 1."
+  (let [{:keys [descriptor result-descriptor schemas]} (clock-v1-descriptors)
+        provider (composition/package-clock-provider
+                  :clock/now descriptor result-descriptor schemas)
+        driver (package-clock-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-clock-sequence-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:clock/now] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "1" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
