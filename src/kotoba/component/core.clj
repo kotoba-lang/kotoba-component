@@ -467,8 +467,8 @@
 
 (defn- match-payload-leaves
   "Return admitted leaves keyed by record-get path for one match payload.
-  Products may recurse through finite records. Strings and scalar-item lists
-  remain indirect and may only feed their dedicated bounded operations;
+  Products may recurse through finite records. Strings and admitted bounded
+  lists remain indirect and may only feed their dedicated bounded operations;
   unions and other indirect values remain fail-closed."
   [layout]
   (letfn [(walk [node path flat-index]
@@ -486,7 +486,8 @@
                 :max-bytes (:max-bytes node)}]
 
               (and (contains? #{:vector-i64 :vector-f64
-                                [:list :i64] [:list :f64]}
+                                [:list :i64] [:list :f64]
+                                [:list :string] [:list :keyword]}
                               (:descriptor node))
                    (integer? (:max-items node))
                    (map? (:item-layout node)))
@@ -540,6 +541,8 @@
                                     [:option :vector-f64]
                                     [:option [:list :i64]]
                                     [:option [:list :f64]]
+                                    [:option [:list :string]]
+                                    [:option [:list :keyword]]
                                     [:option :string]
                                     [:option :keyword]}
                                   (second node)))
@@ -567,6 +570,7 @@
                      (= result-body (list count-op result-binder))
                      (contains? #{:vector-i64 :vector-f64
                                   [:list :i64] [:list :f64]
+                                  [:list :string] [:list :keyword]
                                   :string :keyword}
                                 leaf-descriptor)
                      (valid? fallback))))))
@@ -591,6 +595,7 @@
                      (= (second descriptor) (nth descriptor 2))
                      (contains? #{:vector-i64 :vector-f64
                                   [:list :i64] [:list :f64]
+                                  [:list :string] [:list :keyword]
                                   :string :keyword}
                                 leaf-descriptor)
                      (= leaf-descriptor (second descriptor))
@@ -967,6 +972,8 @@
                                     [:option :vector-f64]
                                     [:option [:list :i64]]
                                     [:option [:list :f64]]
+                                    [:option [:list :string]]
+                                    [:option [:list :keyword]]
                                     [:option :string]
                                     [:option :keyword]}
                                   (second node)))
@@ -991,7 +998,10 @@
                               'vector-f64-count
                               :else 'vector-count)
                             maximum (or (:max-bytes request-leaf)
-                                        (:max-items request-leaf))]
+                                        (:max-items request-leaf))
+                            indirect-string-items?
+                            (contains? #{[:list :string] [:list :keyword]}
+                                       (second descriptor))]
                         (when (and (= request-type descriptor)
                                    (= result-type descriptor)
                                    (= constructor-type descriptor)
@@ -1011,7 +1021,11 @@
                                 (:alignment request-leaf)
                                 (:size result-layout)
                                 (:payload-offset result-layout)
-                                (:alignment result-layout))))))))))
+                                (:alignment result-layout)
+                                (if indirect-string-items? 1 0)
+                                (if indirect-string-items?
+                                  value/canonical-indirect-byte-limit
+                                  0))))))))))
           (result-list-capability-count [node]
             (when (and (seq? node)
                        (= 7 (count node))
@@ -1044,7 +1058,10 @@
                               'vector-f64-count
                               :else 'vector-count)
                             maximum (or (:max-bytes request-leaf)
-                                        (:max-items request-leaf))]
+                                        (:max-items request-leaf))
+                            indirect-string-items?
+                            (contains? #{[:list :string] [:list :keyword]}
+                                       (second descriptor))]
                         (when (and (= constructor-type descriptor)
                                    (= request-value binder)
                                    (symbol? ok-binder)
@@ -1063,7 +1080,11 @@
                                 (:alignment request-leaf)
                                 (:size result-layout)
                                 (:payload-offset result-layout)
-                                (:alignment result-layout))))))))))
+                                (:alignment result-layout)
+                                (if indirect-string-items? 1 0)
+                                (if indirect-string-items?
+                                  value/canonical-indirect-byte-limit
+                                  0))))))))))
           (option-record-capability-projection [node]
             (when (and (seq? node)
                        (= 6 (count node))
@@ -1437,12 +1458,16 @@
                                   [:option :vector-f64]
                                   [:option [:list :i64]]
                                   [:option [:list :f64]]
+                                  [:option [:list :string]]
+                                  [:option [:list :keyword]]
                                   [:option :string]
                                   [:option :keyword]
                                   [:result :vector-i64 :vector-i64]
                                   [:result :vector-f64 :vector-f64]
                                   [:result [:list :i64] [:list :i64]]
                                   [:result [:list :f64] [:list :f64]]
+                                  [:result [:list :string] [:list :string]]
+                                  [:result [:list :keyword] [:list :keyword]]
                                   [:result :string :string]
                                   [:result :keyword :keyword]}
                                 request-type)
