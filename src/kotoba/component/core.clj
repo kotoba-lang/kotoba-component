@@ -6470,21 +6470,26 @@
 
 (defn object-get-stream-cm-resource-provider-wat
   "Synthetic provider exporting a real Component Model `resource bytes-task`
-  (ADR 0135).
+  (ADR 0135 packaging + ADR 0136 Wasmtime multi-step).
 
   WIT surface (see composition):
   - resource bytes-task { poll-ready: func() -> bool; body-len: func() -> s64; }
   - get-stream(request) -> own<bytes-task>
 
-  Core exports (cm32p2-prefixed, required by wasm-tools component new):
-  - [resource-new]/[resource-rep]/[resource-drop]bytes-task
-  - [method]bytes-task.poll-ready / body-len
-  - get-stream (alloc live rep over fixed payload \"ok\")
+  Correct cm32p2 Standard ABI for *exporting* a resource (wit-component):
+  - IMPORT runtime intrinsics from `cm32p2|_ex_<iface>`:
+      bytes-task_new / bytes-task_rep / bytes-task_drop
+  - EXPORT `bytes-task_dtor` (rep destructor)
+  - EXPORT `[method]bytes-task.poll-ready` / `body-len`
+  - EXPORT `get-stream` — allocates live rep, returns `resource.new(rep)`
 
-  This is packaging ABI evidence (embed + component new + validate). Host
-  dual-runtime ownership remains ADR 0133; free-function multi-step table
-  remains ADR 0134. Wasmtime multi-step of full CM resources is not claimed
-  here (requires host resource runtime / newer wasmtime). :wasm-aot pending."
+  Methods receive the **rep** after canon lift of `borrow bytes-task`
+  (not a handle index). get-stream must call resource.new so the returned
+  own handle is registered in the component handle table — without that,
+  Wasmtime multi-step fails with `unknown handle index`.
+
+  Host dual-runtime ownership remains ADR 0133; free-function multi-step
+  table remains ADR 0134. :wasm-aot pending."
   [entry request-descriptor schemas]
   (when-not (object-get-stream-cm-resource-shape request-descriptor schemas)
     (reject "cm-resource get-stream requires binding+key packaging shape"
@@ -6492,12 +6497,11 @@
   (when-not (= "object-store" (str (:interface entry)))
     (reject "cm-resource get-stream requires object-store interface"
             {:interface (:interface entry)}))
-  (let [iface (str (:interface entry))
-        prefix (str "cm32p2|kotoba:application/" iface "@1|")
+  (let [iface (str "kotoba:application/" (:interface entry) "@1")
+        ex-mod (str "cm32p2|_ex_" iface)
+        prefix (str "cm32p2|" iface "|")
         get-ex (str prefix "get-stream")
-        rnew (str prefix "[resource-new]bytes-task")
-        rrep (str prefix "[resource-rep]bytes-task")
-        rdrop (str prefix "[resource-drop]bytes-task")
+        dtor (str prefix "bytes-task_dtor")
         poll (str prefix "[method]bytes-task.poll-ready")
         blen (str prefix "[method]bytes-task.body-len")
         max-string value/string-value-byte-limit
@@ -6509,29 +6513,26 @@
         capacity-bytes (* pages 65536)]
     (str
      "(module\n"
+     "  (import \"" ex-mod "\" \"bytes-task_new\" (func $rnew (param i32) (result i32)))\n"
      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
      "  (global $next (mut i32) (i32.const " arena-base "))\n"
      "  (global $next-id (mut i32) (i32.const 1))\n"
      "  (global $task-base i32 (i32.const 1024))\n"
      (bounded-bump-realloc-wat capacity-bytes)
-     "  (func (export \"" rnew "\") (param $rep i32) (result i32)\n"
-     "    local.get $rep)\n"
-     "  (func (export \"" rrep "\") (param $h i32) (result i32)\n"
-     "    local.get $h)\n"
-     "  (func (export \"" rdrop "\") (param $h i32)\n"
-     "    local.get $h i32.eqz if unreachable end\n"
-     "    local.get $h i32.const " max-handles " i32.gt_u if unreachable end\n"
-     "    global.get $task-base local.get $h i32.add i32.load8_u i32.eqz if unreachable end\n"
-     "    global.get $task-base local.get $h i32.add i32.const 0 i32.store8)\n"
-     "  (func (export \"" poll "\") (param $h i32) (result i32)\n"
-     "    local.get $h i32.eqz if unreachable end\n"
-     "    local.get $h i32.const " max-handles " i32.gt_u if unreachable end\n"
-     "    global.get $task-base local.get $h i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "  (func (export \"" dtor "\") (param $rep i32)\n"
+     "    local.get $rep i32.eqz if unreachable end\n"
+     "    local.get $rep i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    global.get $task-base local.get $rep i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    global.get $task-base local.get $rep i32.add i32.const 0 i32.store8)\n"
+     "  (func (export \"" poll "\") (param $rep i32) (result i32)\n"
+     "    local.get $rep i32.eqz if unreachable end\n"
+     "    local.get $rep i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    global.get $task-base local.get $rep i32.add i32.load8_u i32.eqz if unreachable end\n"
      "    i32.const 1)\n"
-     "  (func (export \"" blen "\") (param $h i32) (result i64)\n"
-     "    local.get $h i32.eqz if unreachable end\n"
-     "    local.get $h i32.const " max-handles " i32.gt_u if unreachable end\n"
-     "    global.get $task-base local.get $h i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "  (func (export \"" blen "\") (param $rep i32) (result i64)\n"
+     "    local.get $rep i32.eqz if unreachable end\n"
+     "    local.get $rep i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    global.get $task-base local.get $rep i32.add i32.load8_u i32.eqz if unreachable end\n"
      "    i64.const " body-len ")\n"
      "  (func (export \"" get-ex "\")"
      " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32) (result i32)\n"
@@ -6544,7 +6545,7 @@
      "    local.get $id i32.const " max-handles " i32.gt_u if unreachable end\n"
      "    global.get $next-id i32.const 1 i32.add global.set $next-id\n"
      "    global.get $task-base local.get $id i32.add i32.const 1 i32.store8\n"
-     "    local.get $id)\n"
+     "    local.get $id call $rnew)\n"
      "  (func (export \"" get-ex "_post\") (param i32)\n"
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\")\n"
