@@ -1423,6 +1423,76 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+
+(defn- object-get-stream-resource-wit
+  "WIT for object get-stream packaging with intermediate i32 task handles +
+  poll/byte-count/drop methods (ADR 0134). Not full CM `resource` types —
+  linear handle ABI that mirrors host affine ownership."
+  [entry request-descriptor schemas]
+  (let [req-name (second request-descriptor)
+        interface (:interface entry)
+        schema (get schemas req-name)
+        [_ id fields] schema]
+    (str "package kotoba:application@1.0.0;\n\n"
+         "interface types {\n"
+         "  record " (wit-name id) " {\n"
+         (apply str
+                (map (fn [[field ft]]
+                       (str "    " (wit-name field) ": "
+                            (object-write-wit-type ft schemas) ",\n"))
+                     fields))
+         "  }\n"
+         "}\n\n"
+         "interface " interface " {\n"
+         "  use types.{" (wit-name id) "};\n"
+         "  " (:function entry) ": func(request: " (wit-name id) ") -> s32;\n"
+         "  task-poll: func(task: s32) -> bool;\n"
+         "  task-byte-count: func(task: s32) -> s64;\n"
+         "  task-drop: func(task: s32);\n"
+         "}\n\n"
+         "world " interface "-get-stream-resource-provider {\n"
+         "  export " interface ";\n"
+         "}\n")))
+
+(defn package-object-get-stream-resource-provider
+  "Build a synthetic provider for `:object/get-stream` with linear resource
+  table methods (ADR 0134). Returns i32 handles; poll/byte-count/drop fail
+  closed on use-after-drop. No ambient store; intermediate packaging only."
+  [request-descriptor result-descriptor schemas]
+  (let [entry (capability :object/get-stream)
+        wit (object-get-stream-resource-wit entry request-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-object-get-stream-resource-provider-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/object-get-stream-resource-provider-wat
+                     entry request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :object/get-stream
+       :capabilities [:object/get-stream]
+       :resource-table :linear-handles
+       :descriptor request-descriptor
+       :result-descriptor result-descriptor
+       :schemas schemas
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn- object-store-put-get-wit
   "WIT for product vertical object-store dual-export: put-block → bool and
   get-stream → s64 (ADR 0132)."

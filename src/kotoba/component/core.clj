@@ -6332,6 +6332,108 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+
+(defn- object-get-stream-resource-provider-shape
+  "True when get-stream request is stream-object binding+key record and the
+  packaging result is intermediate `:i32` task handle (ADR 0134 CM-style
+  linear resource table on the provider core). Differs from ADR 0130's
+  `:i64` body-length aggregate."
+  [request-descriptor result-descriptor schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))]
+    (boolean
+     (when-let [req (rec request-descriptor)]
+       (let [fields (field-map req)]
+         (and (= :record (first req))
+              (= :i32 result-descriptor)
+              (= (:binding fields) :keyword)
+              (= (:key fields) :string)))))))
+
+(defn object-get-stream-resource-provider-wat
+  "Synthetic provider for `:object/get-stream` with an in-module linear
+  resource table (ADR 0134).
+
+  Exports on the shared object-store interface:
+  - get-stream(binding,key) → i32 task handle (allocates live slot)
+  - task-poll(handle) → bool ready (require live; always true when live)
+  - task-byte-count(handle) → i64 fixed body length 2 (require live)
+  - task-drop(handle) (require live; double-drop traps)
+
+  This mirrors host affine ownership (ADR 0133) on the packaging plane.
+  Not full Component Model `resource` WIT types — intermediate i32 handles
+  with fail-closed live checks. No ambient object store; :wasm-aot pending."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (object-get-stream-resource-provider-shape
+             request-descriptor result-descriptor schemas)
+    (reject "object get-stream resource provider requires binding+key → i32 handle shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [iface (:interface entry)
+        base (str "cm32p2|kotoba:application/" iface "@1|")
+        get-export (str base (:function entry))
+        poll-export (str base "task-poll")
+        count-export (str base "task-byte-count")
+        drop-export (str base "task-drop")
+        max-string value/string-value-byte-limit
+        max-keyword value/keyword-value-byte-limit
+        body-len 2
+        max-handles 16
+        ;; live flags start at linear memory offset 2048; one byte per handle 1..16
+        live-base 2048
+        arena-base 8
+        pages 1
+        capacity-bytes (* pages 65536)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (global $next-handle (mut i32) (i32.const 1))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     ;; helpers as inlined checks inside each export
+     "  (func (export \"" get-export "\")"
+     " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32) (result i32)\n"
+     "    (local $h i32) (local $slot i32)\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-keyword " i32.gt_u if unreachable end\n"
+     "    local.get $p3 i32.eqz if unreachable end\n"
+     "    local.get $p3 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    global.get $next-handle local.set $h\n"
+     "    local.get $h i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    local.get $h i32.const 1 i32.add global.set $next-handle\n"
+     "    local.get $h i32.const 1 i32.sub local.set $slot\n"
+     "    i32.const " live-base " local.get $slot i32.add i32.const 1 i32.store8\n"
+     "    local.get $h)\n"
+     "  (func (export \"" get-export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"" poll-export "\") (param $h i32) (result i32)\n"
+     "    (local $slot i32)\n"
+     "    local.get $h i32.const 1 i32.lt_u if unreachable end\n"
+     "    local.get $h i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    local.get $h i32.const 1 i32.sub local.set $slot\n"
+     "    i32.const " live-base " local.get $slot i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    i32.const 1)\n"
+     "  (func (export \"" poll-export "_post\") (param i32))\n"
+     "  (func (export \"" count-export "\") (param $h i32) (result i64)\n"
+     "    (local $slot i32)\n"
+     "    local.get $h i32.const 1 i32.lt_u if unreachable end\n"
+     "    local.get $h i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    local.get $h i32.const 1 i32.sub local.set $slot\n"
+     "    i32.const " live-base " local.get $slot i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    i64.const " body-len ")\n"
+     "  (func (export \"" count-export "_post\") (param i64))\n"
+     "  (func (export \"" drop-export "\") (param $h i32)\n"
+     "    (local $slot i32)\n"
+     "    local.get $h i32.const 1 i32.lt_u if unreachable end\n"
+     "    local.get $h i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    local.get $h i32.const 1 i32.sub local.set $slot\n"
+     "    i32.const " live-base " local.get $slot i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    i32.const " live-base " local.get $slot i32.add i32.const 0 i32.store8)\n"
+     "  (func (export \"" drop-export "_post\"))\n"
+     "  (func (export \"cm32p2_initialize\")\n"
+     "    i32.const " arena-base " global.set $next\n"
+     "    i32.const 1 global.set $next-handle)\n"
+     ")\n")))
+
 (defn- http-get-stream-provider-shape
   "True when get-stream request is http-stream url+headers record and the
   packaging result is intermediate `:i64` byte-count (ADR 0131; linear
