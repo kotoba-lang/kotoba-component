@@ -6206,6 +6206,77 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+(defn- object-store-put-get-provider-shape
+  "True when put-block (record → bool) and get-stream (record → i64) share
+  stream-object packaging shapes for a unified object-store dual-export
+  (ADR 0132 product vertical packaging)."
+  [put-req put-res get-req get-res schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))]
+    (boolean
+     (when-let [put (rec put-req)]
+       (when-let [get (rec get-req)]
+         (let [pf (field-map put)
+               gf (field-map get)]
+           (and (= :bool put-res)
+                (= :i64 get-res)
+                (= :record (first put) (first get))
+                (= (:binding pf) :keyword)
+                (= (:digest pf) :string)
+                (= (:bytes pf) :string)
+                (= (:binding gf) :keyword)
+                (= (:key gf) :string))))))))
+
+(defn object-store-put-get-provider-wat
+  "Synthetic dual-export provider for product vertical packaging (ADR 0132):
+  `:object/put-block` (always true) + `:object/get-stream` (always i64 body
+  length 2) on the shared object-store interface. No ambient store; no linear
+  task/stream resource table. Intermediate packaging only; :wasm-aot pending."
+  [put-entry get-entry put-req put-res get-req get-res schemas]
+  (when-not (object-store-put-get-provider-shape put-req put-res get-req get-res schemas)
+    (reject "object-store put+get provider requires put bool + get i64 packaging shapes"
+            {:put-req put-req :get-req get-req}))
+  (when-not (= (:interface put-entry) (:interface get-entry))
+    (reject "object put-block/get-stream must share one interface" {}))
+  (let [put-export (str "cm32p2|kotoba:application/" (:interface put-entry)
+                        "@1|" (:function put-entry))
+        get-export (str "cm32p2|kotoba:application/" (:interface get-entry)
+                        "@1|" (:function get-entry))
+        max-string value/string-value-byte-limit
+        max-keyword value/keyword-value-byte-limit
+        body-len 2
+        arena-base 8
+        pages 1
+        capacity-bytes (* pages 65536)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" put-export "\")"
+     " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32)"
+     " (param $p4 i32) (param $p5 i32) (result i32)\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-keyword " i32.gt_u if unreachable end\n"
+     "    local.get $p3 i32.eqz if unreachable end\n"
+     "    local.get $p3 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    local.get $p5 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    i32.const 1)\n"
+     "  (func (export \"" put-export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"" get-export "\")"
+     " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32) (result i64)\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-keyword " i32.gt_u if unreachable end\n"
+     "    local.get $p3 i32.eqz if unreachable end\n"
+     "    local.get $p3 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    i64.const " body-len ")\n"
+     "  (func (export \"" get-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 (defn- object-get-stream-provider-shape
   "True when get-stream request is stream-object binding+key record and the
   packaging result is intermediate `:i64` byte-count (ADR 0130; linear
