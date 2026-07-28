@@ -6206,6 +6206,61 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+(defn- object-get-stream-provider-shape
+  "True when get-stream request is stream-object binding+key record and the
+  packaging result is intermediate `:i64` byte-count (ADR 0130; linear
+  `[:task [:stream :bytes]]` remains dual-runtime / typed-v0.3 consumer path,
+  not this synthetic provider). Mirrors guest `bytes-task-byte-count` aggregate."
+  [request-descriptor result-descriptor schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))]
+    (boolean
+     (when-let [req (rec request-descriptor)]
+       (let [fields (field-map req)]
+         (and (= :record (first req))
+              (= :i64 result-descriptor)
+              (= (:binding fields) :keyword)
+              (= (:key fields) :string)))))))
+
+(defn object-get-stream-provider-wat
+  "Synthetic provider for `:object/get-stream` packaging (ADR 0130).
+  Bounds-checks non-empty binding keyword and key string; always returns
+  fixed body length 2 (i64) as poll/read aggregate stand-in for a ready
+  stream over \"ok\". No ambient object store and no linear task/stream
+  resource table — intermediate packaging evidence only.
+  Dual-runtime ready-task is ADR 0121+; guest poll/read is ADR 0127;
+  :wasm-aot stays pending."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (object-get-stream-provider-shape request-descriptor result-descriptor schemas)
+    (reject "object get-stream provider requires binding+key → i64 packaging shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry)
+                    "@1|" (:function entry))
+        max-string value/string-value-byte-limit
+        max-keyword value/keyword-value-byte-limit
+        body-len 2
+        arena-base 8
+        pages 1
+        capacity-bytes (* pages 65536)]
+    ;; flat request: p0/p1 binding (ptr,len), p2/p3 key (ptr,len)
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")"
+     " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32) (result i64)\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-keyword " i32.gt_u if unreachable end\n"
+     "    local.get $p3 i32.eqz if unreachable end\n"
+     "    local.get $p3 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    i64.const " body-len ")\n"
+     "  (func (export \"" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 (defn- http-ingress-provider-shape
   "True when accept/reply match http-ingress-v1 (slot i64 → option request;
   response record → bool)."
