@@ -7,4 +7,4 @@
   :tier :t2
   :role :backend
   :must-not [:parse-kotoba-source :execute-components :decide-grants]
-  :depends-on ["kotoba-lang/kotoba-kir" "kotoba-lang/kotoba-wasm"]}}
+  :depends-on ["kotoba-lang/kotoba-kir" "kotoba-lang/kotoba-wasm" "kotoba-lang/abi"]}}
