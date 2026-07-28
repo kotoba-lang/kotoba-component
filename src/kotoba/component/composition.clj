@@ -1423,6 +1423,81 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+(defn- object-store-put-get-wit
+  "WIT for product vertical object-store dual-export: put-block → bool and
+  get-stream → s64 (ADR 0132)."
+  [put-entry get-entry put-req get-req schemas]
+  (let [put-name (second put-req)
+        get-name (second get-req)
+        interface (:interface put-entry)
+        schemas-needed [put-name get-name]]
+    (when-not (= interface (:interface get-entry))
+      (reject "object put-block/get-stream must share one interface" {}))
+    (str "package kotoba:application@1.0.0;\n\n"
+         "interface types {\n"
+         (apply str
+                (map (fn [n]
+                       (let [schema (get schemas n)
+                             [_ id fields] schema]
+                         (str "  record " (wit-name id) " {\n"
+                              (apply str
+                                     (map (fn [[field ft]]
+                                            (str "    " (wit-name field) ": "
+                                                 (object-write-wit-type ft schemas)
+                                                 ",\n"))
+                                          fields))
+                              "  }\n")))
+                     schemas-needed))
+         "}\n\n"
+         "interface " interface " {\n"
+         "  use types.{" (str/join ", " (map wit-name [put-name get-name])) "};\n"
+         "  " (:function put-entry) ": func(request: " (wit-name put-name)
+         ") -> bool;\n"
+         "  " (:function get-entry) ": func(request: " (wit-name get-name)
+         ") -> s64;\n"
+         "}\n\n"
+         "world " interface "-put-get-provider {\n"
+         "  export " interface ";\n"
+         "}\n")))
+
+(defn package-object-store-put-get-provider
+  "Build a synthetic dual-export provider for product vertical packaging
+  (ADR 0132): put-block (always-true) + get-stream (always body-length 2)."
+  [put-req put-res get-req get-res schemas]
+  (let [put-entry (capability :object/put-block)
+        get-entry (capability :object/get-stream)
+        wit (object-store-put-get-wit put-entry get-entry put-req get-req schemas)
+        dir (Files/createTempDirectory "kotoba-object-store-put-get-provider-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/object-store-put-get-provider-wat
+                     put-entry get-entry put-req put-res get-req get-res schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :object/put-block
+       :capabilities [:object/put-block :object/get-stream]
+       :descriptor put-req
+       :result-descriptor put-res
+       :schemas schemas
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn- http-get-stream-wit
   "WIT for http-stream get packaging: url+headers → s64 byte-count
   (ADR 0131 intermediate; not linear bytes-task)."
