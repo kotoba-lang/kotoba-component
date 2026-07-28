@@ -1423,6 +1423,83 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+(defn- http-get-stream-wit
+  "WIT for http-stream get packaging: url+headers → s64 byte-count
+  (ADR 0131 intermediate; not linear bytes-task)."
+  [entry request-descriptor schemas]
+  (let [req-name (second request-descriptor)
+        header-name :kotoba.http/header
+        interface (:interface entry)
+        req-schema (get schemas req-name)
+        header-schema (get schemas header-name)
+        [_ req-id req-fields] req-schema
+        [_ header-id header-fields] header-schema]
+    (str "package kotoba:application@1.0.0;\n\n"
+         "interface types {\n"
+         "  record " (wit-name header-id) " {\n"
+         (apply str
+                (map (fn [[field ft]]
+                       (str "    " (wit-name field) ": "
+                            (object-write-wit-type ft schemas) ",\n"))
+                     header-fields))
+         "  }\n"
+         "  record " (wit-name req-id) " {\n"
+         (apply str
+                (map (fn [[field ft]]
+                       (str "    " (wit-name field) ": "
+                            (cond
+                              (and (vector? ft) (= :set (first ft)))
+                              (str "list<" (wit-name (second (second ft))) ">")
+                              :else (object-write-wit-type ft schemas))
+                            ",\n"))
+                     req-fields))
+         "  }\n"
+         "}\n\n"
+         "interface " interface " {\n"
+         "  use types.{" (wit-name header-id) ", " (wit-name req-id) "};\n"
+         "  " (:function entry) ": func(request: " (wit-name req-id) ") -> s64;\n"
+         "}\n\n"
+         "world " interface "-get-stream-provider {\n"
+         "  export " interface ";\n"
+         "}\n")))
+
+(defn package-http-get-stream-provider
+  "Build a synthetic provider for `:http/get-stream` packaging (ADR 0131).
+  Always returns i64 body length 2; no ambient network; no linear task table."
+  [request-descriptor result-descriptor schemas]
+  (let [entry (capability :http/get-stream)
+        wit (http-get-stream-wit entry request-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-http-get-stream-provider-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/http-get-stream-provider-wat
+                     entry request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :http/get-stream
+       :capabilities [:http/get-stream]
+       :descriptor request-descriptor
+       :result-descriptor result-descriptor
+       :schemas schemas
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 
 (defn- http-ingress-wit-type
   [ft schemas]
