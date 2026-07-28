@@ -1645,6 +1645,77 @@
         (Files/deleteIfExists dir)))))
 
 
+
+(defn- object-get-stream-cm-resource-wit
+  "WIT for full Component Model `resource bytes-task` packaging (ADR 0135)."
+  [entry request-descriptor schemas]
+  (let [req-name (second request-descriptor)
+        interface (:interface entry)
+        schema (get schemas req-name)
+        [_ id fields] schema]
+    (str "package kotoba:application@1.0.0;\n\n"
+         "interface types {\n"
+         "  record " (wit-name id) " {\n"
+         (apply str
+                (map (fn [[field ft]]
+                       (str "    " (wit-name field) ": "
+                            (object-write-wit-type ft schemas) ",\n"))
+                     fields))
+         "  }\n"
+         "}\n\n"
+         "interface " interface " {\n"
+         "  use types.{" (wit-name id) "};\n"
+         "\n"
+         "  resource bytes-task {\n"
+         "    poll-ready: func() -> bool;\n"
+         "    body-len: func() -> s64;\n"
+         "  }\n"
+         "\n"
+         "  get-stream: func(request: " (wit-name id) ") -> own<bytes-task>;\n"
+         "}\n\n"
+         "world " interface "-cm-resource-provider {\n"
+         "  export " interface ";\n"
+         "}\n")))
+
+(defn package-object-get-stream-cm-resource-provider
+  "Build a synthetic object-store provider with full CM `resource bytes-task`
+  packaging (ADR 0135). Validates via wasm-tools embed/new/validate. Multi-step
+  Wasmtime of CM resources is not claimed (see ADR)."
+  [request-descriptor schemas]
+  (let [entry (capability :object/get-stream)
+        wit (object-get-stream-cm-resource-wit entry request-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-object-get-stream-cm-resource-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/object-get-stream-cm-resource-provider-wat
+                     entry request-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :object/get-stream
+       :capabilities [:object/get-stream]
+       :descriptor request-descriptor
+       :result-descriptor :own-bytes-task
+       :schemas schemas
+       :cm-resource-abi true
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 (defn- http-ingress-wit-type
   [ft schemas]
   (cond
