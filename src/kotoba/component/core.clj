@@ -6261,6 +6261,86 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+(defn- http-get-stream-provider-shape
+  "True when get-stream request is http-stream url+headers record and the
+  packaging result is intermediate `:i64` byte-count (ADR 0131; linear
+  `[:task [:stream :bytes]]` remains dual-runtime / typed-v0.3 consumer path)."
+  [request-descriptor result-descriptor schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))
+          (set-of-header? [t]
+            (and (vector? t) (= :set (first t))
+                 (vector? (second t)) (= :ref (first (second t)))
+                 (when-let [h (rec (second t))]
+                   (let [hf (field-map h)]
+                     (and (= :record (first h))
+                          (= (:name hf) :keyword)
+                          (= (:value hf) :string))))))]
+    (boolean
+     (when-let [req (rec request-descriptor)]
+       (let [fields (field-map req)]
+         (and (= :record (first req))
+              (= :i64 result-descriptor)
+              (= (:url fields) :string)
+              (set-of-header? (:headers fields))))))))
+
+(defn http-get-stream-provider-wat
+  "Synthetic provider for `:http/get-stream` packaging (ADR 0131).
+  Bounds-checks non-empty URL (https:// prefix, no fragment), header count
+  ≤ 32; always returns fixed body length 2 (i64) as poll/read aggregate
+  stand-in. No ambient network and no linear task/stream resource table —
+  intermediate packaging evidence only. Dual-runtime ready-task is ADR 0122+;
+  production GET transport is ADR 0128; :wasm-aot stays pending."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (http-get-stream-provider-shape request-descriptor result-descriptor schemas)
+    (reject "http get-stream provider requires url+headers → i64 packaging shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry)
+                    "@1|" (:function entry))
+        max-string value/string-value-byte-limit
+        max-url 4096
+        max-headers 32
+        body-len 2
+        https-bytes (vec (.getBytes "https://" "UTF-8"))
+        arena-base 8
+        pages 1
+        capacity-bytes (* pages 65536)]
+    ;; flat: p0/p1 url (ptr,len), p2/p3 headers list (ptr,len)
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")"
+     " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32) (result i64)\n"
+     "    (local $i i32) (local $b i32)\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-url " i32.gt_u if unreachable end\n"
+     "    local.get $p1 i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $p3 i32.const " max-headers " i32.gt_u if unreachable end\n"
+     (apply str
+            (map-indexed
+             (fn [i byte]
+               (str "    local.get $p0 i32.load8_u offset=" i "\n"
+                    "    i32.const " byte " i32.ne if unreachable end\n"))
+             https-bytes))
+     "    i32.const 0 local.set $i\n"
+     "    block $url-done\n"
+     "      loop $url-scan\n"
+     "        local.get $i local.get $p1 i32.ge_u br_if $url-done\n"
+     "        local.get $p0 local.get $i i32.add i32.load8_u local.set $b\n"
+     "        local.get $b i32.const 35 i32.eq if unreachable end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $url-scan\n"
+     "      end\n"
+     "    end\n"
+     "    i64.const " body-len ")\n"
+     "  (func (export \"" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 (defn- http-ingress-provider-shape
   "True when accept/reply match http-ingress-v1 (slot i64 → option request;
   response record → bool)."
