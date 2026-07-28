@@ -1,6 +1,6 @@
 (ns kotoba.object-get-stream-cm-resource-provider-component-test
-  "W5 deepen ADR 0135: full Component Model `resource bytes-task` packaging
-  for object get-stream (embed + component new + validate)."
+  "W5 deepen ADR 0135/0136: full Component Model `resource bytes-task` packaging
+  + multi-step Wasmtime get→poll-ready→body-len→drop."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
@@ -10,6 +10,14 @@
             [kotoba.wasm.tools :as wasm-tools])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
+
+(def ^:private wasmtime-binary
+  (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
+    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+
+(defn- wat-data
+  [bytes]
+  (apply str (map #(format "\\%02x" (bit-and (int %) 0xff)) bytes)))
 
 (defn- descriptors
   []
@@ -50,6 +58,9 @@
         (is (str/includes? wit "poll-ready"))
         (is (str/includes? wit "body-len"))
         (is (str/includes? wit "get-stream")))
+      (let [dump (wasm-tools/run-command! ["wasm-tools" "print" (str path)])]
+        (is (str/includes? dump "canon resource.new"))
+        (is (str/includes? dump "bytes-task_dtor")))
       (finally
         (Files/deleteIfExists path)))))
 
@@ -58,9 +69,120 @@
         entry {:name :object/get-stream :interface "object-store" :function "get-stream"}
         wat (component-core/object-get-stream-cm-resource-provider-wat
              entry (:req d) (:schemas d))]
-    (is (str/includes? wat "[resource-new]bytes-task"))
-    (is (str/includes? wat "[resource-rep]bytes-task"))
-    (is (str/includes? wat "[resource-drop]bytes-task"))
+    (is (str/includes? wat "bytes-task_new"))
+    (is (str/includes? wat "bytes-task_dtor"))
+    (is (str/includes? wat "cm32p2|_ex_kotoba:application/object-store@1"))
     (is (str/includes? wat "[method]bytes-task.poll-ready"))
     (is (str/includes? wat "[method]bytes-task.body-len"))
+    (is (str/includes? wat "call $rnew"))
     (is (str/includes? wat "get-stream"))))
+
+(defn- cm-resource-sequence-driver-wit
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-object-get-stream-request {\n"
+   "    binding: string,\n"
+   "    key: string,\n"
+   "  }\n"
+   "}\n\n"
+   "interface object-store {\n"
+   "  use types.{kotoba-object-get-stream-request};\n"
+   "  resource bytes-task {\n"
+   "    poll-ready: func() -> bool;\n"
+   "    body-len: func() -> s64;\n"
+   "  }\n"
+   "  get-stream: func(request: kotoba-object-get-stream-request) -> own<bytes-task>;\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import object-store;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- cm-resource-sequence-driver-wat
+  "get-stream → poll-ready → body-len → drop; return length 2."
+  []
+  (let [binding (.getBytes "example/blocks" "UTF-8")
+        key (.getBytes "k1" "UTF-8")
+        b-ptr 256
+        k-ptr 320]
+    (str
+     "(module\n"
+     "  (import \"cm32p2|kotoba:application/object-store@1\" \"get-stream\"\n"
+     "    (func $get (param i32 i32 i32 i32) (result i32)))\n"
+     "  (import \"cm32p2|kotoba:application/object-store@1\" \"[method]bytes-task.poll-ready\"\n"
+     "    (func $poll (param i32) (result i32)))\n"
+     "  (import \"cm32p2|kotoba:application/object-store@1\" \"[method]bytes-task.body-len\"\n"
+     "    (func $blen (param i32) (result i64)))\n"
+     "  (import \"cm32p2|kotoba:application/object-store@1\" \"bytes-task_drop\"\n"
+     "    (func $rdrop (param i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz\n"
+     "    if (result i32) i32.const 512 else local.get $old end)\n"
+     "  (func (export \"cm32p2||run\") (result i64)\n"
+     "    (local $task i32) (local $ready i32) (local $n i64)\n"
+     "    i32.const " b-ptr " i32.const " (alength binding)
+     " i32.const " k-ptr " i32.const " (alength key)
+     " call $get local.set $task\n"
+     "    local.get $task call $poll local.set $ready\n"
+     "    local.get $ready i32.eqz if unreachable end\n"
+     "    local.get $task call $blen local.set $n\n"
+     "    local.get $task call $rdrop\n"
+     "    local.get $n)\n"
+     "  (func (export \"cm32p2||run_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " b-ptr ") \"" (wat-data binding) "\")\n"
+     "  (data (i32.const " k-ptr ") \"" (wat-data key) "\")\n"
+     ")\n")))
+
+(defn- package-cm-resource-sequence-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-cm-resource-seq-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (cm-resource-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (cm-resource-sequence-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:object/get-stream]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest cm-resource-get-poll-body-drop-wasmtime-returns-two
+  "Multi-step CM resource walk (ADR 0136): get→poll-ready→body-len→drop; length 2."
+  (let [d (descriptors)
+        provider (composition/package-object-get-stream-cm-resource-provider
+                  (:req d) (:schemas d))
+        driver (package-cm-resource-sequence-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-cm-resource-seq-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (is (= [:object/get-stream] (:application-imports closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))

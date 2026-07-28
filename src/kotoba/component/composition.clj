@@ -1679,8 +1679,8 @@
 
 (defn package-object-get-stream-cm-resource-provider
   "Build a synthetic object-store provider with full CM `resource bytes-task`
-  packaging (ADR 0135). Validates via wasm-tools embed/new/validate. Multi-step
-  Wasmtime of CM resources is not claimed (see ADR)."
+  packaging (ADR 0135). Uses correct cm32p2 export-resource ABI (import
+  bytes-task_new; export dtor + methods). Multi-step Wasmtime walk is ADR 0136."
   [request-descriptor schemas]
   (let [entry (capability :object/get-stream)
         wit (object-get-stream-cm-resource-wit entry request-descriptor schemas)
