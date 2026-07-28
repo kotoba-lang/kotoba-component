@@ -1575,6 +1575,75 @@
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+(defn- object-get-stream-linear-table-wit
+  "WIT for intermediate linear resource-table packaging on object-store
+  (ADR 0134): free-function get/poll/read/drop stand-ins (not CM `resource`)."
+  [entry request-descriptor schemas]
+  (let [req-name (second request-descriptor)
+        interface (:interface entry)
+        schema (get schemas req-name)
+        [_ id fields] schema]
+    (str "package kotoba:application@1.0.0;\n\n"
+         "interface types {\n"
+         "  record " (wit-name id) " {\n"
+         (apply str
+                (map (fn [[field ft]]
+                       (str "    " (wit-name field) ": "
+                            (object-write-wit-type ft schemas) ",\n"))
+                     fields))
+         "  }\n"
+         "}\n\n"
+         "interface " interface " {\n"
+         "  use types.{" (wit-name id) "};\n"
+         "  get-stream: func(request: " (wit-name id) ") -> s32;\n"
+         "  task-poll: func(task-h: s32) -> s32;\n"
+         "  stream-read-len: func(stream-h: s32, max: s64) -> s64;\n"
+         "  task-drop: func(task-h: s32);\n"
+         "  stream-drop: func(stream-h: s32);\n"
+         "}\n\n"
+         "world " interface "-linear-table-provider {\n"
+         "  export " interface ";\n"
+         "}\n")))
+
+(defn package-object-get-stream-linear-table-provider
+  "Build a synthetic object-store provider with an in-module linear resource
+  table (ADR 0134). Exports get-stream/task-poll/stream-read-len/task-drop/
+  stream-drop free functions. Not full Component Model resource types."
+  [request-descriptor schemas]
+  (let [entry (capability :object/get-stream)
+        wit (object-get-stream-linear-table-wit entry request-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-object-get-stream-linear-table-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core
+                   (wasm-tools/parse-wat
+                    (component-core/object-get-stream-linear-table-provider-wat
+                     entry request-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1
+       :capability :object/get-stream
+       :capabilities [:object/get-stream]
+       :descriptor request-descriptor
+       :result-descriptor :i32
+       :schemas schemas
+       :linear-resource-table true
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
 
 (defn- http-ingress-wit-type
   [ft schemas]

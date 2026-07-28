@@ -6332,6 +6332,127 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+(defn- object-get-stream-linear-table-shape
+  "True when get-stream request matches stream-object binding+key packaging
+  shape used by the intermediate linear resource-table provider (ADR 0134)."
+  [request-descriptor schemas]
+  (letfn [(rec [d] (when (and (vector? d) (= :ref (first d)))
+                     (get schemas (second d))))
+          (field-map [schema] (into {} (nth schema 2)))]
+    (boolean
+     (when-let [req (rec request-descriptor)]
+       (let [fields (field-map req)]
+         (and (= :record (first req))
+              (= (:binding fields) :keyword)
+              (= (:key fields) :string)))))))
+
+(defn object-get-stream-linear-table-provider-wat
+  "Synthetic provider with an in-module linear resource table (ADR 0134).
+
+  Exports free-function stand-ins for task/stream ownership on the
+  object-store interface (not full Component Model `resource` types yet):
+
+  | export | meaning |
+  |---|---|
+  | get-stream | alloc live task+stream over fixed payload \"ok\"; return task handle |
+  | task-poll | live task → stream handle (ready); dead → trap |
+  | stream-read-len | live stream → body length (2); dead → trap |
+  | task-drop / stream-drop | clear alive; double-drop traps |
+
+  Multi-step Wasmtime can walk get→poll→read→drop without host CM resource
+  methods. Dual-runtime table remains ADR 0133; full CM resource ABI is
+  still pending. :wasm-aot stays pending."
+  [entry request-descriptor schemas]
+  (when-not (object-get-stream-linear-table-shape request-descriptor schemas)
+    (reject "linear-table get-stream requires binding+key packaging shape"
+            {:request request-descriptor}))
+  (when-not (= "object-store" (str (:interface entry)))
+    (reject "linear-table get-stream requires object-store interface"
+            {:interface (:interface entry)}))
+  (let [iface (str (:interface entry))
+        prefix (str "cm32p2|kotoba:application/" iface "@1|")
+        get-ex (str prefix "get-stream")
+        poll-ex (str prefix "task-poll")
+        read-ex (str prefix "stream-read-len")
+        tdrop-ex (str prefix "task-drop")
+        sdrop-ex (str prefix "stream-drop")
+        max-string value/string-value-byte-limit
+        max-keyword value/keyword-value-byte-limit
+        body-bytes (vec (.getBytes "ok" "UTF-8"))
+        body-len (count body-bytes)
+        body-ptr 64
+        ;; table: task-alive[1..N], stream-alive[1..N], next-id
+        ;; fixed capacity 8 handles each
+        max-handles 8
+        arena-base 128
+        pages 1
+        capacity-bytes (* pages 65536)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (global $next-id (mut i32) (i32.const 1))\n"
+     ;; slots at fixed offsets: task-alive base 1024, stream-alive base 1088
+     "  (global $task-base i32 (i32.const 1024))\n"
+     "  (global $stream-base i32 (i32.const 1088))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     ;; get-stream(binding-ptr, binding-len, key-ptr, key-len) -> task-handle
+     "  (func (export \"" get-ex "\")"
+     " (param $p0 i32) (param $p1 i32) (param $p2 i32) (param $p3 i32) (result i32)\n"
+     "    (local $id i32)\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-keyword " i32.gt_u if unreachable end\n"
+     "    local.get $p3 i32.eqz if unreachable end\n"
+     "    local.get $p3 i32.const " max-string " i32.gt_u if unreachable end\n"
+     "    global.get $next-id local.set $id\n"
+     "    local.get $id i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    global.get $next-id i32.const 1 i32.add global.set $next-id\n"
+     "    global.get $task-base local.get $id i32.add i32.const 1 i32.store8\n"
+     "    global.get $stream-base local.get $id i32.add i32.const 1 i32.store8\n"
+     "    local.get $id)\n"
+     "  (func (export \"" get-ex "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     ;; task-poll(task) -> stream handle (same id while ready)
+     "  (func (export \"" poll-ex "\") (param $task i32) (result i32)\n"
+     "    local.get $task i32.eqz if unreachable end\n"
+     "    local.get $task i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    global.get $task-base local.get $task i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    global.get $stream-base local.get $task i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    local.get $task)\n"
+     "  (func (export \"" poll-ex "_post\") (param i32))\n"
+     ;; stream-read-len(stream, max) -> i64 length
+     "  (func (export \"" read-ex "\") (param $stream i32) (param $max i64) (result i64)\n"
+     "    local.get $stream i32.eqz if unreachable end\n"
+     "    local.get $stream i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    global.get $stream-base local.get $stream i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    local.get $max i64.const 1 i64.lt_s if unreachable end\n"
+     "    local.get $max i64.const " body-len " i64.lt_s if unreachable end\n"
+     "    i64.const " body-len ")\n"
+     "  (func (export \"" read-ex "_post\") (param i64))\n"
+     ;; drops
+     "  (func (export \"" tdrop-ex "\") (param $task i32)\n"
+     "    local.get $task i32.eqz if unreachable end\n"
+     "    local.get $task i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    global.get $task-base local.get $task i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    global.get $task-base local.get $task i32.add i32.const 0 i32.store8\n"
+     "    global.get $stream-base local.get $task i32.add i32.load8_u\n"
+     "    if global.get $stream-base local.get $task i32.add i32.const 0 i32.store8 end)\n"
+     ;; void returns: post-return is [] -> [] (not param of dropped handle)
+     "  (func (export \"" tdrop-ex "_post\"))\n"
+     "  (func (export \"" sdrop-ex "\") (param $stream i32)\n"
+     "    local.get $stream i32.eqz if unreachable end\n"
+     "    local.get $stream i32.const " max-handles " i32.gt_u if unreachable end\n"
+     "    global.get $stream-base local.get $stream i32.add i32.load8_u i32.eqz if unreachable end\n"
+     "    global.get $stream-base local.get $stream i32.add i32.const 0 i32.store8)\n"
+     "  (func (export \"" sdrop-ex "_post\"))\n"
+     "  (func (export \"cm32p2_initialize\")\n"
+     "    i32.const " arena-base " global.set $next\n"
+     "    i32.const 1 global.set $next-id)\n"
+     "  (data (i32.const " body-ptr ") \""
+     (apply str (map #(format "\\%02x" %) body-bytes))
+     "\")\n"
+     ")\n")))
+
 (defn- http-get-stream-provider-shape
   "True when get-stream request is http-stream url+headers record and the
   packaging result is intermediate `:i64` byte-count (ADR 0131; linear
