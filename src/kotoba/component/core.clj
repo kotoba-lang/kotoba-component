@@ -556,8 +556,8 @@
   Codes: -1 empty code, -2 code>128, -3 bad char (WAT), -4 msg>65536,
   -5 retryable∉{0,1}, 0 ok.
 
-  Recognizes nested-if length/retryable skeleton; WAT always applies code
-  charset scan [A-Za-z0-9/_:.-]."
+  Recognizes nested-if length/retryable skeleton and frontend let+or forms;
+  WAT always applies code charset scan [A-Za-z0-9/_:.-]."
   [{:keys [params param-types result body]}]
   (and (= 3 (count params))
        (= 3 (count param-types))
@@ -572,56 +572,95 @@
                        (and (seq? form)
                             (contains? #{'string-length 'string-byte-length} (first form))
                             (= 2 (count form))
-                            (= sym (second form))))]
-         (and (if4? body)
-              ;; (if (<= (string-length code) 0) -1 ...)
-              (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
-                (and (= -1 t1)
-                     (seq? c1) (contains? #{'<= '<} (first c1)) (len-of? (nth c1 1) code)
-                     (if4? e1)
-                     (let [c2 (nth e1 1) t2 (nth e1 2) e2 (nth e1 3)]
-                       (and (= -2 t2)
-                            (seq? c2) (contains? #{'> '>=} (first c2)) (len-of? (nth c2 1) code)
-                            (#{128 129} (nth c2 2))
-                            (if4? e2)
-                            (let [c3 (nth e2 1) t3 (nth e2 2) e3 (nth e2 3)]
-                              (and (= -4 t3)
-                                   (seq? c3) (contains? #{'> '>=} (first c3)) (len-of? (nth c3 1) msg)
-                                   (#{65536 65537} (nth c3 2))
-                                   (if4? e3)
-                                   (let [c4 (nth e3 1) t4 (nth e3 2) e4 (nth e3 3)]
-                                     (and (= -5 t4)
-                                          (seq? c4) (contains? #{'< '<=} (first c4))
-                                          (= retry (nth c4 1))
-                                          (if4? e4)
-                                          (let [c5 (nth e4 1) t5 (nth e4 2) e5 (nth e4 3)]
-                                            (and (= -5 t5)
-                                                 (seq? c5) (contains? #{'> '>=} (first c5))
-                                                 (= retry (nth c5 1))
-                                                 (#{1 2} (nth c5 2))
-                                                 (number? e5)
-                                                 (zero? e5)))))))))))))))
+                            (= sym (second form))))
+             pure-if-skeleton?
+             (fn []
+               (and (if4? body)
+                    (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
+                      (and (= -1 t1)
+                           (seq? c1) (contains? #{'<= '<} (first c1)) (len-of? (nth c1 1) code)
+                           (if4? e1)
+                           (let [c2 (nth e1 1) t2 (nth e1 2) e2 (nth e1 3)]
+                             (and (= -2 t2)
+                                  (seq? c2) (contains? #{'> '>=} (first c2)) (len-of? (nth c2 1) code)
+                                  (#{128 129} (nth c2 2))
+                                  (if4? e2)
+                                  (let [c3 (nth e2 1) t3 (nth e2 2) e3 (nth e2 3)]
+                                    (and (= -4 t3)
+                                         (seq? c3) (contains? #{'> '>=} (first c3)) (len-of? (nth c3 1) msg)
+                                         (#{65536 65537} (nth c3 2))
+                                         (if4? e3)
+                                         (let [c4 (nth e3 1) t4 (nth e3 2) e4 (nth e3 3)]
+                                           (and (= -5 t4)
+                                                (seq? c4) (contains? #{'< '<=} (first c4))
+                                                (= retry (nth c4 1))
+                                                (if4? e4)
+                                                (let [c5 (nth e4 1) t5 (nth e4 2) e5 (nth e4 3)]
+                                                  (and (= -5 t5)
+                                                       (seq? c5) (contains? #{'> '>=} (first c5))
+                                                       (= retry (nth c5 1))
+                                                       (#{1 2} (nth c5 2))
+                                                       (number? e5)
+                                                       (zero? e5)))))))))))))
+             frontend-ish?
+             (fn []
+               ;; Frontend may let-bind lengths / helper results; WAT owns charset.
+               (and (form-tree-walk body #(len-of? % code))
+                    (form-tree-walk body #(len-of? % msg))
+                    (form-tree-walk body #(= % -1))
+                    (form-tree-walk body #(= % -2))
+                    (form-tree-walk body #(= % -4))
+                    (form-tree-walk body #(= % -5))
+                    (form-tree-walk body #(and (number? %) (zero? %)))
+                    (form-tree-walk body #(and (seq? %) (#{'< '<=} (first %))
+                                               (= retry (nth % 1))))
+                    (form-tree-walk body #(and (seq? %) (#{'> '>=} (first %))
+                                               (= retry (nth % 1))))))]
+         (boolean (or (pure-if-skeleton?) (frontend-ish?))))))
+
 
 (defn- http-result-arm-ok-function?
-  "Composition for http_result_arm_ok (ADR 0191): arm ∈ {0,1} → 0 else -1."
+  "Composition for http_result_arm_ok (ADR 0191): arm ∈ {0,1} → 0 else -1.
+
+  Admits pure nested-if and frontend or/let-or desugar."
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
        (= [:i64] param-types)
        (= :i64 result)
        (seq? body)
        (let [arm (first params)
-             if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))]
-         (and (if4? body)
-              (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
-                (and (= -1 t1)
-                     (seq? c1) (contains? #{'< '<=} (first c1)) (= arm (nth c1 1))
-                     (if4? e1)
-                     (let [c2 (nth e1 1) t2 (nth e1 2) e2 (nth e1 3)]
-                       (and (= -1 t2)
-                            (seq? c2) (contains? #{'> '>=} (first c2)) (= arm (nth c2 1))
-                            (#{1 2} (nth c2 2))
-                            (number? e2)
-                            (zero? e2)))))))))
+             if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))
+             lo? (fn [form]
+                   (and (seq? form) (contains? #{'< '<=} (first form))
+                        (= arm (nth form 1))))
+             hi? (fn [form]
+                   (and (seq? form) (contains? #{'> '>=} (first form))
+                        (= arm (nth form 1)) (#{1 2} (nth form 2))))]
+         (or
+          (and (if4? body)
+               (= -1 (nth body 2))
+               (lo? (nth body 1))
+               (let [e1 (nth body 3)]
+                 (and (if4? e1)
+                      (= -1 (nth e1 2))
+                      (hi? (nth e1 1))
+                      (number? (nth e1 3))
+                      (zero? (nth e1 3)))))
+          (and (form-tree-walk body lo?)
+               (form-tree-walk body hi?)
+               (form-tree-walk body #(= % -1))
+               (form-tree-walk body #(and (number? %) (zero? %))))))))
+
+(defn- http-error-package-with-main?
+  "Three-export: error_ok + result_arm_ok + live main (provider shape → -13501)."
+  [exports]
+  (let [err (first (filter http-error-ok-function? exports))
+        arm (first (filter http-result-arm-ok-function? exports))
+        main (first (filter #(= 'main (:name %)) exports))]
+    (and err arm main
+         (= 3 (count exports))
+         (live-main-named-policies?
+          main {(:name err) 3 (:name arm) 1}))))
 
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
@@ -3005,6 +3044,9 @@
            (= 1 (count exports))
            (http-response-ok-function? (first exports))
            (empty? (:effects kir))) :http-response-ok
+      (and (= 3 (count exports))
+           (http-error-package-with-main? exports)
+           (empty? (:effects kir))) :http-error-package-with-main
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (http-error-ok-function? (first exports))
@@ -3965,6 +4007,168 @@
      "    local.get $retryable i64.const 1 i64.gt_s if i64.const -5 return end\n"
      "    i64.const 0)\n"
      "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- http-error-package-wat
+  "Three-export provider package: error_ok + arm_ok + live main → -13501."
+  [error-fn arm-fn main-fn]
+  (let [error-export (wit-name (:name error-fn))
+        arm-export (wit-name (:name arm-fn))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        main-string-lits
+        (let [vals (mapv second (partition 2 (nth (:body main-fn) 1)))
+              strs (mapcat (fn [call] (filter string? (rest call))) vals)]
+          (vec (distinct strs)))
+        prepared-strs
+        (loop [remaining main-string-lits
+               offset 8
+               acc []]
+          (if-let [s (first remaining)]
+            (let [b (.getBytes ^String s StandardCharsets/UTF_8)
+                  len (alength b)]
+              (if (zero? len)
+                (recur (next remaining) offset
+                       (conj acc {:value s :bytes [] :length 0 :pointer 0}))
+                (recur (next remaining)
+                       (+ offset len)
+                       (conj acc {:value s :bytes (vec b) :length len :pointer offset}))))
+            acc))
+        non-empty (filterv #(pos? (:length %)) prepared-strs)
+        arena-base (align-up (if (seq non-empty)
+                               (+ (:pointer (last non-empty))
+                                  (:length (last non-empty)))
+                               8)
+                             8)
+        str-ptr (into {} (map (juxt :value :pointer) prepared-strs))
+        str-len (into {} (map (juxt :value :length) prepared-strs))
+        main-data
+        (apply str
+               (map (fn [leaf]
+                      (str "  (data (i32.const " (:pointer leaf) ") \""
+                           (wat-data (:bytes leaf)) "\")\n"))
+                    non-empty))
+        main-locals
+        (let [names (mapv first (partition 2 (nth (:body main-fn) 1)))]
+          (apply str (map #(str " (local $" (name %) " i64)") names)))
+        error-name (:name error-fn)
+        arm-name (:name arm-fn)
+        push-arg
+        (fn [arg]
+          (cond
+            (string? arg)
+            (str "    i32.const " (get str-ptr arg)
+                 " i32.const " (get str-len arg) "\n")
+            (integer? arg)
+            (str "    i64.const " arg "\n")
+            :else (reject "unsupported live-main arg" {:arg arg})))
+        main-calls
+        (let [pairs (partition 2 (nth (:body main-fn) 1))]
+          (apply str
+                 (map (fn [[sym call]]
+                        (let [pname (first call)
+                              internal (cond
+                                         (= pname error-name) "$error"
+                                         (= pname arm-name) "$arm"
+                                         :else (reject "unknown policy in main"
+                                                       {:name pname}))]
+                          (str (apply str (map push-arg (rest call)))
+                               "    call " internal
+                               " local.set $" (name sym) "\n")))
+                      pairs)))
+        main-expr (nth (:body main-fn) 2)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     main-data
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $code-char-ok (param $c i32) (result i32)\n"
+     "    local.get $c i32.const 48 i32.ge_u\n"
+     "    local.get $c i32.const 57 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 65 i32.ge_u\n"
+     "    local.get $c i32.const 90 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 97 i32.ge_u\n"
+     "    local.get $c i32.const 122 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 47 i32.eq\n"
+     "    local.get $c i32.const 58 i32.eq i32.or\n"
+     "    local.get $c i32.const 46 i32.eq i32.or\n"
+     "    local.get $c i32.const 45 i32.eq i32.or\n"
+     "    local.get $c i32.const 95 i32.eq i32.or)\n"
+     "  (func $error"
+     " (param $code-ptr i32) (param $code-len i32)"
+     " (param $msg-ptr i32) (param $msg-len i32)"
+     " (param $retryable i64) (result i64)\n"
+     "    (local $end i32) (local $i i32) (local $c i32)\n"
+     "    local.get $code-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $code-len i32.eqz if i64.const -1 return end\n"
+     "    local.get $code-len i32.const 128 i32.gt_u if i64.const -2 return end\n"
+     "    local.get $code-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $code-ptr local.get $code-len i32.add local.tee $end\n"
+     "    local.get $code-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $code-ok\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $code-len i32.ge_u br_if $code-ok\n"
+     "        local.get $code-ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c call $code-char-ok i32.eqz if i64.const -3 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    local.get $msg-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $msg-len i32.eqz if else\n"
+     "      local.get $msg-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $msg-ptr local.get $msg-len i32.add local.tee $end\n"
+     "    local.get $msg-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $msg-len i32.const 65536 i32.gt_u if i64.const -4 return end\n"
+     "    local.get $retryable i64.const 0 i64.lt_s if i64.const -5 return end\n"
+     "    local.get $retryable i64.const 1 i64.gt_s if i64.const -5 return end\n"
+     "    i64.const 0)\n"
+     "  (func $arm (param $arm i64) (result i64)\n"
+     "    local.get $arm i64.const 0 i64.lt_s if i64.const -1 return end\n"
+     "    local.get $arm i64.const 1 i64.gt_s if i64.const -1 return end\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" error-export "\")"
+     " (param $code-ptr i32) (param $code-len i32)"
+     " (param $msg-ptr i32) (param $msg-len i32)"
+     " (param $retryable i64) (result i64)\n"
+     "    local.get $code-ptr local.get $code-len\n"
+     "    local.get $msg-ptr local.get $msg-len local.get $retryable call $error)\n"
+     "  (func (export \"cm32p2||" error-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" arm-export "\") (param $arm i64) (result i64)\n"
+     "    local.get $arm call $arm)\n"
+     "  (func (export \"cm32p2||" arm-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||main\") (result i64)\n"
+     "    " main-locals "\n"
+     main-calls
+     "    " (emit-i64-arith-wat main-expr) ")\n"
+     "  (func (export \"cm32p2||main_post\") (param i64)\n"
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
@@ -8663,6 +8867,12 @@
     :http-error-ok
     (wasm-tools/parse-wat
      (http-error-ok-wat (first (exported-functions kir))))
+    :http-error-package-with-main
+    (let [exports (exported-functions kir)
+          err (first (filter http-error-ok-function? exports))
+          arm (first (filter http-result-arm-ok-function? exports))
+          main (first (filter #(= 'main (:name %)) exports))]
+      (wasm-tools/parse-wat (http-error-package-wat err arm main)))
     :http-result-arm-ok
     (wasm-tools/parse-wat
      (http-result-arm-ok-wat (first (exported-functions kir))))
