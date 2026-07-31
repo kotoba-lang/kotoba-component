@@ -1936,3 +1936,126 @@
         (is (zero? (:exit arm0)) (:err arm0))
         (is (= "0" (str/trim (:out arm0)))))
       (finally (Files/deleteIfExists path)))))
+
+
+(def http-header-name-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['http-header-name-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http-header-name-ok
+     :params ['name]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body '(if (<= (string-length name) 0)
+              -1
+              (if (> (string-length name) 128)
+                -2
+                0))}]})
+
+(def http-header-name-ok-frontend-kir
+  "Provider-shaped body: let + loop/tchar skeleton (charset owned by WAT)."
+  {:format :kotoba.kir/v4
+   :exports ['http_header_name_ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_header_name_ok
+     :params ['name]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body
+     '(let [n (string-byte-length name)]
+        (if (<= n 0)
+          -1
+          (if (> n 128)
+            -2
+            (loop [i 0]
+              (if (>= i n)
+                0
+                (let [c (string-code-point-at name i)]
+                  (if (= c 32)
+                    -3
+                    (recur (+ i 1)))))))))}]})
+
+(def http-header-name-ok-with-main-kir
+  (assoc http-header-name-ok-frontend-kir
+         :exports ['http_header_name_ok 'main]
+         :functions
+         (conj (:functions http-header-name-ok-frontend-kir)
+               {:name 'main
+                :params []
+                :param-types []
+                :result :i64
+                :effects #{}
+                :body
+                '(let [a (http_header_name_ok "Content-Type")
+                      b (http_header_name_ok "")
+                      c (http_header_name_ok "Bad Name")
+                      d (http_header_name_ok "X-Ok")]
+                   (+ (* a 1000) (* b 100) (* c 10) d))})))
+
+(deftest http-header-name-ok-canonical-lowering
+  "T8.3 typed Component: header_name_ok tchar policy without kotoba:typed."
+  (is (= :http-header-name-ok (core/assert-supported! http-header-name-ok-kir)))
+  (is (= :http-header-name-ok (core/assert-supported! http-header-name-ok-frontend-kir)))
+  (let [world (wit/emit http-header-name-ok-kir)
+        core-bytes (core/emit http-header-name-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-header-name-ok-kir world)
+        path (Files/createTempFile "kc-header-name-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-header-name-ok (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-header-name-ok(\"Content-Type\")" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke"
+                            "http-header-name-ok(\"\")" (str path))
+            space (shell/sh "wasmtime" "run" "--invoke"
+                            "http-header-name-ok(\"Bad Name\")" (str path))
+            bang (shell/sh "wasmtime" "run" "--invoke"
+                           "http-header-name-ok(\"X-Ok!\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty))))
+        (is (zero? (:exit space)) (:err space))
+        (is (= "-3" (str/trim (:out space))))
+        (is (zero? (:exit bang)) (:err bang))
+        (is (= "0" (str/trim (:out bang)))))
+      (finally (Files/deleteIfExists path)))))
+
+(deftest http-header-name-ok-with-main-live-vector
+  "T8.3 multi-export: header_name_ok + live main → -130."
+  (is (= :http-header-name-ok-with-main
+         (core/assert-supported! http-header-name-ok-with-main-kir)))
+  (let [world (wit/emit http-header-name-ok-with-main-kir)
+        core-bytes (core/emit http-header-name-ok-with-main-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-header-name-ok-with-main-kir world)
+        path (Files/createTempFile "kc-header-name-main-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-header-name-ok-with-main (:canonical-lowering packaged)))
+      (is (= 2 (count (:exports world))))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-header-name-ok(\"Content-Type\")" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke"
+                            "http-header-name-ok(\"\")" (str path))
+            space (shell/sh "wasmtime" "run" "--invoke"
+                            "http-header-name-ok(\"Bad Name\")" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-130" (str/trim (:out main))))
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty))))
+        (is (zero? (:exit space)) (:err space))
+        (is (= "-3" (str/trim (:out space)))))
+      (finally (Files/deleteIfExists path)))))
