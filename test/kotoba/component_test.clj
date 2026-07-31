@@ -2249,6 +2249,118 @@
         (is (= "-3" (str/trim (:out star)))))
       (finally (Files/deleteIfExists path)))))
 
+
+(def fs-path-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['fs-path-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'fs-path-ok
+     :params ['path]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body
+     '(if (<= (string-length path) 0)
+        -1
+        (if (> (string-length path) 1024)
+          -2
+          (if (= (string-code-point-at path 0) 47)
+            -5
+            (if (= (string-code-point-at path 0) 126)
+              -6
+              0))))}]})
+
+(def fs-path-ok-with-main-kir
+  {:format :kotoba.kir/v4
+   :exports ['fs_path_ok 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'fs_path_ok
+     :params ['path]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body
+     '(let [n (string-byte-length path)]
+        (if (<= n 0)
+          -1
+          (if (> n 1024)
+            -2
+            (let [c0 (string-code-point-at path 0)]
+              (if (= c0 47)
+                -5
+                (if (= c0 126)
+                  -6
+                  (__kotoba_loop_1 0 4 n path)))))))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body
+     '(let [a (fs_path_ok "a/b")
+            b (fs_path_ok "")
+            c (fs_path_ok "/abs")
+            d (fs_path_ok "a\\b")
+            e (fs_path_ok "a/../b")
+            f (fs_path_ok "ok-name")]
+        (+ (* a 100000) (* b 10000) (* c 1000) (* d 100) (* e 10) f))}]})
+
+(deftest fs-path-ok-canonical-lowering
+  "T8.3 fs_path_ok path state machine (not header tchar)."
+  (is (= :fs-path-ok (core/assert-supported! fs-path-ok-kir)))
+  (is (not= :http-header-name-ok-with-main
+            (try (core/assert-supported!
+                  (assoc fs-path-ok-with-main-kir
+                         :exports ['fs_path_ok 'main]))
+                 (catch Exception _ :fail))))
+  (let [world (wit/emit fs-path-ok-kir)
+        core-bytes (core/emit fs-path-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes fs-path-ok-kir world)
+        path (Files/createTempFile "kc-fs-path-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :fs-path-ok (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke" "fs-path-ok(\"a/b\")" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke" "fs-path-ok(\"\")" (str path))
+            abs (shell/sh "wasmtime" "run" "--invoke" "fs-path-ok(\"/abs\")" (str path))
+            bs (shell/sh "wasmtime" "run" "--invoke" "fs-path-ok(\"a\\\\b\")" (str path))
+            dd (shell/sh "wasmtime" "run" "--invoke" "fs-path-ok(\"a/../b\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty))))
+        (is (zero? (:exit abs)) (:err abs))
+        (is (= "-5" (str/trim (:out abs))))
+        (is (zero? (:exit bs)) (:err bs))
+        (is (= "-4" (str/trim (:out bs))))
+        (is (zero? (:exit dd)) (:err dd))
+        (is (= "-7" (str/trim (:out dd)))))
+      (finally (Files/deleteIfExists path)))))
+
+(deftest fs-path-ok-with-main-live-vector
+  "T8.3 multi-export fs_path_ok + main → -15470."
+  (is (= :fs-path-ok-with-main
+         (core/assert-supported! fs-path-ok-with-main-kir)))
+  (let [world (wit/emit fs-path-ok-with-main-kir)
+        core-bytes (core/emit fs-path-ok-with-main-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes fs-path-ok-with-main-kir world)
+        path (Files/createTempFile "kc-fs-path-main-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :fs-path-ok-with-main (:canonical-lowering packaged)))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-15470" (str/trim (:out main)))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest http-header-value-ok-canonical-lowering
   "T8.3 typed Component: header_value_ok CTL/length without kotoba:typed."
   (is (= :http-header-value-ok (core/assert-supported! http-header-value-ok-kir)))

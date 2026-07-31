@@ -668,14 +668,13 @@
 
   Recognizes pure nested-if length skeleton and frontend let/loop/helper forms
   that reference the name param and codes -1/-2/-3/0. WAT always applies RFC
-  7230 tchar charset scan. Export names containing the word secret are excluded
-  (ADR 0178 denylist charset via secret-name-ok)."
+  7230 tchar charset scan. Export name must contain header (avoids secret/path misfits)."
   [{:keys [name params param-types result body] :as function}]
   (and (= 1 (count params))
        (= [:string] param-types)
        (= :i64 result)
        (seq? body)
-       (not (re-find #"(?i)secret" (clojure.core/name name)))
+       (re-find #"(?i)header" (clojure.core/name name))
        (let [nm (first params)
              if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))
              len-of? (fn [form]
@@ -796,6 +795,50 @@
   "Two-export: secret_name_ok + live main (provider shape → -130)."
   [exports]
   (let [policy (first (filter secret-name-ok-function? exports))
+        main (first (filter #(= 'main (:name %)) exports))]
+    (and policy main
+         (= 2 (count exports))
+         (live-main-policy-calls? main (:name policy)))))
+
+
+(defn- fs-path-ok-function?
+  "Composition for fs_path_ok (ADR 0180) without kotoba:typed.
+
+  Params: [path :string] Result: :i64
+  Codes: -1 empty, -2 >1024, -3 NUL, -4 backslash, -5 abs /, -6 home ~,
+  -7 . or .. segment, 0 ok.
+
+  Export name must contain path or fs. Length skeleton admits 1024 bound;
+  WAT owns full path state machine."
+  [{:keys [name params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:string] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [n (clojure.core/name name)]
+         (or (re-find #"(?i)path" n) (re-find #"(?i)^fs[_-]" n)
+             (re-find #"(?i)fs-path" n) (re-find #"(?i)fs_path" n)))
+       (let [p (first params)]
+         (boolean
+          (and (form-tree-walk body #(= % p))
+               (form-tree-walk body #(= % -1))
+               (form-tree-walk body #(= % -2))
+               (or (form-tree-walk body #(= % 1024))
+                   (form-tree-walk body #(= % 1025)))
+               (or (form-tree-walk body #(= % -5))
+                   (form-tree-walk body #(= % -6))
+                   (form-tree-walk body #(= % -3))
+                   (form-tree-walk body #(= % -4))
+                   (form-tree-walk body #(= % -7))
+                   (form-tree-walk body #(and (seq? %)
+                                              (symbol? (first %))
+                                              (let [s (clojure.core/name (first %))]
+                                                (.startsWith s "__kotoba_loop"))))))))))
+
+(defn- fs-path-ok-with-main?
+  "Two-export: fs_path_ok + live main (provider shape → -15470)."
+  [exports]
+  (let [policy (first (filter fs-path-ok-function? exports))
         main (first (filter #(= 'main (:name %)) exports))]
     (and policy main
          (= 2 (count exports))
@@ -3623,6 +3666,12 @@
            (secret-name-ok-function? (first exports))
            (empty? (:effects kir))) :secret-name-ok
       (and (= 2 (count exports))
+           (fs-path-ok-with-main? exports)
+           (empty? (:effects kir))) :fs-path-ok-with-main
+      (and (= 1 (count exports))
+           (fs-path-ok-function? (first exports))
+           (empty? (:effects kir))) :fs-path-ok
+      (and (= 2 (count exports))
            (http-header-name-ok-with-main? exports)
            (empty? (:effects kir))) :http-header-name-ok-with-main
       (and (= 1 (count exports))
@@ -5067,6 +5116,162 @@
       main-block
       "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
       ")\n"))))
+
+
+(defn- fs-path-ok-wat
+  "Composition: fs_path_ok (ADR 0180) without kotoba:typed.
+
+  Length [1,1024]; first / → -5, ~ → -6; scan: NUL -3, \\\\ -4,
+  . / .. segments -7; else 0. Live main → -15470."
+  ([function] (fs-path-ok-wat function nil))
+  ([function main-fn]
+   (let [export (wit-name (:name function))
+         pages wasm/component-memory-pages
+         capacity wasm/component-arena-capacity
+         max-bytes value/string-value-byte-limit
+         main-string-lits
+         (when main-fn
+           (let [vals (mapv second (partition 2 (nth (:body main-fn) 1)))]
+             (vec (distinct (map second vals)))))
+         prepared-strs
+         (loop [remaining (or main-string-lits [])
+                offset 8
+                acc []]
+           (if-let [s (first remaining)]
+             (let [b (.getBytes ^String s StandardCharsets/UTF_8)
+                   len (alength b)]
+               (if (zero? len)
+                 (recur (next remaining) offset
+                        (conj acc {:value s :bytes [] :length 0 :pointer 0}))
+                 (recur (next remaining)
+                        (+ offset len)
+                        (conj acc {:value s :bytes (vec b) :length len :pointer offset}))))
+             acc))
+         non-empty (filterv #(pos? (:length %)) prepared-strs)
+         arena-base (align-up (if (seq non-empty)
+                                (+ (:pointer (last non-empty))
+                                   (:length (last non-empty)))
+                                8)
+                              8)
+         str-ptr (into {} (map (juxt :value :pointer) prepared-strs))
+         str-len (into {} (map (juxt :value :length) prepared-strs))
+         main-data
+         (apply str
+                (map (fn [leaf]
+                       (str "  (data (i32.const " (:pointer leaf) ") \""
+                            (wat-data (:bytes leaf)) "\")\n"))
+                     non-empty))
+         main-locals
+         (when main-fn
+           (let [names (mapv first (partition 2 (nth (:body main-fn) 1)))]
+             (apply str (map #(str " (local $" (name %) " i64)") names))))
+         main-calls
+         (when main-fn
+           (let [pairs (partition 2 (nth (:body main-fn) 1))]
+             (apply str
+                    (map (fn [[sym call]]
+                           (let [s (second call)]
+                             (str "    i32.const " (get str-ptr s)
+                                  " i32.const " (get str-len s)
+                                  " call $policy local.set $" (name sym) "\n")))
+                         pairs))))
+         main-expr (when main-fn (nth (:body main-fn) 2))
+         main-block
+         (when main-fn
+           (str
+            "  (func (export \"cm32p2||main\") (result i64)\n"
+            "    " main-locals "\n"
+            main-calls
+            "    " (emit-i64-arith-wat main-expr) ")\n"
+            "  (func (export \"cm32p2||main_post\") (param i64)\n"
+            "    i32.const " arena-base " global.set $next)\n"))]
+     (str
+      "(module\n"
+      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+      "  (global $next (mut i32) (i32.const " arena-base "))\n"
+      main-data
+      "  (func $realloc (export \"cm32p2_realloc\")\n"
+      "    (param $old-ptr i32) (param $old-size i32)\n"
+      "    (param $align i32) (param $new-size i32) (result i32)\n"
+      "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+      "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+      "    local.get $align i32.eqz if unreachable end\n"
+      "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+      "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+      "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+      "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+      "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+      "    if unreachable end\n"
+      "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+      "    local.get $end global.set $next\n"
+      "    local.get $old-ptr i32.eqz if else\n"
+      "      local.get $old-size local.get $new-size i32.lt_u\n"
+      "      if (result i32) local.get $old-size else local.get $new-size end\n"
+      "      local.set $copy-size\n"
+      "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+      "    end local.get $ptr)\n"
+      ;; step-state: state = prev*4 + dots; returns new state or negative error
+      "  (func $step (param $state i64) (param $c i32) (result i64)\n"
+      "    (local $prev i64) (local $dots i64)\n"
+      "    local.get $c i32.eqz if i64.const -3 return end\n"
+      "    local.get $c i32.const 92 i32.eq if i64.const -4 return end\n"
+      "    local.get $state i64.const 4 i64.div_s local.set $prev\n"
+      "    local.get $state local.get $prev i64.const 4 i64.mul i64.sub local.set $dots\n"
+      "    local.get $c i32.const 47 i32.eq if\n"
+      "      local.get $dots i64.const 1 i64.eq if i64.const -7 return end\n"
+      "      local.get $dots i64.const 2 i64.eq if i64.const -7 return end\n"
+      "      i64.const 4 return\n"
+      "    end\n"
+      "    local.get $prev i64.const 1 i64.eq if\n"
+      "      local.get $c i32.const 46 i32.eq if i64.const 1 return end\n"
+      "      i64.const 3 return\n"
+      "    end\n"
+      "    local.get $dots i64.const 1 i64.eq if\n"
+      "      local.get $c i32.const 46 i32.eq if i64.const 2 return end\n"
+      "      i64.const 3 return\n"
+      "    end\n"
+      "    local.get $dots i64.const 2 i64.eq if i64.const 3 return end\n"
+      "    local.get $dots)\n"
+      "  (func $finish (param $state i64) (result i64)\n"
+      "    (local $prev i64) (local $dots i64)\n"
+      "    local.get $state i64.const 4 i64.div_s local.set $prev\n"
+      "    local.get $state local.get $prev i64.const 4 i64.mul i64.sub local.set $dots\n"
+      "    local.get $dots i64.const 1 i64.eq if i64.const -7 return end\n"
+      "    local.get $dots i64.const 2 i64.eq if i64.const -7 return end\n"
+      "    i64.const 0)\n"
+      "  (func $policy (param $ptr i32) (param $len i32) (result i64)\n"
+      "    (local $end i32) (local $i i32) (local $c i32) (local $state i64) (local $st i64)\n"
+      "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+      "    local.get $len i32.eqz if i64.const -1 return end\n"
+      "    local.get $len i32.const 1024 i32.gt_u if i64.const -2 return end\n"
+      "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+      "    local.get $ptr local.get $len i32.add local.tee $end\n"
+      "    local.get $ptr i32.lt_u if unreachable end\n"
+      "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+      "    local.get $ptr i32.load8_u local.set $c\n"
+      "    local.get $c i32.const 47 i32.eq if i64.const -5 return end\n"
+      "    local.get $c i32.const 126 i32.eq if i64.const -6 return end\n"
+      "    i64.const 4 local.set $state\n"
+      "    i32.const 0 local.set $i\n"
+      "    (block $done\n"
+      "      (loop $scan\n"
+      "        local.get $i local.get $len i32.ge_u br_if $done\n"
+      "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+      "        local.get $state local.get $c call $step local.set $st\n"
+      "        local.get $st i64.const 0 i64.lt_s if local.get $st return end\n"
+      "        local.get $st local.set $state\n"
+      "        local.get $i i32.const 1 i32.add local.set $i\n"
+      "        br $scan))\n"
+      "    local.get $state call $finish)\n"
+      "  (func (export \"cm32p2||" export "\")"
+      " (param $ptr i32) (param $len i32) (result i64)\n"
+      "    local.get $ptr local.get $len call $policy)\n"
+      "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+      "    i32.const " arena-base " global.set $next)\n"
+      main-block
+      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+      ")\n"))))
+
 
 (defn- http-header-value-package-wat
   "Three-export package: value_ok + pair_ok + live main → -3036.
@@ -10724,6 +10929,14 @@
           policy (first (filter secret-name-ok-function? exports))
           main (first (filter #(= 'main (:name %)) exports))]
       (wasm-tools/parse-wat (secret-name-ok-wat policy main)))
+    :fs-path-ok
+    (wasm-tools/parse-wat
+     (fs-path-ok-wat (first (exported-functions kir))))
+    :fs-path-ok-with-main
+    (let [exports (exported-functions kir)
+          policy (first (filter fs-path-ok-function? exports))
+          main (first (filter #(= 'main (:name %)) exports))]
+      (wasm-tools/parse-wat (fs-path-ok-wat policy main)))
     :http-header-name-ok
     (wasm-tools/parse-wat
      (http-header-name-ok-wat (first (exported-functions kir))))
