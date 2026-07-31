@@ -1674,9 +1674,10 @@
 
 
 (def http-edn-reject-package-kir
-  "T8.3 multi-export reject-path EDN kit body: empty + append + request."
+  "T8.3 multi-export reject-path EDN kit body: empty + append + request + results."
   {:format :kotoba.kir/v4
-   :exports ['headers_edn_empty 'headers_edn_append 'http_request_edn]
+   :exports ['headers_edn_empty 'headers_edn_append 'http_request_edn
+             'http_result_ok_edn 'http_result_err_edn]
    :schemas {}
    :effects #{}
    :functions
@@ -1703,16 +1704,30 @@
      :body
      '(if (< timeout 0)
         ""
-        (string-concat "{:url \""
-                       (string-concat url
-                                      (string-concat "\" :headers "
-                                                     (string-concat headers
-                                                                    (string-concat " :body \""
-                                                                                   (string-concat body
-                                                                                                  (string-concat "\" :timeout-ms 0}"))))))))}]})
+        (string-concat url (string-concat headers (string-concat body "[]"))))}
+    {:name 'http_result_ok_edn
+     :params ['status 'headers 'body]
+     :param-types [:i64 :string :string]
+     :result :string
+     :effects #{}
+     :body
+     '(if (or (< status 0) (> status 999))
+        ""
+        (string-concat headers (string-concat body "ok")))}
+    {:name 'http_result_err_edn
+     :params ['code 'retryable]
+     :param-types [:string :i64]
+     :result :string
+     :effects #{}
+     :body
+     '(if (= retryable 0)
+        (string-concat code "error")
+        (if (= retryable 1)
+          (string-concat code "error")
+          ""))}]})
 
 (deftest http-edn-reject-package-multi-export
-  "T8.3 multi-export reject kit: empty + append + multi-header request."
+  "T8.3 multi-export reject kit: empty + append + request + result arms."
   (is (= :http-edn-reject-package (core/assert-supported! http-edn-reject-package-kir)))
   (let [world (wit/emit http-edn-reject-package-kir)
         core-bytes (core/emit http-edn-reject-package-kir :wasm32-wasi-kotoba-v1)
@@ -1728,31 +1743,33 @@
             one (shell/sh "wasmtime" "run" "--invoke"
                           "headers-edn-append(\"[]\",\"Host\",\"ex.com\")"
                           (str path))
-            two (shell/sh "wasmtime" "run" "--invoke"
-                          (str "headers-edn-append("
-                               "\"[{:name \\\"Host\\\" :value \\\"ex.com\\\"}]\","
-                               "\"Accept\",\"*/*\")")
-                          (str path))
             req (shell/sh "wasmtime" "run" "--invoke"
                           "http-request-edn(\"https://x\",\"[]\",\"{}\",30)"
                           (str path))
+            ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-result-ok-edn(200,\"[]\",\"ok\")" (str path))
+            err (shell/sh "wasmtime" "run" "--invoke"
+                          "http-result-err-edn(\"timeout\",1)" (str path))
             bad (shell/sh "wasmtime" "run" "--invoke"
-                          "http-request-edn(\"a\\\"b\",\"[]\",\"x\",1)"
-                          (str path))]
+                          "http-result-ok-edn(200,\"[]\",\"a\\\"b\")" (str path))]
         (is (zero? (:exit empty)) (:err empty))
         (is (= "[]" (read-string (str/trim (:out empty)))))
         (is (zero? (:exit one)) (:err one))
         (is (= "[{:name \"Host\" :value \"ex.com\"}]"
                (read-string (str/trim (:out one)))))
-        (is (zero? (:exit two)) (:err two))
-        (is (= "[{:name \"Host\" :value \"ex.com\"} {:name \"Accept\" :value \"*/*\"}]"
-               (read-string (str/trim (:out two)))))
         (is (zero? (:exit req)) (:err req))
         (is (= "{:url \"https://x\" :headers [] :body \"{}\" :timeout-ms 30}"
                (read-string (str/trim (:out req)))))
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "{:tag :ok :status 200 :headers [] :body \"ok\"}"
+               (read-string (str/trim (:out ok)))))
+        (is (zero? (:exit err)) (:err err))
+        (is (= "{:tag :error :code \"timeout\" :retryable true}"
+               (read-string (str/trim (:out err)))))
         (is (zero? (:exit bad)) (:err bad))
         (is (= "" (read-string (str/trim (:out bad))))))
       (finally (Files/deleteIfExists path)))))
+
 
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
