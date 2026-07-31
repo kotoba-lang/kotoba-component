@@ -1831,6 +1831,27 @@
           (string-concat code "error")
           ""))}]})
 
+
+(def http-edn-reject-package-with-helper-kir
+  "Same multi-export reject package plus one private helper (multi-file monomorph)."
+  (update http-edn-reject-package-kir :functions
+          conj {:name 'helper_unused
+                :params ['x]
+                :param-types [:i64]
+                :result :i64
+                :effects #{}
+                :body 'x}))
+
+(deftest http-edn-reject-package-allows-private-helpers
+  "T8.3 multi-file monomorph: private helpers do not disqualify reject package."
+  (is (= :http-edn-reject-package
+         (core/assert-supported! http-edn-reject-package-with-helper-kir)))
+  (let [world (wit/emit http-edn-reject-package-with-helper-kir)
+        core-bytes (core/emit http-edn-reject-package-with-helper-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-edn-reject-package-with-helper-kir world)]
+    (is (= :http-edn-reject-package (:canonical-lowering packaged)))
+    (is (pos? (alength ^bytes (:bytes packaged))))))
+
 (deftest http-edn-reject-package-multi-export
   "T8.3 multi-export reject kit: empty + append + names-add + request + result arms."
   (is (= :http-edn-reject-package (core/assert-supported! http-edn-reject-package-kir)))
