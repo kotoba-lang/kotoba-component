@@ -1181,6 +1181,107 @@
      :effects #{}
      :body '(string-length s)}]})
 
+(def string-expression-package-kir
+  "T8.3 multi-export pure string-concat package (EDN trust path shape).
+
+  Mirrors provider headers_edn_empty + http_header_edn_trust + headers_edn_one
+  + http_request_edn_trust (timeout pre-rendered as string by host)."
+  {:format :kotoba.kir/v4
+   :exports ['headers_edn_empty 'http_header_edn_trust
+             'headers_edn_one 'http_request_edn_trust]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'headers_edn_empty
+     :params []
+     :param-types []
+     :result :string
+     :effects #{}
+     :body "[]"}
+    {:name 'http_header_edn_trust
+     :params ['name 'value]
+     :param-types [:string :string]
+     :result :string
+     :effects #{}
+     :body '(string-concat "{:name \""
+                           (string-concat name
+                                          (string-concat "\" :value \""
+                                                         (string-concat value "\"}"))))}
+    {:name 'headers_edn_one
+     :params ['name 'value]
+     :param-types [:string :string]
+     :result :string
+     :effects #{}
+     :body '(string-concat "[{:name \""
+                           (string-concat name
+                                          (string-concat "\" :value \""
+                                                         (string-concat value "\"}]"))))}
+    {:name 'http_request_edn_trust
+     :params ['url 'headers 'body 'timeout-str]
+     :param-types [:string :string :string :string]
+     :result :string
+     :effects #{}
+     :body '(string-concat "{:url \""
+                           (string-concat url
+                                          (string-concat "\" :headers "
+                                                         (string-concat headers
+                                                                        (string-concat " :body \""
+                                                                                       (string-concat body
+                                                                                                      (string-concat "\" :timeout-ms "
+                                                                                                                     (string-concat timeout-str "}"))))))))}]})
+
+(deftest string-expression-package-multi-export
+  "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
+  (is (= :string-expression-package
+         (core/assert-supported! string-expression-package-kir)))
+  ;; single-export still uses the original shape
+  (let [single {:format :kotoba.kir/v4
+                :exports ['headers_edn_empty]
+                :schemas {}
+                :effects #{}
+                :functions
+                [{:name 'headers_edn_empty
+                  :params []
+                  :param-types []
+                  :result :string
+                  :effects #{}
+                  :body "[]"}]}]
+    (is (= :string-expression (core/assert-supported! single))))
+  (let [world (wit/emit string-expression-package-kir)
+        core-bytes (core/emit string-expression-package-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes string-expression-package-kir world)
+        path (Files/createTempFile "kc-str-expr-pkg-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :string-expression-package (:canonical-lowering packaged)))
+      (is (= 4 (count (:exports world))))
+      (let [empty (shell/sh "wasmtime" "run" "--invoke" "headers-edn-empty()"
+                            (str path))
+            hdr (shell/sh "wasmtime" "run" "--invoke"
+                          "http-header-edn-trust(\"Content-Type\",\"text/plain\")"
+                          (str path))
+            one (shell/sh "wasmtime" "run" "--invoke"
+                          "headers-edn-one(\"Host\",\"ex\")"
+                          (str path))
+            req (shell/sh "wasmtime" "run" "--invoke"
+                          "http-request-edn-trust(\"https://ex\",\"[]\",\"\",\"30\")"
+                          (str path))]
+        ;; wasmtime --invoke prints Canonical strings as quoted literals
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "[]" (read-string (str/trim (:out empty)))))
+        (is (zero? (:exit hdr)) (:err hdr))
+        (is (= "{:name \"Content-Type\" :value \"text/plain\"}"
+               (read-string (str/trim (:out hdr)))))
+        (is (zero? (:exit one)) (:err one))
+        (is (= "[{:name \"Host\" :value \"ex\"}]"
+               (read-string (str/trim (:out one)))))
+        (is (zero? (:exit req)) (:err req))
+        (is (= "{:url \"https://ex\" :headers [] :body \"\" :timeout-ms 30}"
+               (read-string (str/trim (:out req))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-length-canonical-lowering
   "T8.3 typed Component world first slice: string -> s64 without kotoba:typed."
   (is (= :string-length (core/assert-supported! string-length-kir)))
