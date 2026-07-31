@@ -195,6 +195,52 @@
 
            :else false))))
 
+(defn- pure-i64-arith?
+  "True when form is integer literal, allowed symbol, or +/*/- of those."
+  [form allowed]
+  (cond
+    (integer? form) true
+    (symbol? form) (contains? allowed form)
+    (and (seq? form) (contains? #{'+ '* '-} (first form)))
+    (every? #(pure-i64-arith? % allowed) (rest form))
+    :else false))
+
+(defn- live-main-policy-calls?
+  "main [] :i64 with let-bindings of (policy-name string-lit) + pure i64 arith.
+
+  Matches provider package live vectors such as http_url_ok main → -130."
+  [main-fn policy-name]
+  (and (= 'main (:name main-fn))
+       (empty? (:params main-fn))
+       (= :i64 (:result main-fn))
+       (seq? (:body main-fn))
+       (= 'let (first (:body main-fn)))
+       (= 3 (count (:body main-fn)))
+       (let [bindings (nth (:body main-fn) 1)
+             expr (nth (:body main-fn) 2)]
+         (and (vector? bindings)
+              (even? (count bindings))
+              (let [pairs (partition 2 bindings)
+                    names (mapv first pairs)
+                    vals (mapv second pairs)]
+                (and (every? symbol? names)
+                     (every? (fn [v]
+                               (and (seq? v)
+                                    (= policy-name (first v))
+                                    (= 2 (count v))
+                                    (string? (second v))))
+                             vals)
+                     (pure-i64-arith? expr (set names))))))))
+
+(defn- https-url-ok-with-main?
+  "Two-export module: https-url-ok policy + live main calling it with string lits."
+  [exports]
+  (let [policy (first (filter https-url-ok-function? exports))
+        main (first (filter #(= 'main (:name %)) exports))]
+    (and policy main
+         (= 2 (count exports))
+         (live-main-policy-calls? main (:name policy)))))
+
 (defn- http-post-request-ok-function?
   "Composition for http_post_request_ok (ADR 0186) without kotoba:typed.
 
@@ -2691,6 +2737,10 @@
            (= 1 (count exports))
            (string-substring-function? (first exports))
            (empty? (:effects kir))) :string-substring
+      (and (= 2 (count (:functions kir)))
+           (= 2 (count exports))
+           (https-url-ok-with-main? exports)
+           (empty? (:effects kir))) :https-url-ok-with-main
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (https-url-ok-function? (first exports))
@@ -3061,71 +3111,155 @@
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
 
+(defn- emit-i64-arith-wat
+  "Emit WAT for pure i64 +/*/- trees over integer literals and $local names."
+  [form]
+  (cond
+    (integer? form) (str "i64.const " form)
+    (symbol? form) (str "local.get $" (name form))
+    (and (seq? form) (contains? #{'+ '* '-} (first form)))
+    (let [op ({'+ "i64.add" '* "i64.mul" '- "i64.sub"} (first form))
+          args (vec (rest form))]
+      (case (count args)
+        0 (str "i64.const 0")
+        1 (if (= '- (first form))
+            (str "i64.const 0 " (emit-i64-arith-wat (first args)) " i64.sub")
+            (emit-i64-arith-wat (first args)))
+        ;; left-fold
+        (reduce (fn [acc arg]
+                  (str acc " " (emit-i64-arith-wat arg) " " op))
+                (emit-i64-arith-wat (first args))
+                (rest args))))
+    :else (reject "unsupported live-main arithmetic" {:form form})))
+
 (defn- https-url-ok-wat
   "Composition: HTTPS URL policy (ADR 0182 http_url_ok) without kotoba:typed.
 
   string-length bounds + string-substring(0,8) vs literal \"https://\".
-  Codes: -1 empty, -2 >4096, -3 short/not-https, 0 ok."
-  [function]
-  (let [export (wit-name (:name function))
-        pages wasm/component-memory-pages
-        capacity wasm/component-arena-capacity
-        max-bytes value/string-value-byte-limit
-        ;; embed "https://" at offset 8
-        prefix "https://"
-        prefix-bytes (.getBytes ^String prefix StandardCharsets/UTF_8)
-        prefix-len (alength prefix-bytes)
-        arena-base (align-up (+ 8 prefix-len) 8)]
-    (str
-     "(module\n"
-     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
-     "  (global $next (mut i32) (i32.const " arena-base "))\n"
-     "  (data (i32.const 8) \"" (wat-data prefix-bytes) "\")\n"
-     "  (func $realloc (export \"cm32p2_realloc\")\n"
-     "    (param $old-ptr i32) (param $old-size i32)\n"
-     "    (param $align i32) (param $new-size i32) (result i32)\n"
-     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
-     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
-     "    local.get $align i32.eqz if unreachable end\n"
-     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
-     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
-     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
-     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
-     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
-     "    if unreachable end\n"
-     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
-     "    local.get $end global.set $next\n"
-     "    local.get $old-ptr i32.eqz if else\n"
-     "      local.get $old-size local.get $new-size i32.lt_u\n"
-     "      if (result i32) local.get $old-size else local.get $new-size end\n"
-     "      local.set $copy-size\n"
-     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
-     "    end local.get $ptr)\n"
-     "  (func (export \"cm32p2||" export "\")"
-     " (param $ptr i32) (param $len i32) (result i64)\n"
-     "    (local $end i32) (local $i i32)\n"
-     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
-     "    local.get $len i32.eqz if i64.const -1 return end\n"
-     "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
-     "    local.get $ptr local.get $len i32.add local.tee $end\n"
-     "    local.get $ptr i32.lt_u if unreachable end\n"
-     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
-     "    local.get $len i32.const 4096 i32.gt_u if i64.const -2 return end\n"
-     "    local.get $len i32.const 8 i32.lt_u if i64.const -3 return end\n"
-     "    i32.const 0 local.set $i\n"
-     "    (block $ok\n"
-     "      (loop $scan\n"
-     "        local.get $i i32.const 8 i32.ge_u br_if $ok\n"
-     "        local.get $ptr local.get $i i32.add i32.load8_u\n"
-     "        i32.const 8 local.get $i i32.add i32.load8_u\n"
-     "        i32.ne if i64.const -3 return end\n"
-     "        local.get $i i32.const 1 i32.add local.set $i\n"
-     "        br $scan))\n"
-     "    i64.const 0)\n"
-     "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
-     "    i32.const " arena-base " global.set $next)\n"
-     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
-     ")\n")))
+  Codes: -1 empty, -2 >4096, -3 short/not-https, 0 ok.
+
+  When main-fn is provided, also emit live-vector main that calls the policy
+  with embedded string literals (multi-export provider package shape)."
+  ([function] (https-url-ok-wat function nil))
+  ([function main-fn]
+   (let [export (wit-name (:name function))
+         pages wasm/component-memory-pages
+         capacity wasm/component-arena-capacity
+         max-bytes value/string-value-byte-limit
+         ;; embed "https://" at offset 8, then any main live-vector string lits
+         prefix "https://"
+         prefix-bytes (.getBytes ^String prefix StandardCharsets/UTF_8)
+         prefix-len (alength prefix-bytes)
+         main-lits
+         (when main-fn
+           (let [bindings (nth (:body main-fn) 1)
+                 vals (mapv second (partition 2 bindings))]
+             (mapv (fn [v]
+                     (let [s (second v)
+                           b (.getBytes ^String s StandardCharsets/UTF_8)]
+                       {:value s :bytes (vec b) :length (alength b)}))
+                   vals)))
+         ;; place main lits after prefix
+         prepared-main
+         (loop [remaining (or main-lits [])
+                offset (align-up (+ 8 prefix-len) 8)
+                acc []]
+           (if-let [leaf (first remaining)]
+             (recur (next remaining)
+                    (align-up (+ offset (:length leaf)) 1)
+                    (conj acc (assoc leaf :pointer offset)))
+             acc))
+         arena-base (align-up (if (seq prepared-main)
+                                (+ (:pointer (last prepared-main))
+                                   (:length (last prepared-main)))
+                                (+ 8 prefix-len))
+                              8)
+         main-data
+         (apply str
+                (map (fn [leaf]
+                       (str "  (data (i32.const " (:pointer leaf) ") \""
+                            (wat-data (:bytes leaf)) "\")\n"))
+                     prepared-main))
+         main-locals
+         (when main-fn
+           (let [names (mapv first (partition 2 (nth (:body main-fn) 1)))]
+             (apply str (map #(str " (local $" (name %) " i64)") names))))
+         main-calls
+         (when main-fn
+           (let [pairs (partition 2 (nth (:body main-fn) 1))
+                 lit-ptr (into {} (map (juxt :value :pointer) prepared-main))
+                 lit-len (into {} (map (juxt :value :length) prepared-main))]
+             (apply str
+                    (map (fn [[sym call]]
+                           (let [s (second call)]
+                             (str "    i32.const " (get lit-ptr s)
+                                  " i32.const " (get lit-len s)
+                                  " call $policy local.set $" (name sym) "\n")))
+                         pairs))))
+         main-expr (when main-fn (nth (:body main-fn) 2))
+         main-block
+         (when main-fn
+           (str
+            "  (func (export \"cm32p2||main\") (result i64)\n"
+            "    " main-locals "\n"
+            main-calls
+            "    " (emit-i64-arith-wat main-expr) ")\n"
+            "  (func (export \"cm32p2||main_post\") (param i64)\n"
+            "    i32.const " arena-base " global.set $next)\n"))]
+     (str
+      "(module\n"
+      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+      "  (global $next (mut i32) (i32.const " arena-base "))\n"
+      "  (data (i32.const 8) \"" (wat-data prefix-bytes) "\")\n"
+      main-data
+      "  (func $realloc (export \"cm32p2_realloc\")\n"
+      "    (param $old-ptr i32) (param $old-size i32)\n"
+      "    (param $align i32) (param $new-size i32) (result i32)\n"
+      "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+      "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+      "    local.get $align i32.eqz if unreachable end\n"
+      "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+      "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+      "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+      "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+      "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+      "    if unreachable end\n"
+      "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+      "    local.get $end global.set $next\n"
+      "    local.get $old-ptr i32.eqz if else\n"
+      "      local.get $old-size local.get $new-size i32.lt_u\n"
+      "      if (result i32) local.get $old-size else local.get $new-size end\n"
+      "      local.set $copy-size\n"
+      "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+      "    end local.get $ptr)\n"
+      "  (func $policy (param $ptr i32) (param $len i32) (result i64)\n"
+      "    (local $end i32) (local $i i32)\n"
+      "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+      "    local.get $len i32.eqz if i64.const -1 return end\n"
+      "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+      "    local.get $ptr local.get $len i32.add local.tee $end\n"
+      "    local.get $ptr i32.lt_u if unreachable end\n"
+      "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+      "    local.get $len i32.const 4096 i32.gt_u if i64.const -2 return end\n"
+      "    local.get $len i32.const 8 i32.lt_u if i64.const -3 return end\n"
+      "    i32.const 0 local.set $i\n"
+      "    (block $ok\n"
+      "      (loop $scan\n"
+      "        local.get $i i32.const 8 i32.ge_u br_if $ok\n"
+      "        local.get $ptr local.get $i i32.add i32.load8_u\n"
+      "        i32.const 8 local.get $i i32.add i32.load8_u\n"
+      "        i32.ne if i64.const -3 return end\n"
+      "        local.get $i i32.const 1 i32.add local.set $i\n"
+      "        br $scan))\n"
+      "    i64.const 0)\n"
+      "  (func (export \"cm32p2||" export "\")"
+      " (param $ptr i32) (param $len i32) (result i64)\n"
+      "    local.get $ptr local.get $len call $policy)\n"
+      "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+      "    i32.const " arena-base " global.set $next)\n"
+      main-block
+      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+      ")\n"))))
 
 (defn- http-post-request-ok-wat
   "Composition: full http_post_request_ok (ADR 0186) without kotoba:typed.
@@ -7917,6 +8051,11 @@
     :https-url-ok
     (wasm-tools/parse-wat
      (https-url-ok-wat (first (exported-functions kir))))
+    :https-url-ok-with-main
+    (let [exports (exported-functions kir)
+          policy (first (filter https-url-ok-function? exports))
+          main (first (filter #(= 'main (:name %)) exports))]
+      (wasm-tools/parse-wat (https-url-ok-wat policy main)))
     :http-post-request-ok
     (wasm-tools/parse-wat
      (http-post-request-ok-wat (first (exported-functions kir))))
