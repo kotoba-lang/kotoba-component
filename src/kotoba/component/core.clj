@@ -195,6 +195,102 @@
 
            :else false))))
 
+(defn- http-post-request-ok-function?
+  "Composition for http_post_request_ok (ADR 0186) without kotoba:typed.
+
+  Params: [url :string, headers-n :i64, body :string, timeout-ms :i64]
+  Result: :i64
+  Codes: -1 empty url, -2 url>4096, -3 not https, -4 headers-n, -5 body, -6 timeout, 0 ok.
+
+  Recognizes a fixed nested-if skeleton (no `or`/`not`) that is equivalent
+  to the typed-string package policy. Semantics are enforced by the WAT emitter."
+  [{:keys [params param-types result body]}]
+  (and (= 4 (count params))
+       (= 4 (count param-types))
+       (= [:string :i64 :string :i64] param-types)
+       (= :i64 result)
+       (seq? body)
+  (let [url (nth params 0)
+        headers (nth params 1)
+        body-p (nth params 2)
+        timeout (nth params 3)
+        if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))
+        len-of? (fn [form sym]
+                  (and (seq? form)
+                       (contains? #{'string-length 'string-byte-length} (first form))
+                       (= 2 (count form))
+                       (= sym (second form))))
+        https-then?
+        (fn [form]
+          ;; (if (string=? (string-substring url 0 8) "https://") <then> -3)
+          (and (if4? form)
+               (= -3 (nth form 3))
+               (let [c (nth form 1)]
+                 (and (seq? c)
+                      (= 'string=? (first c))
+                      (= 3 (count c))
+                      (= "https://" (nth c 2))
+                      (let [sub (nth c 1)]
+                        (and (seq? sub)
+                             (= 'string-substring (first sub))
+                             (= 4 (count sub))
+                             (= url (nth sub 1))
+                             (= 0 (nth sub 2))
+                             (= 8 (nth sub 3))))))))]
+    (and (if4? body)
+         ;; (if (<= (string-length url) 0) -1 ...)
+         (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
+           (and (= -1 t1)
+                (seq? c1) (contains? #{'<= '<} (first c1)) (len-of? (nth c1 1) url)
+                (if4? e1)
+                ;; (if (> (string-length url) 4096) -2 ...)
+                (let [c2 (nth e1 1) t2 (nth e1 2) e2 (nth e1 3)]
+                  (and (= -2 t2)
+                       (seq? c2) (contains? #{'> '>=} (first c2)) (len-of? (nth c2 1) url)
+                       (#{4096 4097} (nth c2 2))
+                       (if4? e2)
+                       ;; (if (< (string-length url) 8) -3 ...)
+                       (let [c3 (nth e2 1) t3 (nth e2 2) e3 (nth e2 3)]
+                         (and (= -3 t3)
+                              (seq? c3) (contains? #{'< '<=} (first c3)) (len-of? (nth c3 1) url)
+                              (#{7 8} (nth c3 2))
+                              (https-then? e3)
+                              ;; then-branch continues: headers / body / timeout
+                              (let [then (nth e3 2)]
+                                (and (if4? then)
+                                     ;; (if (< headers-n 0) -4 ...)
+                                     (let [c4 (nth then 1) t4 (nth then 2) e4 (nth then 3)]
+                                       (and (= -4 t4)
+                                            (seq? c4) (contains? #{'< '<=} (first c4))
+                                            (= headers (nth c4 1))
+                                            (if4? e4)
+                                            (let [c5 (nth e4 1) t5 (nth e4 2) e5 (nth e4 3)]
+                                              (and (= -4 t5)
+                                                   (seq? c5) (contains? #{'> '>=} (first c5))
+                                                   (= headers (nth c5 1))
+                                                   (#{32 33} (nth c5 2))
+                                                   (if4? e5)
+                                                   ;; (if (> (string-length body) 65536) -5 ...)
+                                                   (let [c6 (nth e5 1) t6 (nth e5 2) e6 (nth e5 3)]
+                                                     (and (= -5 t6)
+                                                          (seq? c6) (contains? #{'> '>=} (first c6))
+                                                          (len-of? (nth c6 1) body-p)
+                                                          (#{65536 65537} (nth c6 2))
+                                                          (if4? e6)
+                                                          ;; (if (< timeout-ms 1) -6 ...)
+                                                          (let [c7 (nth e6 1) t7 (nth e6 2) e7 (nth e6 3)]
+                                                            (and (= -6 t7)
+                                                                 (seq? c7) (contains? #{'< '<=} (first c7))
+                                                                 (= timeout (nth c7 1))
+                                                                 (if4? e7)
+                                                                 (let [c8 (nth e7 1) t8 (nth e7 2) e8 (nth e7 3)]
+                                                                   (and (= -6 t8)
+                                                                        (seq? c8) (contains? #{'> '>=} (first c8))
+                                                                        (= timeout (nth c8 1))
+                                                                        (#{30000 30001} (nth c8 2))
+                                                                        (number? e8)
+                                                                        (zero? e8)))))))))))))))))))))))
+
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
@@ -2550,6 +2646,10 @@
            (empty? (:effects kir))) :https-url-ok
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
+           (http-post-request-ok-function? (first exports))
+           (empty? (:effects kir))) :http-post-request-ok
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
            (vector-i64-identity-function? (first exports))
            (empty? (:effects kir))) :vector-i64-identity
       (and (= 1 (count (:functions kir)))
@@ -2966,6 +3066,90 @@
      "        i32.ne if i64.const -3 return end\n"
      "        local.get $i i32.const 1 i32.add local.set $i\n"
      "        br $scan))\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- http-post-request-ok-wat
+  "Composition: full http_post_request_ok (ADR 0186) without kotoba:typed.
+
+  Params: url (ptr,len), headers-n i64, body (ptr,len), timeout-ms i64.
+  Codes match typed package: -1..-6 / 0."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        prefix "https://"
+        prefix-bytes (.getBytes ^String prefix StandardCharsets/UTF_8)
+        prefix-len (alength prefix-bytes)
+        arena-base (align-up (+ 8 prefix-len) 8)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const 8) \"" (wat-data prefix-bytes) "\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $url-ptr i32) (param $url-len i32)"
+     " (param $headers-n i64)"
+     " (param $body-ptr i32) (param $body-len i32)"
+     " (param $timeout i64) (result i64)\n"
+     "    (local $end i32) (local $i i32)\n"
+     "    ;; validate url range\n"
+     "    local.get $url-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $url-len i32.eqz if i64.const -1 return end\n"
+     "    local.get $url-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $url-ptr local.get $url-len i32.add local.tee $end\n"
+     "    local.get $url-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $url-len i32.const 4096 i32.gt_u if i64.const -2 return end\n"
+     "    local.get $url-len i32.const 8 i32.lt_u if i64.const -3 return end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $https-ok\n"
+     "      (loop $scan\n"
+     "        local.get $i i32.const 8 i32.ge_u br_if $https-ok\n"
+     "        local.get $url-ptr local.get $i i32.add i32.load8_u\n"
+     "        i32.const 8 local.get $i i32.add i32.load8_u\n"
+     "        i32.ne if i64.const -3 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    ;; headers-n ∈ [0,32]\n"
+     "    local.get $headers-n i64.const 0 i64.lt_s if i64.const -4 return end\n"
+     "    local.get $headers-n i64.const 32 i64.gt_s if i64.const -4 return end\n"
+     "    ;; validate body range + length ≤ 65536\n"
+     "    local.get $body-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $body-len i32.eqz if else\n"
+     "      local.get $body-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $body-ptr local.get $body-len i32.add local.tee $end\n"
+     "    local.get $body-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $body-len i32.const 65536 i32.gt_u if i64.const -5 return end\n"
+     "    ;; timeout ∈ [1,30000]\n"
+     "    local.get $timeout i64.const 1 i64.lt_s if i64.const -6 return end\n"
+     "    local.get $timeout i64.const 30000 i64.gt_s if i64.const -6 return end\n"
      "    i64.const 0)\n"
      "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
      "    i32.const " arena-base " global.set $next)\n"
@@ -7619,6 +7803,9 @@
     :https-url-ok
     (wasm-tools/parse-wat
      (https-url-ok-wat (first (exported-functions kir))))
+    :http-post-request-ok
+    (wasm-tools/parse-wat
+     (http-post-request-ok-wat (first (exported-functions kir))))
     :vector-i64-identity
     (wasm-tools/parse-wat
      (vector-i64-identity-wat (first (exported-functions kir))))
