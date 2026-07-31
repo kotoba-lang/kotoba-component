@@ -41,6 +41,21 @@
        (= :string result)
        (seq (string-leaves body (set params)))))
 
+(defn- string-length-function?
+  "Canonical `string -> s64` UTF-8 byte length (string-length / string-byte-length).
+
+  T8.3 typed Component world first slice: pure length over a Canonical
+  string (ptr,len) without importing kotoba:typed. string-length is KIR
+  alias of string-byte-length (Product Value ABI v1)."
+  [{:keys [params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:string] param-types)
+       (= :i64 result)
+       (seq? body)
+       (contains? #{'string-length 'string-byte-length} (first body))
+       (= 2 (count body))
+       (= (first params) (second body))))
+
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
@@ -2380,6 +2395,10 @@
            (empty? (:effects kir))) :string-expression
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
+           (string-length-function? (first exports))
+           (empty? (:effects kir))) :string-length
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
            (vector-i64-identity-function? (first exports))
            (empty? (:effects kir))) :vector-i64-identity
       (and (= 1 (count (:functions kir)))
@@ -2481,6 +2500,58 @@
   (if (= :parameter (:kind leaf))
     (str "local.get $p" (:index leaf) "-len")
     (str "i32.const " (:length leaf))))
+
+(defn- string-length-wat
+  "Canonical `string -> s64`: return admitted UTF-8 byte length.
+
+  Exports `cm32p2_realloc` so the Canonical string-parameter lowerer can
+  place guest bytes (same contract as string-expression). No kotoba:typed
+  import (ADR 0076 4a / T8.3 typed Component first slice)."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        arena-base 8]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $ptr i32) (param $len i32) (result i64)\n"
+     "    (local $end i32)\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.eqz if else\n"
+     "      local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $len i64.extend_i32_u)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
 
 (defn- string-expression-wat [function]
   (let [export (wit-name (:name function))
@@ -7117,6 +7188,9 @@
      kir (structural-union-match-module kir) target opts)
     :string-expression (wasm-tools/parse-wat
                         (string-expression-wat (first (exported-functions kir))))
+    :string-length
+    (wasm-tools/parse-wat
+     (string-length-wat (first (exported-functions kir))))
     :vector-i64-identity
     (wasm-tools/parse-wat
      (vector-i64-identity-wat (first (exported-functions kir))))
