@@ -1278,6 +1278,82 @@
         (is (= "" (read-string (str/trim (:out bs))))))
       (finally (Files/deleteIfExists path)))))
 
+(def http-header-edn-kir
+  "T8.3 reject-path header map: dual edn_quoted composition skeleton."
+  {:format :kotoba.kir/v4
+   :exports ['http_header_edn]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_header_edn
+     :params ['name 'value]
+     :param-types [:string :string]
+     :result :string
+     :effects #{}
+     :body
+     '(let [qn (edn_quoted name)
+            qv (edn_quoted value)]
+        (if (or (= (string-byte-length qn) 0)
+                (= (string-byte-length qv) 0))
+          ""
+          (string-concat "{:name "
+                         (string-concat qn
+                                        (string-concat " :value "
+                                                       (string-concat qv "}"))))))}]})
+
+(deftest http-header-edn-canonical-lowering
+  "T8.3 reject-path composition: dual quote/backslash scan → empty or header map."
+  (is (= :http-header-edn (core/assert-supported! http-header-edn-kir)))
+  ;; trust-named pure concat stays string-expression, not this shape
+  (let [trust {:format :kotoba.kir/v4
+               :exports ['http_header_edn_trust]
+               :schemas {}
+               :effects #{}
+               :functions
+               [{:name 'http_header_edn_trust
+                 :params ['name 'value]
+                 :param-types [:string :string]
+                 :result :string
+                 :effects #{}
+                 :body
+                 '(string-concat "{:name \""
+                                 (string-concat name
+                                                (string-concat "\" :value \""
+                                                               (string-concat value "\"}"))))}]}]
+    (is (= :string-expression (core/assert-supported! trust))))
+  (let [world (wit/emit http-header-edn-kir)
+        core-bytes (core/emit http-header-edn-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-header-edn-kir world)
+        path (Files/createTempFile "kc-http-header-edn-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-header-edn (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-header-edn(\"Content-Type\",\"text/plain\")"
+                         (str path))
+            empty-name (shell/sh "wasmtime" "run" "--invoke"
+                                 "http-header-edn(\"\",\"v\")"
+                                 (str path))
+            dq (shell/sh "wasmtime" "run" "--invoke"
+                         "http-header-edn(\"a\\\"b\",\"v\")"
+                         (str path))
+            bs (shell/sh "wasmtime" "run" "--invoke"
+                         "http-header-edn(\"n\",\"a\\\\b\")"
+                         (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "{:name \"Content-Type\" :value \"text/plain\"}"
+               (read-string (str/trim (:out ok)))))
+        (is (zero? (:exit empty-name)) (:err empty-name))
+        (is (= "{:name \"\" :value \"v\"}"
+               (read-string (str/trim (:out empty-name)))))
+        (is (zero? (:exit dq)) (:err dq))
+        (is (= "" (read-string (str/trim (:out dq)))))
+        (is (zero? (:exit bs)) (:err bs))
+        (is (= "" (read-string (str/trim (:out bs))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
   (is (= :string-expression-package
