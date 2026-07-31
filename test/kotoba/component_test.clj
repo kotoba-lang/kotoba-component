@@ -1752,10 +1752,10 @@
 
 
 (def http-edn-reject-package-kir
-  "T8.3 multi-export reject-path EDN kit body: empty + append + request + results."
+  "T8.3 multi-export reject-path EDN kit: empty + append + names-add + request + results."
   {:format :kotoba.kir/v4
-   :exports ['headers_edn_empty 'headers_edn_append 'http_request_edn
-             'http_result_ok_edn 'http_result_err_edn]
+   :exports ['headers_edn_empty 'headers_edn_append 'headers_names_add
+             'http_request_edn 'http_result_ok_edn 'http_result_err_edn]
    :schemas {}
    :effects #{}
    :functions
@@ -1774,6 +1774,23 @@
      '(if (string=? acc "[]")
         (string-concat "[" (string-concat name (string-concat value "]")))
         (string-concat acc (string-concat " " (string-concat name value))))}
+    {:name 'headers_names_add
+     :params ['acc 'name]
+     :param-types [:string :string]
+     :result :string
+     :effects #{}
+     :body
+     '(if (or (= (string-byte-length acc) 0)
+              (= (string-byte-length name) 0))
+        ""
+        (if (headers_names_has acc name)
+          ""
+          (if (string=? acc "[]")
+            (string-concat "[" (string-concat "\"" (string-concat name "\"]")))
+            (string-concat acc
+                           (string-concat " "
+                                          (string-concat "\""
+                                                         (string-concat name "\"]")))))))}
     {:name 'http_request_edn
      :params ['url 'headers 'body 'timeout]
      :param-types [:string :string :string :i64]
@@ -1805,7 +1822,7 @@
           ""))}]})
 
 (deftest http-edn-reject-package-multi-export
-  "T8.3 multi-export reject kit: empty + append + request + result arms."
+  "T8.3 multi-export reject kit: empty + append + names-add + request + result arms."
   (is (= :http-edn-reject-package (core/assert-supported! http-edn-reject-package-kir)))
   (let [world (wit/emit http-edn-reject-package-kir)
         core-bytes (core/emit http-edn-reject-package-kir :wasm32-wasi-kotoba-v1)
@@ -1821,6 +1838,12 @@
             one (shell/sh "wasmtime" "run" "--invoke"
                           "headers-edn-append(\"[]\",\"Host\",\"ex.com\")"
                           (str path))
+            names (shell/sh "wasmtime" "run" "--invoke"
+                            "headers-names-add(\"[]\",\"Host\")" (str path))
+            names-dup (shell/sh "wasmtime" "run" "--invoke"
+                                "headers-names-add(\"[\\\"Host\\\"]\",\"Host\")" (str path))
+            names-pref (shell/sh "wasmtime" "run" "--invoke"
+                                 "headers-names-add(\"[\\\"Host\\\"]\",\"Ho\")" (str path))
             req (shell/sh "wasmtime" "run" "--invoke"
                           "http-request-edn(\"https://x\",\"[]\",\"{}\",30)"
                           (str path))
@@ -1835,6 +1858,12 @@
         (is (zero? (:exit one)) (:err one))
         (is (= "[{:name \"Host\" :value \"ex.com\"}]"
                (read-string (str/trim (:out one)))))
+        (is (zero? (:exit names)) (:err names))
+        (is (= "[\"Host\"]" (read-string (str/trim (:out names)))))
+        (is (zero? (:exit names-dup)) (:err names-dup))
+        (is (= "" (read-string (str/trim (:out names-dup)))))
+        (is (zero? (:exit names-pref)) (:err names-pref))
+        (is (= "[\"Host\" \"Ho\"]" (read-string (str/trim (:out names-pref)))))
         (is (zero? (:exit req)) (:err req))
         (is (= "{:url \"https://x\" :headers [] :body \"{}\" :timeout-ms 30}"
                (read-string (str/trim (:out req)))))
