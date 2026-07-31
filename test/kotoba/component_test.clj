@@ -1602,6 +1602,76 @@
         (is (= "" (read-string (str/trim (:out bad))))))
       (finally (Files/deleteIfExists path)))))
 
+(def http-request-edn-kir
+  "T8.3 multi-header request EDN skeleton (WAT owns scan + shape + decimal)."
+  {:format :kotoba.kir/v4
+   :exports ['http_request_edn]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_request_edn
+     :params ['url 'headers 'body 'timeout-ms]
+     :param-types [:string :string :string :i64]
+     :result :string
+     :effects #{}
+     :body
+     '(let [qu (edn_quoted url)
+            qb (edn_quoted body)]
+        (if (or (= (string-byte-length qu) 0)
+                (= (string-byte-length qb) 0)
+                (< timeout-ms 0))
+          ""
+          (if (headers_edn_shape_ok headers)
+            (string-concat "{:url "
+                           (string-concat qu
+                                          (string-concat " :headers "
+                                                         (string-concat headers
+                                                                        (string-concat " :body "
+                                                                                       (string-concat qb
+                                                                                                      (string-concat " :timeout-ms "
+                                                                                                                     (string-concat (i64-str timeout-ms) "}"))))))))
+            "")))}]})
+
+(deftest http-request-edn-canonical-lowering
+  "T8.3 reject-path: empty headers, multi-header, bad shape, bad atom, neg timeout."
+  (is (= :http-request-edn (core/assert-supported! http-request-edn-kir)))
+  (let [world (wit/emit http-request-edn-kir)
+        core-bytes (core/emit http-request-edn-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-request-edn-kir world)
+        path (Files/createTempFile "kc-http-request-edn-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-request-edn (:canonical-lowering packaged)))
+      (let [empty (shell/sh "wasmtime" "run" "--invoke"
+                            "http-request-edn(\"https://x\",\"[]\",\"{}\",1000)" (str path))
+            multi (shell/sh "wasmtime" "run" "--invoke"
+                            (str "http-request-edn(\"https://x\","
+                                 "\"[{:name \\\"Host\\\" :value \\\"ex.com\\\"}]\","
+                                 "\"{}\",50)")
+                            (str path))
+            bad-shape (shell/sh "wasmtime" "run" "--invoke"
+                                "http-request-edn(\"https://x\",\"{not-vec}\",\"{}\",1)" (str path))
+            bad-atom (shell/sh "wasmtime" "run" "--invoke"
+                               "http-request-edn(\"a\\\"b\",\"[]\",\"{}\",1)" (str path))
+            neg (shell/sh "wasmtime" "run" "--invoke"
+                          "http-request-edn(\"https://x\",\"[]\",\"{}\",-1)" (str path))]
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "{:url \"https://x\" :headers [] :body \"{}\" :timeout-ms 1000}"
+               (read-string (str/trim (:out empty)))))
+        (is (zero? (:exit multi)) (:err multi))
+        (is (= (str "{:url \"https://x\" :headers [{:name \"Host\" :value \"ex.com\"}]"
+                    " :body \"{}\" :timeout-ms 50}")
+               (read-string (str/trim (:out multi)))))
+        (is (zero? (:exit bad-shape)) (:err bad-shape))
+        (is (= "" (read-string (str/trim (:out bad-shape)))))
+        (is (zero? (:exit bad-atom)) (:err bad-atom))
+        (is (= "" (read-string (str/trim (:out bad-atom)))))
+        (is (zero? (:exit neg)) (:err neg))
+        (is (= "" (read-string (str/trim (:out neg))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
   (is (= :string-expression-package
