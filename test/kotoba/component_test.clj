@@ -1672,6 +1672,88 @@
         (is (= "" (read-string (str/trim (:out neg))))))
       (finally (Files/deleteIfExists path)))))
 
+
+(def http-edn-reject-package-kir
+  "T8.3 multi-export reject-path EDN kit body: empty + append + request."
+  {:format :kotoba.kir/v4
+   :exports ['headers_edn_empty 'headers_edn_append 'http_request_edn]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'headers_edn_empty
+     :params []
+     :param-types []
+     :result :string
+     :effects #{}
+     :body "[]"}
+    {:name 'headers_edn_append
+     :params ['acc 'name 'value]
+     :param-types [:string :string :string]
+     :result :string
+     :effects #{}
+     :body
+     '(if (string=? acc "[]")
+        (string-concat "[" (string-concat name (string-concat value "]")))
+        (string-concat acc (string-concat " " (string-concat name value))))}
+    {:name 'http_request_edn
+     :params ['url 'headers 'body 'timeout]
+     :param-types [:string :string :string :i64]
+     :result :string
+     :effects #{}
+     :body
+     '(if (< timeout 0)
+        ""
+        (string-concat "{:url \""
+                       (string-concat url
+                                      (string-concat "\" :headers "
+                                                     (string-concat headers
+                                                                    (string-concat " :body \""
+                                                                                   (string-concat body
+                                                                                                  (string-concat "\" :timeout-ms 0}"))))))))}]})
+
+(deftest http-edn-reject-package-multi-export
+  "T8.3 multi-export reject kit: empty + append + multi-header request."
+  (is (= :http-edn-reject-package (core/assert-supported! http-edn-reject-package-kir)))
+  (let [world (wit/emit http-edn-reject-package-kir)
+        core-bytes (core/emit http-edn-reject-package-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-edn-reject-package-kir world)
+        path (Files/createTempFile "kc-edn-reject-pkg-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-edn-reject-package (:canonical-lowering packaged)))
+      (let [empty (shell/sh "wasmtime" "run" "--invoke" "headers-edn-empty()"
+                            (str path))
+            one (shell/sh "wasmtime" "run" "--invoke"
+                          "headers-edn-append(\"[]\",\"Host\",\"ex.com\")"
+                          (str path))
+            two (shell/sh "wasmtime" "run" "--invoke"
+                          (str "headers-edn-append("
+                               "\"[{:name \\\"Host\\\" :value \\\"ex.com\\\"}]\","
+                               "\"Accept\",\"*/*\")")
+                          (str path))
+            req (shell/sh "wasmtime" "run" "--invoke"
+                          "http-request-edn(\"https://x\",\"[]\",\"{}\",30)"
+                          (str path))
+            bad (shell/sh "wasmtime" "run" "--invoke"
+                          "http-request-edn(\"a\\\"b\",\"[]\",\"x\",1)"
+                          (str path))]
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "[]" (read-string (str/trim (:out empty)))))
+        (is (zero? (:exit one)) (:err one))
+        (is (= "[{:name \"Host\" :value \"ex.com\"}]"
+               (read-string (str/trim (:out one)))))
+        (is (zero? (:exit two)) (:err two))
+        (is (= "[{:name \"Host\" :value \"ex.com\"} {:name \"Accept\" :value \"*/*\"}]"
+               (read-string (str/trim (:out two)))))
+        (is (zero? (:exit req)) (:err req))
+        (is (= "{:url \"https://x\" :headers [] :body \"{}\" :timeout-ms 30}"
+               (read-string (str/trim (:out req)))))
+        (is (zero? (:exit bad)) (:err bad))
+        (is (= "" (read-string (str/trim (:out bad))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
   (is (= :string-expression-package
