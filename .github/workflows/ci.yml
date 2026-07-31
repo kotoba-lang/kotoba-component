@@ -29,7 +29,12 @@ jobs:
           curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v42.0.1/wasmtime-v42.0.1-x86_64-linux.tar.xz \
             | tar -xJ -C "$HOME/.wasm-bin" --strip-components=1 --wildcards '*/wasmtime'
           echo "$HOME/.wasm-bin" >> "$GITHUB_PATH"
-      - run: wasm-tools --version && wasmtime --version
+      # Component composition tool, pinned to the same 0.10.1 that
+      # kotoba-lang/compiler's own workflow installs. The provider-composition
+      # tests shell out to it.
+      - name: Install pinned Component composition tool
+        run: cargo install --locked --version 0.10.1 wac-cli
+      - run: wasm-tools --version && wasmtime --version && wac --version
       - run: clojure -M:test
 
   # This repo's own suite passing is not enough: it is a library, and
