@@ -1852,6 +1852,169 @@
     (is (= :http-edn-reject-package (:canonical-lowering packaged)))
     (is (pos? (alength ^bytes (:bytes packaged))))))
 
+(def http-edn-reject-package-wrapper-kir
+  "Multi-file monomorph shape: exports are thin wrappers to private helpers
+  that hold the admission skeleton bodies (project/link-source style)."
+  {:format :kotoba.kir/v4
+   :exports ['headers_edn_empty 'headers_edn_append 'headers_names_add
+             'http_request_edn 'http_result_ok_edn 'http_result_err_edn]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'priv_empty :params [] :param-types [] :result :string :effects #{}
+     :body "[]"}
+    {:name 'priv_append
+     :params ['acc 'name 'value] :param-types [:string :string :string]
+     :result :string :effects #{}
+     :body '(if (string=? acc "[]")
+              (string-concat "[" (string-concat name (string-concat value "]")))
+              (string-concat acc (string-concat " " (string-concat name value))))}
+    {:name 'priv_names
+     :params ['acc 'name] :param-types [:string :string]
+     :result :string :effects #{}
+     :body '(if (= (string-byte-length acc) 0)
+              ""
+              (if (string=? acc "[]")
+                (string-concat "[" (string-concat "\"" (string-concat name "\"]")))
+                (string-concat acc (string-concat " " (string-concat "\"" (string-concat name "\"]"))))))}
+    {:name 'priv_req
+     :params ['url 'headers 'body 'timeout]
+     :param-types [:string :string :string :i64]
+     :result :string :effects #{}
+     :body '(if (< timeout 0) ""
+              (string-concat url (string-concat headers (string-concat body "[]"))))}
+    {:name 'priv_ok
+     :params ['status 'headers 'body]
+     :param-types [:i64 :string :string]
+     :result :string :effects #{}
+     :body '(if (or (< status 0) (> status 999)) ""
+              (string-concat headers (string-concat body "ok")))}
+    {:name 'priv_err
+     :params ['code 'retryable] :param-types [:string :i64]
+     :result :string :effects #{}
+     :body '(if (= retryable 0) (string-concat code "error")
+              (if (= retryable 1) (string-concat code "error") ""))}
+    {:name 'headers_edn_empty :params [] :param-types [] :result :string :effects #{}
+     :body '(priv_empty)}
+    {:name 'headers_edn_append
+     :params ['acc 'name 'value] :param-types [:string :string :string]
+     :result :string :effects #{}
+     :body '(priv_append acc name value)}
+    {:name 'headers_names_add
+     :params ['acc 'name] :param-types [:string :string]
+     :result :string :effects #{}
+     :body '(priv_names acc name)}
+    {:name 'http_request_edn
+     :params ['url 'headers 'body 'timeout]
+     :param-types [:string :string :string :i64]
+     :result :string :effects #{}
+     :body '(priv_req url headers body timeout)}
+    {:name 'http_result_ok_edn
+     :params ['status 'headers 'body]
+     :param-types [:i64 :string :string]
+     :result :string :effects #{}
+     :body '(priv_ok status headers body)}
+    {:name 'http_result_err_edn
+     :params ['code 'retryable] :param-types [:string :i64]
+     :result :string :effects #{}
+     :body '(priv_err code retryable)}]})
+
+
+(def http-edn-reject-package-monomorph-forwards-kir
+  "Root exports are pure forwards to private helpers (link-source monomorph shape)."
+  {:format :kotoba.kir/v4
+   :exports ['headers_edn_empty 'headers_edn_append 'headers_names_add
+             'http_request_edn 'http_result_ok_edn 'http_result_err_edn]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'kotoba_module__h_empty :params [] :param-types [] :result :string :effects #{} :body "[]"}
+    {:name 'kotoba_module__h_append
+     :params ['acc 'name 'value] :param-types [:string :string :string] :result :string :effects #{}
+     :body '(if (string=? acc "[]")
+              (string-concat "[" (string-concat name (string-concat value "]")))
+              (string-concat acc (string-concat " " (string-concat name value))))}
+    {:name 'kotoba_module__h_names
+     :params ['acc 'name] :param-types [:string :string] :result :string :effects #{}
+     :body '(if (= (string-byte-length acc) 0) ""
+              (if (= (string-byte-length name) 0) ""
+                (if (string=? acc "[]")
+                  (string-concat "[" (string-concat "\"" (string-concat name "\"]")))
+                  (string-concat acc (string-concat " " (string-concat "\"" (string-concat name "\"]")))))))}
+    {:name 'kotoba_module__req
+     :params ['url 'headers 'body 'timeout] :param-types [:string :string :string :i64] :result :string :effects #{}
+     :body '(if (< timeout 0) "" (string-concat url (string-concat headers (string-concat body "[]"))))}
+    {:name 'kotoba_module__ok
+     :params ['status 'headers 'body] :param-types [:i64 :string :string] :result :string :effects #{}
+     :body '(if (or (< status 0) (> status 999)) "" (string-concat headers (string-concat body "ok")))}
+    {:name 'kotoba_module__err
+     :params ['code 'retryable] :param-types [:string :i64] :result :string :effects #{}
+     :body '(if (= retryable 0) (string-concat code "error")
+              (if (= retryable 1) (string-concat code "error") ""))}
+    {:name 'headers_edn_empty :params [] :param-types [] :result :string :effects #{}
+     :body '(kotoba_module__h_empty)}
+    {:name 'headers_edn_append :params ['acc 'name 'value] :param-types [:string :string :string] :result :string :effects #{}
+     :body '(kotoba_module__h_append acc name value)}
+    {:name 'headers_names_add :params ['acc 'name] :param-types [:string :string] :result :string :effects #{}
+     :body '(kotoba_module__h_names acc name)}
+    {:name 'http_request_edn :params ['url 'headers 'body 'timeout] :param-types [:string :string :string :i64] :result :string :effects #{}
+     :body '(kotoba_module__req url headers body timeout)}
+    {:name 'http_result_ok_edn :params ['status 'headers 'body] :param-types [:i64 :string :string] :result :string :effects #{}
+     :body '(kotoba_module__ok status headers body)}
+    {:name 'http_result_err_edn :params ['code 'retryable] :param-types [:string :i64] :result :string :effects #{}
+     :body '(kotoba_module__err code retryable)}]})
+
+(deftest http-edn-reject-package-peels-monomorph-forwards
+  "T8.3 multi-file monomorph: pure export forwards peel to helper bodies."
+  (is (= :http-edn-reject-package
+         (core/assert-supported! http-edn-reject-package-monomorph-forwards-kir)))
+  (let [world (wit/emit http-edn-reject-package-monomorph-forwards-kir)
+        core-bytes (core/emit http-edn-reject-package-monomorph-forwards-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-edn-reject-package-monomorph-forwards-kir world)
+        path (Files/createTempFile "kc-edn-reject-fwd-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-edn-reject-package (:canonical-lowering packaged)))
+      (let [empty (shell/sh "wasmtime" "run" "--invoke" "headers-edn-empty()" (str path))]
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "[]" (read-string (str/trim (:out empty))))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest http-edn-reject-package-peels-monomorph-wrappers
+  "T8.3 multi-file monomorph: peel export wrappers to private admission bodies."
+  (is (= :http-edn-reject-package
+         (core/assert-supported! http-edn-reject-package-wrapper-kir)))
+  (let [world (wit/emit http-edn-reject-package-wrapper-kir)
+        core-bytes (core/emit http-edn-reject-package-wrapper-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-edn-reject-package-wrapper-kir world)
+        path (Files/createTempFile "kc-reject-wrap-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-edn-reject-package (:canonical-lowering packaged)))
+      (let [empty (shell/sh "wasmtime" "run" "--invoke" "headers-edn-empty()"
+                            (str path))
+            one (shell/sh "wasmtime" "run" "--invoke"
+                          "headers-edn-append(\"[]\",\"Host\",\"ex.com\")"
+                          (str path))
+            dup (shell/sh "wasmtime" "run" "--invoke"
+                          (str "headers-edn-append("
+                               "\"[{:name \\\"Host\\\" :value \\\"ex.com\\\"}]\","
+                               "\"Host\",\"x\")")
+                          (str path))]
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "[]" (read-string (str/trim (:out empty)))))
+        (is (zero? (:exit one)) (:err one))
+        (is (= "[{:name \"Host\" :value \"ex.com\"}]"
+               (read-string (str/trim (:out one)))))
+        (is (zero? (:exit dup)) (:err dup))
+        (is (= "" (read-string (str/trim (:out dup))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest http-edn-reject-package-multi-export
   "T8.3 multi-export reject kit: empty + append + names-add + request + result arms."
   (is (= :http-edn-reject-package (core/assert-supported! http-edn-reject-package-kir)))

@@ -537,6 +537,23 @@
     (edn-quoted-function? function) :edn-quoted
     :else nil))
 
+(defn- peel-reject-export-forward
+  "Multi-file monomorph wraps each root export as a pure forward to a private
+  helper `(helper p0 p1 …)`. For role classification, peel one level so the
+  admission-skeleton body is visible while keeping the export name."
+  [function functions]
+  (let [body (:body function)
+        params (vec (:params function))
+        by-name (into {} (map (juxt :name identity) functions))]
+    (if (and (seq? body)
+             (symbol? (first body))
+             (= (vec (rest body)) params)
+             (not= (first body) (:name function)))
+      (if-let [helper (get by-name (first body))]
+        (assoc function :body (:body helper))
+        function)
+      function)))
+
 (defn- http-edn-reject-package?
   "Multi-export reject-path EDN kit body (T8.3): ≥3 pure exports, each a known
   reject-path role, shared memory. Must include headers empty + append + at
@@ -544,13 +561,12 @@
   result arms, header-edn, edn-quoted.
 
   Private helpers are allowed (T8.3 multi-file monomorph / multi-ns project
-  kit body). WAT owns scans for exports; non-export functions are ignored for
-  role classification. Every export must still classify uniquely."
+  kit body). One-level pure forwards to private helpers are peeled for role
+  classification. WAT owns scans for exports."
   [exports functions]
   (and (>= (count exports) 3)
-       ;; exports are function maps from exported-functions. Multi-file
-       ;; monomorph may leave private helpers in `functions` beyond exports.
-       (let [roles (mapv classify-edn-reject-export exports)]
+       (let [peeled (mapv #(peel-reject-export-forward % functions) exports)
+             roles (mapv classify-edn-reject-export peeled)]
          (and (every? some? roles)
               (some #{:headers-edn-empty} roles)
               (some #{:headers-edn-append} roles)
@@ -8023,11 +8039,15 @@
   result-ok, result-err. Shared realloc / has-forbidden / write-u64 / shape /
   has-name-field (map element-bound) / has-name-element (list). W4 recursive
   nested EDN still open; no kotoba:typed."
-  [exports]
+  [exports functions]
   (let [pages wasm/component-memory-pages
         capacity wasm/component-arena-capacity
         max-bytes value/string-value-byte-limit
-        roles (mapv (fn [f] [(classify-edn-reject-export f) f]) exports)
+        ;; Peel monomorph thin forwards so role classification sees skeletons.
+        roles (mapv (fn [f]
+                      (let [peeled (peel-reject-export-forward f functions)]
+                        [(classify-edn-reject-export peeled) f]))
+                    exports)
         by-role (into {} (map (fn [[r f]] [r f]) roles))
         ;; literal layout from offset 8
         empty-ptr 8 empty-len 2
@@ -13188,7 +13208,7 @@
      (http-request-edn-wat (first (exported-functions kir))))
     :http-edn-reject-package
     (wasm-tools/parse-wat
-     (http-edn-reject-package-wat (exported-functions kir)))
+     (http-edn-reject-package-wat (exported-functions kir) (:functions kir)))
     :string-length
     (wasm-tools/parse-wat
      (string-length-wat (first (exported-functions kir))))
