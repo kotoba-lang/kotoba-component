@@ -99,15 +99,16 @@
 (defn- https-url-ok-function?
   "Composition for http_url_ok (ADR 0182) without kotoba:typed.
 
-  Recognizes the nested if/let tree (or pure nested if) over string-length,
-  string-substring, and string=? that validates HTTPS URL policy:
+  Recognizes nested if over string-length/byte-length, string-substring, and
+  string=? that validates HTTPS URL policy:
     empty → -1, >4096 → -2, <8 or not https:// → -3, else 0.
 
   Accepted body shapes (params = [url :string], result :i64):
-    (if (<= (string-length url) 0) -1
-      (if (> (string-length url) 4096) -2
-        (if (< (string-length url) 8) -3
-          (if (string=? (string-substring url 0 8) \"https://\") 0 -3))))"
+  1. pure nested if (length re-evaluated each test)
+  2. frontend let-form:
+       (let [n (string-byte-length url)]
+         (if (<= n 0) -1 (if (> n 4096) -2 (if (< n 8) -3
+           (if (string=? (string-substring url 0 8) \"https://\") 0 -3)))))"
   [{:keys [params param-types result body]}]
   (let [url (first params)
         https-check?
@@ -133,48 +134,66 @@
         (fn [form]
           (and (seq? form)
                (= 'if (first form))
-               (= 4 (count form))))]
+               (= 4 (count form))))
+        policy-if-tree?
+        (fn [tree len-expr]
+          ;; tree is nested if; len-expr is either a len-of? form or a symbol
+          ;; bound to (string-*-length url).
+          (and (if4? tree)
+               (let [c1 (nth tree 1)
+                     t1 (nth tree 2)
+                     e1 (nth tree 3)]
+                 (and (= -1 t1)
+                      (seq? c1)
+                      (contains? #{'<= '<} (first c1))
+                      (= len-expr (nth c1 1))
+                      (#{0 1} (nth c1 2))
+                      (if4? e1)
+                      (let [c2 (nth e1 1)
+                            t2 (nth e1 2)
+                            e2 (nth e1 3)]
+                        (and (= -2 t2)
+                             (seq? c2)
+                             (contains? #{'> '>=} (first c2))
+                             (= len-expr (nth c2 1))
+                             (#{4096 4097} (nth c2 2))
+                             (if4? e2)
+                             (let [c3 (nth e2 1)
+                                   t3 (nth e2 2)
+                                   e3 (nth e2 3)]
+                               (and (= -3 t3)
+                                    (seq? c3)
+                                    (contains? #{'< '<=} (first c3))
+                                    (= len-expr (nth c3 1))
+                                    (#{7 8} (nth c3 2))
+                                    (if4? e3)
+                                    (let [c4 (nth e3 1)
+                                          t4 (nth e3 2)
+                                          e4 (nth e3 3)]
+                                      (and (= 0 t4)
+                                           (= -3 e4)
+                                           (https-check? c4)))))))))))]
     (and (= 1 (count params))
          (= [:string] param-types)
          (= :i64 result)
-         (if4? body)
-         ;; (if (<= (string-length url) 0) -1 <rest>)
-         (let [c1 (nth body 1)
-               t1 (nth body 2)
-               e1 (nth body 3)]
-           (and (= -1 t1)
-                (seq? c1)
-                (contains? #{'<= '<} (first c1))
-                (len-of? (nth c1 1))
-                (#{0 1} (nth c1 2))
-                (if4? e1)
-                ;; (if (> (string-length url) 4096) -2 <rest>)
-                (let [c2 (nth e1 1)
-                      t2 (nth e1 2)
-                      e2 (nth e1 3)]
-                  (and (= -2 t2)
-                       (seq? c2)
-                       (contains? #{'> '>=} (first c2))
-                       (len-of? (nth c2 1))
-                       (#{4096 4097} (nth c2 2))
-                       (if4? e2)
-                       ;; (if (< (string-length url) 8) -3 <rest>)
-                       (let [c3 (nth e2 1)
-                             t3 (nth e2 2)
-                             e3 (nth e2 3)]
-                         (and (= -3 t3)
-                              (seq? c3)
-                              (contains? #{'< '<=} (first c3))
-                              (len-of? (nth c3 1))
-                              (#{7 8} (nth c3 2))
-                              (if4? e3)
-                              ;; (if (string=? (string-substring url 0 8) "https://") 0 -3)
-                              (let [c4 (nth e3 1)
-                                    t4 (nth e3 2)
-                                    e4 (nth e3 3)]
-                                (and (= 0 t4)
-                                     (= -3 e4)
-                                     (https-check? c4))))))))))))
+         (cond
+           ;; pure nested if: re-evaluate (string-*-length url) each time
+           (if4? body)
+           (and (seq? (nth body 1))
+                (len-of? (nth (nth body 1) 1))
+                (policy-if-tree? body (nth (nth body 1) 1)))
+
+           ;; let [n (string-*-length url)] <if-tree using n>
+           (and (seq? body) (= 'let (first body)) (= 3 (count body)))
+           (let [bindings (nth body 1)
+                 tree (nth body 2)]
+             (and (vector? bindings)
+                  (= 2 (count bindings))
+                  (symbol? (nth bindings 0))
+                  (len-of? (nth bindings 1))
+                  (policy-if-tree? tree (nth bindings 0))))
+
+           :else false))))
 
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
@@ -2598,10 +2617,18 @@
                                 exports)})))))
 
 (defn- wit-name [symbol]
-  (let [value (name symbol)]
-    (when-not (re-matches #"[a-z][a-z0-9-]*" value)
+  "Canonical WIT identifier for string-component exports (matches wit.clj).
+
+  Underscores and other non-[a-z0-9-] runes become hyphens so source names
+  like `http_url_ok` package as `http-url-ok`."
+  (let [source (name symbol)
+        result (-> source str/lower-case
+                   (str/replace #"[^a-z0-9-]+" "-")
+                   (str/replace #"-+" "-")
+                   (str/replace #"(^-|-$)" ""))]
+    (when (or (empty? result) (not (re-matches #"[a-z][a-z0-9-]*" result)))
       (reject "string component export has no direct WIT name" {:name symbol}))
-    value))
+    result))
 
 (defn- align-up [value alignment]
   (* alignment (quot (+ value (dec alignment)) alignment)))
