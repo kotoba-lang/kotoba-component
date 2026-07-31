@@ -412,7 +412,7 @@
   Params: [status :i64, headers-n :i64, body :string] Result: :i64
   Codes: -1 status∉[100,599], -2 headers-n∉[0,32], -3 body>65536, 0 ok.
 
-  Fixed nested-if skeleton (no `or`)."
+  Admits fixed nested-if skeleton and frontend let+or desugar."
   [{:keys [params param-types result body]}]
   (and (= 3 (count params))
        (= 3 (count param-types))
@@ -422,40 +422,132 @@
        (let [status (nth params 0)
              headers (nth params 1)
              body-p (nth params 2)
-             if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))
+             if4? (fn [form]
+                    (and (seq? form) (= 'if (first form)) (= 4 (count form))))
              len-of? (fn [form]
                        (and (seq? form)
                             (contains? #{'string-length 'string-byte-length} (first form))
                             (= 2 (count form))
-                            (= body-p (second form))))]
-         (and (if4? body)
-              ;; (if (< status 100) -1 ...)
-              (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
-                (and (= -1 t1)
-                     (seq? c1) (contains? #{'< '<=} (first c1)) (= status (nth c1 1))
-                     (#{100 99} (nth c1 2))
-                     (if4? e1)
+                            (= body-p (second form))))
+             pure-if-skeleton?
+             (fn []
+               (when (if4? body)
+                 (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
+                   (when (and (= -1 t1)
+                              (seq? c1) (contains? #{'< '<=} (first c1))
+                              (= status (nth c1 1)) (#{100 99} (nth c1 2))
+                              (if4? e1))
                      (let [c2 (nth e1 1) t2 (nth e1 2) e2 (nth e1 3)]
-                       (and (= -1 t2)
-                            (seq? c2) (contains? #{'> '>=} (first c2)) (= status (nth c2 1))
-                            (#{599 600} (nth c2 2))
-                            (if4? e2)
-                            (let [c3 (nth e2 1) t3 (nth e2 2) e3 (nth e2 3)]
-                              (and (= -2 t3)
-                                   (seq? c3) (contains? #{'< '<=} (first c3)) (= headers (nth c3 1))
-                                   (if4? e3)
-                                   (let [c4 (nth e3 1) t4 (nth e3 2) e4 (nth e3 3)]
-                                     (and (= -2 t4)
-                                          (seq? c4) (contains? #{'> '>=} (first c4)) (= headers (nth c4 1))
-                                          (#{32 33} (nth c4 2))
-                                          (if4? e4)
-                                          (let [c5 (nth e4 1) t5 (nth e4 2) e5 (nth e4 3)]
-                                            (and (= -3 t5)
-                                                 (seq? c5) (contains? #{'> '>=} (first c5))
-                                                 (len-of? (nth c5 1))
-                                                 (#{65536 65537} (nth c5 2))
-                                                 (number? e5)
-                                                 (zero? e5)))))))))))))))
+                       (when (and (= -1 t2)
+                                  (seq? c2) (contains? #{'> '>=} (first c2))
+                                  (= status (nth c2 1)) (#{599 600} (nth c2 2))
+                                  (if4? e2))
+                         (let [c3 (nth e2 1) t3 (nth e2 2) e3 (nth e2 3)]
+                           (when (and (= -2 t3)
+                                      (seq? c3) (contains? #{'< '<=} (first c3))
+                                      (= headers (nth c3 1))
+                                      (if4? e3))
+                             (let [c4 (nth e3 1) t4 (nth e3 2) e4 (nth e3 3)]
+                               (when (and (= -2 t4)
+                                          (seq? c4) (contains? #{'> '>=} (first c4))
+                                          (= headers (nth c4 1)) (#{32 33} (nth c4 2))
+                                          (if4? e4))
+                                 (let [c5 (nth e4 1) t5 (nth e4 2) e5 (nth e4 3)]
+                                   (and (= -3 t5)
+                                        (seq? c5) (contains? #{'> '>=} (first c5))
+                                        (len-of? (nth c5 1))
+                                        (#{65536 65537} (nth c5 2))
+                                        (number? e5)
+                                        (zero? e5)))))))))))))
+             frontend-let-or?
+             (fn []
+               (and (= 'let (first body))
+                    (= 3 (count body))
+                    (vector? (nth body 1))
+                    (form-tree-walk body len-of?)
+                    (form-tree-walk body #(= % -1))
+                    (form-tree-walk body #(= % -2))
+                    (form-tree-walk body #(= % -3))
+                    (form-tree-walk body #(and (number? %) (zero? %)))
+                    (form-tree-walk body #(and (seq? %) (#{'< '<=} (first %))
+                                               (= status (nth % 1))))
+                    (form-tree-walk body #(and (seq? %) (#{'> '>=} (first %))
+                                               (= status (nth % 1))))
+                    (form-tree-walk body #(and (seq? %) (#{'< '<=} (first %))
+                                               (= headers (nth % 1))))
+                    (form-tree-walk body #(and (seq? %) (#{'> '>=} (first %))
+                                               (= headers (nth % 1))))))]
+         (boolean (or (pure-if-skeleton?) (frontend-let-or?))))))
+
+(defn- http-status-ok-function?
+  "Composition for http_status_ok (ADR 0190): status ∈ [100,599] → 0 else -1.
+
+  Admits pure nested-if and frontend or/let-or desugar."
+  [{:keys [params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [status (first params)
+             if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))
+             lo? (fn [form]
+                   (and (seq? form) (contains? #{'< '<=} (first form))
+                        (= status (nth form 1)) (#{100 99} (nth form 2))))
+             hi? (fn [form]
+                   (and (seq? form) (contains? #{'> '>=} (first form))
+                        (= status (nth form 1)) (#{599 600} (nth form 2))))]
+         (or
+          (and (if4? body)
+               (= -1 (nth body 2))
+               (lo? (nth body 1))
+               (let [e (nth body 3)]
+                 (and (if4? e)
+                      (= -1 (nth e 2))
+                      (hi? (nth e 1))
+                      (number? (nth e 3))
+                      (zero? (nth e 3)))))
+          (and (form-tree-walk body lo?)
+               (form-tree-walk body hi?)
+               (form-tree-walk body #(= % -1))
+               (form-tree-walk body #(and (number? %) (zero? %))))))))
+
+(defn- live-main-named-policies?
+  "main [] :i64 with let bindings calling named policies (lit args) + pure i64 arith.
+
+  policy-arities: map of policy-symbol → arity (arg count)."
+  [main-fn policy-arities]
+  (and (= 'main (:name main-fn))
+       (empty? (:params main-fn))
+       (= :i64 (:result main-fn))
+       (seq? (:body main-fn))
+       (= 'let (first (:body main-fn)))
+       (= 3 (count (:body main-fn)))
+       (let [bindings (nth (:body main-fn) 1)
+             expr (nth (:body main-fn) 2)]
+         (and (vector? bindings)
+              (even? (count bindings))
+              (let [pairs (partition 2 bindings)
+                    names (mapv first pairs)
+                    vals (mapv second pairs)]
+                (and (every? symbol? names)
+                     (every? (fn [v]
+                               (and (seq? v)
+                                    (contains? policy-arities (first v))
+                                    (policy-call-args-ok?
+                                     v (first v) (get policy-arities (first v)))))
+                             vals)
+                     (pure-i64-arith? expr (set names))))))))
+
+(defn- http-response-package-with-main?
+  "Three-export module: status_ok + response_ok + live main (provider shape → -1012)."
+  [exports]
+  (let [status (first (filter http-status-ok-function? exports))
+        response (first (filter http-response-ok-function? exports))
+        main (first (filter #(= 'main (:name %)) exports))]
+    (and status response main
+         (= 3 (count exports))
+         (live-main-named-policies?
+          main {(:name status) 1 (:name response) 3}))))
 
 (defn- http-error-ok-function?
   "Composition for http_error_ok (ADR 0191) without kotoba:typed.
@@ -2862,11 +2954,15 @@
       (and (every? scalar-function? exports)
            (some? (scalar-capability-imports kir)))
       :scalar-with-capabilities
-      ;; Prefer specialized HTTP arm tag before generic :scalar (same ABI).
+      ;; Prefer specialized HTTP pure-i64 policies before generic :scalar.
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (http-result-arm-ok-function? (first exports))
            (empty? (:effects kir))) :http-result-arm-ok
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
+           (http-status-ok-function? (first exports))
+           (empty? (:effects kir))) :http-status-ok
       (every? scalar-function? exports) :scalar
       match-module :structural-union-match-module
       (and (= 1 (count (:functions kir)))
@@ -2901,6 +2997,10 @@
            (= 1 (count exports))
            (http-post-request-ok-function? (first exports))
            (empty? (:effects kir))) :http-post-request-ok
+      (and (= 3 (count (:functions kir)))
+           (= 3 (count exports))
+           (http-response-package-with-main? exports)
+           (empty? (:effects kir))) :http-response-package-with-main
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (http-response-ok-function? (first exports))
@@ -3574,7 +3674,8 @@
 (defn- http-response-ok-wat
   "Composition: http_response_ok (ADR 0190) without kotoba:typed.
 
-  Params: status i64, headers-n i64, body (ptr,len). Codes -1/-2/-3/0."
+  Params: status i64, headers-n i64, body (ptr,len). Codes -1/-2/-3/0.
+  Single-export form (no live main)."
   [function]
   (let [export (wit-name (:name function))
         pages wasm/component-memory-pages
@@ -3609,13 +3710,10 @@
      " (param $status i64) (param $headers-n i64)"
      " (param $body-ptr i32) (param $body-len i32) (result i64)\n"
      "    (local $end i32)\n"
-     "    ;; status ∈ [100,599]\n"
      "    local.get $status i64.const 100 i64.lt_s if i64.const -1 return end\n"
      "    local.get $status i64.const 599 i64.gt_s if i64.const -1 return end\n"
-     "    ;; headers-n ∈ [0,32]\n"
      "    local.get $headers-n i64.const 0 i64.lt_s if i64.const -2 return end\n"
      "    local.get $headers-n i64.const 32 i64.gt_s if i64.const -2 return end\n"
-     "    ;; body length ≤ 65536 + validate range\n"
      "    local.get $body-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
      "    local.get $body-len i32.eqz if else\n"
      "      local.get $body-ptr i32.const 8 i32.lt_u if unreachable end\n"
@@ -3626,6 +3724,163 @@
      "    local.get $body-len i32.const 65536 i32.gt_u if i64.const -3 return end\n"
      "    i64.const 0)\n"
      "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- http-status-ok-wat
+  "Composition: http_status_ok — status ∈ [100,599]."
+  [function]
+  (let [export (wit-name (:name function))]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    i32.const 0)\n"
+     "  (func (export \"cm32p2||" export "\") (param $status i64) (result i64)\n"
+     "    local.get $status i64.const 100 i64.lt_s if i64.const -1 return end\n"
+     "    local.get $status i64.const 599 i64.gt_s if i64.const -1 return end\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     ")\n")))
+
+(defn- http-response-package-wat
+  "Three-export provider package: status_ok + response_ok + live main → -1012.
+
+  status-fn / response-fn / main-fn are KIR function maps."
+  [status-fn response-fn main-fn]
+  (let [status-export (wit-name (:name status-fn))
+        response-export (wit-name (:name response-fn))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        main-string-lits
+        (let [vals (mapv second (partition 2 (nth (:body main-fn) 1)))
+              strs (mapcat (fn [call] (filter string? (rest call))) vals)]
+          (vec (distinct strs)))
+        prepared-strs
+        (loop [remaining main-string-lits
+               offset 8
+               acc []]
+          (if-let [s (first remaining)]
+            (let [b (.getBytes ^String s StandardCharsets/UTF_8)
+                  len (alength b)]
+              (if (zero? len)
+                (recur (next remaining) offset
+                       (conj acc {:value s :bytes [] :length 0 :pointer 0}))
+                (recur (next remaining)
+                       (+ offset len)
+                       (conj acc {:value s :bytes (vec b) :length len :pointer offset}))))
+            acc))
+        non-empty (filterv #(pos? (:length %)) prepared-strs)
+        arena-base (align-up (if (seq non-empty)
+                               (+ (:pointer (last non-empty))
+                                  (:length (last non-empty)))
+                               8)
+                             8)
+        str-ptr (into {} (map (juxt :value :pointer) prepared-strs))
+        str-len (into {} (map (juxt :value :length) prepared-strs))
+        main-data
+        (apply str
+               (map (fn [leaf]
+                      (str "  (data (i32.const " (:pointer leaf) ") \""
+                           (wat-data (:bytes leaf)) "\")\n"))
+                    non-empty))
+        main-locals
+        (let [names (mapv first (partition 2 (nth (:body main-fn) 1)))]
+          (apply str (map #(str " (local $" (name %) " i64)") names)))
+        status-name (:name status-fn)
+        response-name (:name response-fn)
+        push-arg
+        (fn [arg]
+          (cond
+            (string? arg)
+            (str "    i32.const " (get str-ptr arg)
+                 " i32.const " (get str-len arg) "\n")
+            (integer? arg)
+            (str "    i64.const " arg "\n")
+            :else (reject "unsupported live-main arg" {:arg arg})))
+        main-calls
+        (let [pairs (partition 2 (nth (:body main-fn) 1))]
+          (apply str
+                 (map (fn [[sym call]]
+                        (let [pname (first call)
+                              internal (cond
+                                         (= pname status-name) "$status"
+                                         (= pname response-name) "$response"
+                                         :else (reject "unknown policy in main"
+                                                       {:name pname}))]
+                          (str (apply str (map push-arg (rest call)))
+                               "    call " internal
+                               " local.set $" (name sym) "\n")))
+                      pairs)))
+        main-expr (nth (:body main-fn) 2)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     main-data
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $status (param $status i64) (result i64)\n"
+     "    local.get $status i64.const 100 i64.lt_s if i64.const -1 return end\n"
+     "    local.get $status i64.const 599 i64.gt_s if i64.const -1 return end\n"
+     "    i64.const 0)\n"
+     "  (func $response"
+     " (param $status i64) (param $headers-n i64)"
+     " (param $body-ptr i32) (param $body-len i32) (result i64)\n"
+     "    (local $end i32)\n"
+     "    local.get $status i64.const 100 i64.lt_s if i64.const -1 return end\n"
+     "    local.get $status i64.const 599 i64.gt_s if i64.const -1 return end\n"
+     "    local.get $headers-n i64.const 0 i64.lt_s if i64.const -2 return end\n"
+     "    local.get $headers-n i64.const 32 i64.gt_s if i64.const -2 return end\n"
+     "    local.get $body-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $body-len i32.eqz if else\n"
+     "      local.get $body-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $body-ptr local.get $body-len i32.add local.tee $end\n"
+     "    local.get $body-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $body-len i32.const 65536 i32.gt_u if i64.const -3 return end\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" status-export "\")"
+     " (param $status i64) (result i64)\n"
+     "    local.get $status call $status)\n"
+     "  (func (export \"cm32p2||" status-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" response-export "\")"
+     " (param $status i64) (param $headers-n i64)"
+     " (param $body-ptr i32) (param $body-len i32) (result i64)\n"
+     "    local.get $status local.get $headers-n\n"
+     "    local.get $body-ptr local.get $body-len call $response)\n"
+     "  (func (export \"cm32p2||" response-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||main\") (result i64)\n"
+     "    " main-locals "\n"
+     main-calls
+     "    " (emit-i64-arith-wat main-expr) ")\n"
+     "  (func (export \"cm32p2||main_post\") (param i64)\n"
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
@@ -8396,6 +8651,15 @@
     :http-response-ok
     (wasm-tools/parse-wat
      (http-response-ok-wat (first (exported-functions kir))))
+    :http-status-ok
+    (wasm-tools/parse-wat
+     (http-status-ok-wat (first (exported-functions kir))))
+    :http-response-package-with-main
+    (let [exports (exported-functions kir)
+          status (first (filter http-status-ok-function? exports))
+          response (first (filter http-response-ok-function? exports))
+          main (first (filter #(= 'main (:name %)) exports))]
+      (wasm-tools/parse-wat (http-response-package-wat status response main)))
     :http-error-ok
     (wasm-tools/parse-wat
      (http-error-ok-wat (first (exported-functions kir))))
