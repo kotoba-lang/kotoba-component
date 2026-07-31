@@ -13,6 +13,23 @@ jobs:
       - uses: DeLaGuardo/setup-clojure@13.4
         with:
           cli: latest
+      # The suite shells out to the pinned official tooling for the real encode
+      # and execute checks (provider packaging, wasmtime clock-sequence
+      # advance). Without them those tests ERROR rather than fail -- which is
+      # how the first run on this branch looked. They had only ever passed
+      # because the developer machine happened to have both on PATH.
+      # wasm-tools is version-pinned by kotoba.wasm.tools/version (1.243.0),
+      # which kotoba.component.artifact asserts at runtime.
+      - name: Install pinned wasm-tools and wasmtime
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.wasm-bin"
+          curl -sSfL https://github.com/bytecodealliance/wasm-tools/releases/download/v1.243.0/wasm-tools-1.243.0-x86_64-linux.tar.gz \
+            | tar -xz -C "$HOME/.wasm-bin" --strip-components=1 --wildcards '*/wasm-tools'
+          curl -sSfL https://github.com/bytecodealliance/wasmtime/releases/download/v42.0.1/wasmtime-v42.0.1-x86_64-linux.tar.xz \
+            | tar -xJ -C "$HOME/.wasm-bin" --strip-components=1 --wildcards '*/wasmtime'
+          echo "$HOME/.wasm-bin" >> "$GITHUB_PATH"
+      - run: wasm-tools --version && wasmtime --version
       - run: clojure -M:test
 
   # This repo's own suite passing is not enough: it is a library, and
