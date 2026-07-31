@@ -96,6 +96,86 @@
        (= (nth params 1) (nth body 2))
        (= (nth params 2) (nth body 3))))
 
+(defn- https-url-ok-function?
+  "Composition for http_url_ok (ADR 0182) without kotoba:typed.
+
+  Recognizes the nested if/let tree (or pure nested if) over string-length,
+  string-substring, and string=? that validates HTTPS URL policy:
+    empty → -1, >4096 → -2, <8 or not https:// → -3, else 0.
+
+  Accepted body shapes (params = [url :string], result :i64):
+    (if (<= (string-length url) 0) -1
+      (if (> (string-length url) 4096) -2
+        (if (< (string-length url) 8) -3
+          (if (string=? (string-substring url 0 8) \"https://\") 0 -3))))"
+  [{:keys [params param-types result body]}]
+  (let [url (first params)
+        https-check?
+        (fn [form]
+          (and (seq? form)
+               (= 'string=? (first form))
+               (= 3 (count form))
+               (= "https://" (nth form 2))
+               (let [sub (nth form 1)]
+                 (and (seq? sub)
+                      (= 'string-substring (first sub))
+                      (= 4 (count sub))
+                      (= url (nth sub 1))
+                      (= 0 (nth sub 2))
+                      (= 8 (nth sub 3))))))
+        len-of?
+        (fn [form]
+          (and (seq? form)
+               (contains? #{'string-length 'string-byte-length} (first form))
+               (= 2 (count form))
+               (= url (second form))))
+        if4?
+        (fn [form]
+          (and (seq? form)
+               (= 'if (first form))
+               (= 4 (count form))))]
+    (and (= 1 (count params))
+         (= [:string] param-types)
+         (= :i64 result)
+         (if4? body)
+         ;; (if (<= (string-length url) 0) -1 <rest>)
+         (let [c1 (nth body 1)
+               t1 (nth body 2)
+               e1 (nth body 3)]
+           (and (= -1 t1)
+                (seq? c1)
+                (contains? #{'<= '<} (first c1))
+                (len-of? (nth c1 1))
+                (#{0 1} (nth c1 2))
+                (if4? e1)
+                ;; (if (> (string-length url) 4096) -2 <rest>)
+                (let [c2 (nth e1 1)
+                      t2 (nth e1 2)
+                      e2 (nth e1 3)]
+                  (and (= -2 t2)
+                       (seq? c2)
+                       (contains? #{'> '>=} (first c2))
+                       (len-of? (nth c2 1))
+                       (#{4096 4097} (nth c2 2))
+                       (if4? e2)
+                       ;; (if (< (string-length url) 8) -3 <rest>)
+                       (let [c3 (nth e2 1)
+                             t3 (nth e2 2)
+                             e3 (nth e2 3)]
+                         (and (= -3 t3)
+                              (seq? c3)
+                              (contains? #{'< '<=} (first c3))
+                              (len-of? (nth c3 1))
+                              (#{7 8} (nth c3 2))
+                              (if4? e3)
+                              ;; (if (string=? (string-substring url 0 8) "https://") 0 -3)
+                              (let [c4 (nth e3 1)
+                                    t4 (nth e3 2)
+                                    e4 (nth e3 3)]
+                                (and (= 0 t4)
+                                     (= -3 e4)
+                                     (https-check? c4))))))))))))
+
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
@@ -2447,6 +2527,10 @@
            (empty? (:effects kir))) :string-substring
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
+           (https-url-ok-function? (first exports))
+           (empty? (:effects kir))) :https-url-ok
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
            (vector-i64-identity-function? (first exports))
            (empty? (:effects kir))) :vector-i64-identity
       (and (= 1 (count (:functions kir)))
@@ -2791,6 +2875,72 @@
      "    local.get $out i32.store\n"
      "    local.get $ret local.get $out-len i32.store offset=4 local.get $ret)\n"
      "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- https-url-ok-wat
+  "Composition: HTTPS URL policy (ADR 0182 http_url_ok) without kotoba:typed.
+
+  string-length bounds + string-substring(0,8) vs literal \"https://\".
+  Codes: -1 empty, -2 >4096, -3 short/not-https, 0 ok."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        ;; embed "https://" at offset 8
+        prefix "https://"
+        prefix-bytes (.getBytes ^String prefix StandardCharsets/UTF_8)
+        prefix-len (alength prefix-bytes)
+        arena-base (align-up (+ 8 prefix-len) 8)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const 8) \"" (wat-data prefix-bytes) "\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $ptr i32) (param $len i32) (result i64)\n"
+     "    (local $end i32) (local $i i32)\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.eqz if i64.const -1 return end\n"
+     "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.const 4096 i32.gt_u if i64.const -2 return end\n"
+     "    local.get $len i32.const 8 i32.lt_u if i64.const -3 return end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $ok\n"
+     "      (loop $scan\n"
+     "        local.get $i i32.const 8 i32.ge_u br_if $ok\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u\n"
+     "        i32.const 8 local.get $i i32.add i32.load8_u\n"
+     "        i32.ne if i64.const -3 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
@@ -7439,6 +7589,9 @@
     :string-substring
     (wasm-tools/parse-wat
      (string-substring-wat (first (exported-functions kir))))
+    :https-url-ok
+    (wasm-tools/parse-wat
+     (https-url-ok-wat (first (exported-functions kir))))
     :vector-i64-identity
     (wasm-tools/parse-wat
      (vector-i64-identity-wat (first (exported-functions kir))))
