@@ -539,20 +539,28 @@
 
 (defn- peel-reject-export-forward
   "Multi-file monomorph wraps each root export as a pure forward to a private
-  helper `(helper p0 p1 …)`. For role classification, peel one level so the
-  admission-skeleton body is visible while keeping the export name."
+  helper `(helper p0 p1 …)`. project/link-source may nest two levels
+  (export → module-local → dependency helper). Peel same-arity param-forwarding
+  wrappers until the body is no longer a pure forward, keeping the export name
+  for role classifiers."
   [function functions]
-  (let [body (:body function)
-        params (vec (:params function))
-        by-name (into {} (map (juxt :name identity) functions))]
-    (if (and (seq? body)
-             (symbol? (first body))
-             (= (vec (rest body)) params)
-             (not= (first body) (:name function)))
-      (if-let [helper (get by-name (first body))]
-        (assoc function :body (:body helper))
-        function)
-      function)))
+  (let [by-name (into {} (map (juxt :name identity) functions))]
+    (loop [f function depth 0]
+      (if (>= depth 8)
+        f
+        (let [body (:body f)
+              params (vec (:params f))]
+          (if (and (seq? body)
+                   (symbol? (first body))
+                   (= (vec (rest body)) params)
+                   (not= (first body) (:name f))
+                   (contains? by-name (first body)))
+            (let [helper (get by-name (first body))]
+              ;; Keep export name; adopt helper body and (for nested 0-arity
+              ;; chains) helper params so the next peel can match.
+              (recur (assoc f :body (:body helper) :params (:params helper))
+                     (inc depth)))
+            f))))))
 
 (defn- http-edn-reject-package?
   "Multi-export reject-path EDN kit body (T8.3): ≥3 pure exports, each a known
