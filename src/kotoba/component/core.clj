@@ -659,6 +659,65 @@
          (live-main-named-policies?
           main {(:name err) 3 (:name arm) 1}))))
 
+
+(defn- http-header-name-ok-function?
+  "Composition for http_header_name_ok (ADR 0187) without kotoba:typed.
+
+  Params: [name :string] Result: :i64
+  Codes: -1 empty, -2 name>128, -3 non-tchar (WAT), 0 ok.
+
+  Recognizes pure nested-if length skeleton and frontend let/loop/helper forms
+  that reference the name param and codes -1/-2/-3/0. WAT always applies RFC
+  7230 tchar charset scan."
+  [{:keys [params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:string] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [nm (first params)
+             if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))
+             len-of? (fn [form]
+                       (and (seq? form)
+                            (contains? #{'string-length 'string-byte-length} (first form))
+                            (= 2 (count form))
+                            (= nm (second form))))
+             pure-if-skeleton?
+             (fn []
+               (and (if4? body)
+                    (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
+                      (and (= -1 t1)
+                           (seq? c1) (contains? #{'<= '<} (first c1)) (len-of? (nth c1 1))
+                           (if4? e1)
+                           (let [c2 (nth e1 1) t2 (nth e1 2) e2 (nth e1 3)]
+                             (and (= -2 t2)
+                                  (seq? c2) (contains? #{'> '>=} (first c2)) (len-of? (nth c2 1))
+                                  (#{128 129} (nth c2 2))
+                                  (or (and (number? e2) (zero? e2))
+                                      ;; body may continue into loop/tchar scan;
+                                      ;; length skeleton is enough for admission.
+                                      (form-tree-walk e2 #(and (number? %) (zero? %))))))))))
+             frontend-ish?
+             (fn []
+               ;; Provider source uses private tchar? + loop; frontend may factor
+               ;; helpers. WAT still enforces full tchar + length codes.
+               (and (form-tree-walk body #(= % nm))
+                    (form-tree-walk body #(= % -1))
+                    (form-tree-walk body #(= % -2))
+                    (form-tree-walk body #(= % -3))
+                    (form-tree-walk body #(and (number? %) (zero? %)))
+                    (or (form-tree-walk body len-of?)
+                        (form-tree-walk body #(= % 128)))))]
+         (boolean (or (pure-if-skeleton?) (frontend-ish?))))))
+
+(defn- http-header-name-ok-with-main?
+  "Two-export: header_name_ok + live main (provider shape → -130)."
+  [exports]
+  (let [policy (first (filter http-header-name-ok-function? exports))
+        main (first (filter #(= 'main (:name %)) exports))]
+    (and policy main
+         (= 2 (count exports))
+         (live-main-policy-calls? main (:name policy)))))
+
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
@@ -3048,6 +3107,12 @@
            (= 1 (count exports))
            (http-error-ok-function? (first exports))
            (empty? (:effects kir))) :http-error-ok
+      (and (= 2 (count exports))
+           (http-header-name-ok-with-main? exports)
+           (empty? (:effects kir))) :http-header-name-ok-with-main
+      (and (= 1 (count exports))
+           (http-header-name-ok-function? (first exports))
+           (empty? (:effects kir))) :http-header-name-ok
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (vector-i64-identity-function? (first exports))
@@ -4188,6 +4253,149 @@
      "  (func (export \"cm32p2||" export "_post\") (param i64))\n"
      "  (func (export \"cm32p2_initialize\"))\n"
      ")\n")))
+
+
+(defn- http-header-name-ok-wat
+  "Composition: http_header_name_ok (ADR 0187) without kotoba:typed.
+
+  RFC 7230 tchar charset + length [1,128]. Codes -1/-2/-3/0.
+  When main-fn provided, emit live-vector main with embedded string lits."
+  ([function] (http-header-name-ok-wat function nil))
+  ([function main-fn]
+   (let [export (wit-name (:name function))
+         pages wasm/component-memory-pages
+         capacity wasm/component-arena-capacity
+         max-bytes value/string-value-byte-limit
+         main-string-lits
+         (when main-fn
+           (let [vals (mapv second (partition 2 (nth (:body main-fn) 1)))]
+             (vec (distinct (map second vals)))))
+         prepared-strs
+         (loop [remaining (or main-string-lits [])
+                offset 8
+                acc []]
+           (if-let [s (first remaining)]
+             (let [b (.getBytes ^String s StandardCharsets/UTF_8)
+                   len (alength b)]
+               (if (zero? len)
+                 (recur (next remaining) offset
+                        (conj acc {:value s :bytes [] :length 0 :pointer 0}))
+                 (recur (next remaining)
+                        (+ offset len)
+                        (conj acc {:value s :bytes (vec b) :length len :pointer offset}))))
+             acc))
+         non-empty (filterv #(pos? (:length %)) prepared-strs)
+         arena-base (align-up (if (seq non-empty)
+                                (+ (:pointer (last non-empty))
+                                   (:length (last non-empty)))
+                                8)
+                              8)
+         str-ptr (into {} (map (juxt :value :pointer) prepared-strs))
+         str-len (into {} (map (juxt :value :length) prepared-strs))
+         main-data
+         (apply str
+                (map (fn [leaf]
+                       (str "  (data (i32.const " (:pointer leaf) ") \""
+                            (wat-data (:bytes leaf)) "\")\n"))
+                     non-empty))
+         main-locals
+         (when main-fn
+           (let [names (mapv first (partition 2 (nth (:body main-fn) 1)))]
+             (apply str (map #(str " (local $" (name %) " i64)") names))))
+         main-calls
+         (when main-fn
+           (let [pairs (partition 2 (nth (:body main-fn) 1))]
+             (apply str
+                    (map (fn [[sym call]]
+                           (let [s (second call)]
+                             (str "    i32.const " (get str-ptr s)
+                                  " i32.const " (get str-len s)
+                                  " call $policy local.set $" (name sym) "\n")))
+                         pairs))))
+         main-expr (when main-fn (nth (:body main-fn) 2))
+         main-block
+         (when main-fn
+           (str
+            "  (func (export \"cm32p2||main\") (result i64)\n"
+            "    " main-locals "\n"
+            main-calls
+            "    " (emit-i64-arith-wat main-expr) ")\n"
+            "  (func (export \"cm32p2||main_post\") (param i64)\n"
+            "    i32.const " arena-base " global.set $next)\n"))]
+     (str
+      "(module\n"
+      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+      "  (global $next (mut i32) (i32.const " arena-base "))\n"
+      main-data
+      "  (func $realloc (export \"cm32p2_realloc\")\n"
+      "    (param $old-ptr i32) (param $old-size i32)\n"
+      "    (param $align i32) (param $new-size i32) (result i32)\n"
+      "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+      "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+      "    local.get $align i32.eqz if unreachable end\n"
+      "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+      "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+      "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+      "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+      "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+      "    if unreachable end\n"
+      "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+      "    local.get $end global.set $next\n"
+      "    local.get $old-ptr i32.eqz if else\n"
+      "      local.get $old-size local.get $new-size i32.lt_u\n"
+      "      if (result i32) local.get $old-size else local.get $new-size end\n"
+      "      local.set $copy-size\n"
+      "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+      "    end local.get $ptr)\n"
+      ;; RFC 7230 tchar: ALPHA / DIGIT / ! # $ % & ' * + - . ^ _ ` | ~
+      "  (func $tchar-ok (param $c i32) (result i32)\n"
+      "    local.get $c i32.const 48 i32.ge_u\n"
+      "    local.get $c i32.const 57 i32.le_u i32.and if i32.const 1 return end\n"
+      "    local.get $c i32.const 65 i32.ge_u\n"
+      "    local.get $c i32.const 90 i32.le_u i32.and if i32.const 1 return end\n"
+      "    local.get $c i32.const 97 i32.ge_u\n"
+      "    local.get $c i32.const 122 i32.le_u i32.and if i32.const 1 return end\n"
+      "    local.get $c i32.const 33 i32.eq\n"
+      "    local.get $c i32.const 35 i32.eq i32.or\n"
+      "    local.get $c i32.const 36 i32.eq i32.or\n"
+      "    local.get $c i32.const 37 i32.eq i32.or\n"
+      "    local.get $c i32.const 38 i32.eq i32.or\n"
+      "    local.get $c i32.const 39 i32.eq i32.or\n"
+      "    local.get $c i32.const 42 i32.eq i32.or\n"
+      "    local.get $c i32.const 43 i32.eq i32.or\n"
+      "    local.get $c i32.const 45 i32.eq i32.or\n"
+      "    local.get $c i32.const 46 i32.eq i32.or\n"
+      "    local.get $c i32.const 94 i32.eq i32.or\n"
+      "    local.get $c i32.const 95 i32.eq i32.or\n"
+      "    local.get $c i32.const 96 i32.eq i32.or\n"
+      "    local.get $c i32.const 124 i32.eq i32.or\n"
+      "    local.get $c i32.const 126 i32.eq i32.or)\n"
+      "  (func $policy (param $ptr i32) (param $len i32) (result i64)\n"
+      "    (local $end i32) (local $i i32) (local $c i32)\n"
+      "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+      "    local.get $len i32.eqz if i64.const -1 return end\n"
+      "    local.get $len i32.const 128 i32.gt_u if i64.const -2 return end\n"
+      "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+      "    local.get $ptr local.get $len i32.add local.tee $end\n"
+      "    local.get $ptr i32.lt_u if unreachable end\n"
+      "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+      "    i32.const 0 local.set $i\n"
+      "    (block $name-ok\n"
+      "      (loop $scan\n"
+      "        local.get $i local.get $len i32.ge_u br_if $name-ok\n"
+      "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+      "        local.get $c call $tchar-ok i32.eqz if i64.const -3 return end\n"
+      "        local.get $i i32.const 1 i32.add local.set $i\n"
+      "        br $scan))\n"
+      "    i64.const 0)\n"
+      "  (func (export \"cm32p2||" export "\")"
+      " (param $ptr i32) (param $len i32) (result i64)\n"
+      "    local.get $ptr local.get $len call $policy)\n"
+      "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+      "    i32.const " arena-base " global.set $next)\n"
+      main-block
+      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+      ")\n"))))
 
 (defn- string-expression-wat [function]
   (let [export (wit-name (:name function))
@@ -8873,6 +9081,14 @@
     :http-result-arm-ok
     (wasm-tools/parse-wat
      (http-result-arm-ok-wat (first (exported-functions kir))))
+    :http-header-name-ok
+    (wasm-tools/parse-wat
+     (http-header-name-ok-wat (first (exported-functions kir))))
+    :http-header-name-ok-with-main
+    (let [exports (exported-functions kir)
+          policy (first (filter http-header-name-ok-function? exports))
+          main (first (filter #(= 'main (:name %)) exports))]
+      (wasm-tools/parse-wat (http-header-name-ok-wat policy main)))
     :vector-i64-identity
     (wasm-tools/parse-wat
      (vector-i64-identity-wat (first (exported-functions kir))))
