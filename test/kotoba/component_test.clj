@@ -2307,3 +2307,143 @@
         (is (zero? (:exit space)) (:err space))
         (is (= "-3" (str/trim (:out space)))))
       (finally (Files/deleteIfExists path)))))
+
+
+(def http-request-pack-package-with-main-kir
+  "Provider-shaped request packing walk + nested live main → -13467."
+  {:format :kotoba.kir/v4
+   :exports ['http_request_begin 'http_request_url 'http_request_headers
+             'http_request_body 'http_request_end 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_request_begin
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body 0}
+    {:name 'http_request_url
+     :params ['state 'url]
+     :param-types [:i64 :string]
+     :result :i64
+     :effects #{}
+     :body
+     '(if (< state 0)
+        state
+        (if (if (= state 0) false true)
+          -10
+          (let [n (string-byte-length url)]
+            (if (<= n 0)
+              -1
+              (if (> n 4096)
+                -2
+                (if (let [or-tmp (< n 8)]
+                      (if or-tmp or-tmp
+                        (if (string=? (string-substring url 0 8) "https://")
+                          false true)))
+                  -3
+                  1))))))}
+    {:name 'http_request_headers
+     :params ['state 'n]
+     :param-types [:i64 :i64]
+     :result :i64
+     :effects #{}
+     :body
+     '(if (< state 0)
+        state
+        (if (if (= state 1) false true)
+          -10
+          (if (let [or-tmp (< n 0)]
+                (if or-tmp or-tmp (> n 32)))
+            -4
+            2)))}
+    {:name 'http_request_body
+     :params ['state 'body]
+     :param-types [:i64 :string]
+     :result :i64
+     :effects #{}
+     :body
+     '(if (< state 0)
+        state
+        (if (if (= state 2) false true)
+          -10
+          (let [bn (string-byte-length body)]
+            (if (let [or-tmp (< bn 0)]
+                  (if or-tmp or-tmp (> bn 65536)))
+              -5
+              3))))}
+    {:name 'http_request_end
+     :params ['state 'timeout-ms]
+     :param-types [:i64 :i64]
+     :result :i64
+     :effects #{}
+     :body
+     '(if (< state 0)
+        state
+        (if (if (= state 3) false true)
+          -7
+          (if (let [or-tmp (< timeout-ms 1)]
+                (if or-tmp or-tmp (> timeout-ms 30000)))
+            -6
+            0)))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body
+     '(let [a (http_request_end
+               (http_request_body
+                (http_request_headers
+                 (http_request_url (http_request_begin) "https://x")
+                 1)
+                "{}")
+               1000)
+           b (http_request_url (http_request_begin) "")
+           c (http_request_url (http_request_begin) "http://x")
+           d (http_request_headers
+              (http_request_url (http_request_begin) "https://x")
+              40)
+           e (http_request_end
+              (http_request_body
+               (http_request_headers
+                (http_request_url (http_request_begin) "https://x")
+                0)
+               "")
+              0)
+           f (http_request_end (http_request_begin) 1000)]
+        (+ (* a 100000) (* b 10000) (* c 1000) (* d 100) (* e 10) f))}]})
+
+(deftest http-request-pack-package-with-main-live-vector
+  "T8.3 multi-export: request packing walk + nested live main → -13467."
+  (is (= :http-request-pack-package-with-main
+         (core/assert-supported! http-request-pack-package-with-main-kir)))
+  (let [world (wit/emit http-request-pack-package-with-main-kir)
+        core-bytes (core/emit http-request-pack-package-with-main-kir
+                              :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes
+                                   http-request-pack-package-with-main-kir
+                                   world)
+        path (Files/createTempFile "kc-request-pack-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-request-pack-package-with-main (:canonical-lowering packaged)))
+      (is (= 6 (count (:exports world))))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            begin (shell/sh "wasmtime" "run" "--invoke" "http-request-begin()" (str path))
+            badu (shell/sh "wasmtime" "run" "--invoke"
+                           "http-request-url(0,\"http://x\")" (str path))
+            ok-url (shell/sh "wasmtime" "run" "--invoke"
+                             "http-request-url(0,\"https://x\")" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-13467" (str/trim (:out main))))
+        (is (zero? (:exit begin)) (:err begin))
+        (is (= "0" (str/trim (:out begin))))
+        (is (zero? (:exit badu)) (:err badu))
+        (is (= "-3" (str/trim (:out badu))))
+        (is (zero? (:exit ok-url)) (:err ok-url))
+        (is (= "1" (str/trim (:out ok-url)))))
+      (finally (Files/deleteIfExists path)))))
