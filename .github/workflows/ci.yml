@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          cli: latest
+      - run: clojure -M:test
+
+  # This repo's own suite passing is not enough: it is a library, and
+  # kotoba.component.wit / .artifact / .core are main dependencies of
+  # kotoba-lang/compiler. A change can be green here and break the compiler.
+  #
+  # That is why every kotoba-lang library CI carries this job. The concrete
+  # failure it comes from: kotoba-wasm f4d7afb was green on its own suite on
+  # 2026-07-30 and took the compiler from 52/52 conformance to 47/52.
+  consumer-conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: dep
+      - name: Check out the consumer
+        run: git clone --depth 1 https://github.com/kotoba-lang/compiler compiler
+      - uses: DeLaGuardo/setup-clojure@13.4
+        with:
+          cli: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Compiler dual-backend conformance against this checkout
+        working-directory: compiler
+        run: |
+          clojure -Sdeps "{:aliases {:dep {:override-deps {io.github.kotoba-lang/kotoba-component {:local/root \"../dep\"}}}}}" \
+            -M:dep:conformance
