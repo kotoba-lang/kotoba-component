@@ -1312,3 +1312,51 @@
         (is (zero? (:exit empty)) (:err empty))
         (is (= "\"\"" (str/trim (:out empty)))))
       (finally (Files/deleteIfExists path)))))
+
+
+(def https-url-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['http-url-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http-url-ok
+     :params ['url]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body '(if (<= (string-length url) 0)
+               -1
+               (if (> (string-length url) 4096)
+                 -2
+                 (if (< (string-length url) 8)
+                   -3
+                   (if (string=? (string-substring url 0 8) "https://")
+                     0
+                     -3))))}]})
+
+(deftest https-url-ok-canonical-lowering
+  "T8.3 typed Component composition: http_url_ok without kotoba:typed."
+  (is (= :https-url-ok (core/assert-supported! https-url-ok-kir)))
+  (let [world (wit/emit https-url-ok-kir)
+        core-bytes (core/emit https-url-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes https-url-ok-kir world)
+        path (Files/createTempFile "kc-https-url-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :https-url-ok (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"https://x\")" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"\")" (str path))
+            http (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"http://x\")" (str path))
+            short (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"https:/\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty))))
+        (is (zero? (:exit http)) (:err http))
+        (is (= "-3" (str/trim (:out http))))
+        (is (zero? (:exit short)) (:err short))
+        (is (= "-3" (str/trim (:out short)))))
+      (finally (Files/deleteIfExists path)))))
