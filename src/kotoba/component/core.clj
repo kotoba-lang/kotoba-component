@@ -338,6 +338,36 @@
                   (form-tree-walk body #(= % 'string-length))
                   (form-tree-walk body #(= % "")))))))
 
+(defn- http-result-err-edn-function?
+  "Reject-path result error arm (T8.3 / ADR 0210 composition on edn_quoted):
+  string×i64 → string.
+
+  Builds `{:tag :error :code \"…\" :retryable true|false}` when code passes
+  quote/backslash scan and retryable is 0 or 1; otherwise empty. WAT owns
+  the scan + retryable gate + concat (no full multi-export request package)."
+  [{:keys [name params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:string :i64] param-types)
+       (= :string result)
+       (seq? body)
+       (let [nm (clojure.core/name name)
+             code (nth params 0)
+             retry (nth params 1)]
+         (and (re-find #"(?i)result[_-]?err[_-]?edn" nm)
+              (form-tree-walk body #(= % code))
+              (form-tree-walk body #(= % retry))
+              (or (form-tree-walk body #(= % 'string-concat))
+                  (form-tree-walk body #(= % 'edn_quoted))
+                  (form-tree-walk body #(= % 'edn-quoted))
+                  (form-tree-walk body #(= % "")))
+              (or (form-tree-walk body #(= % "error"))
+                  (form-tree-walk body #(and (string? %) (str/includes? % "error")))
+                  (form-tree-walk body #(= % "retryable"))
+                  (form-tree-walk body #(and (string? %) (str/includes? % "retryable")))
+                  (form-tree-walk body #(= % 'string-byte-length))
+                  (form-tree-walk body #(= % 'string-length))
+                  (form-tree-walk body #(= % "")))))))
+
 (defn- policy-call-args-ok?
   "True when call is (policy-name arg…) with each arg a string or integer literal."
   [form policy-name arity]
@@ -3716,6 +3746,10 @@
       (and (= 1 (count exports))
            (headers-edn-append-function? (first exports))
            (empty? (:effects kir))) :headers-edn-append
+      ;; Result error arm composition on edn_quoted (string×i64 → string).
+      (and (= 1 (count exports))
+           (http-result-err-edn-function? (first exports))
+           (empty? (:effects kir))) :http-result-err-edn
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (string-expression-function? (first exports))
@@ -6905,6 +6939,120 @@
      "      local.get $out local.get $body-len i32.add i32.const 1 i32.add local.get $h-len i32.add\n"
      "      i32.const " close-ptr " i32.const 1 memory.copy\n"
      "    end\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $total i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- http-result-err-edn-wat
+  "Canonical `string×i64 -> string` reject-path result error arm.
+
+  Params: code (string), retryable (i64 0|1). Quote/backslash scan on code;
+  reject when retryable ∉ {0,1}. Else builds
+  `{:tag :error :code \"…\" :retryable true|false}`. Composition on edn_quoted;
+  no multi-export request package; no kotoba:typed."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        ;; literals from offset 8
+        ;; pref = "{:tag :error :code \"" (20)
+        ;; mid-false = "\" :retryable false}" (19)
+        ;; mid-true  = "\" :retryable true}" (18)
+        pref-ptr 8
+        pref-len 20
+        mid-false-ptr 28
+        mid-false-len 19
+        mid-true-ptr 47
+        mid-true-len 18
+        arena-base 72]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const " pref-ptr ") \"{:tag :error :code \\\"\")\n"
+     "  (data (i32.const " mid-false-ptr ") \"\\\" :retryable false}\")\n"
+     "  (data (i32.const " mid-true-ptr ") \"\\\" :retryable true}\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $has-forbidden (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $i i32) (local $c i32)\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u if br $done end\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.const 34 i32.eq if i32.const 1 return end\n"
+     "        local.get $c i32.const 92 i32.eq if i32.const 1 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func $empty-string (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    i32.const 0 i32.store\n"
+     "    local.get $ret i32.const 0 i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $c-ptr i32) (param $c-len i32)"
+     " (param $retry i64) (result i32)\n"
+     "    (local $end i32) (local $out i32) (local $ret i32) (local $total i32)\n"
+     "    (local $cursor i32) (local $mid-ptr i32) (local $mid-len i32)\n"
+     "    local.get $c-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $c-len i32.eqz if else\n"
+     "      local.get $c-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $c-ptr local.get $c-len i32.add local.tee $end\n"
+     "    local.get $c-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    ;; retryable gate: only 0 or 1\n"
+     "    local.get $retry i64.const 0 i64.eq if else\n"
+     "      local.get $retry i64.const 1 i64.eq if else\n"
+     "        call $empty-string return\n"
+     "      end\n"
+     "    end\n"
+     "    local.get $c-ptr local.get $c-len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    local.get $retry i64.const 0 i64.eq\n"
+     "    if\n"
+     "      i32.const " mid-false-ptr " local.set $mid-ptr\n"
+     "      i32.const " mid-false-len " local.set $mid-len\n"
+     "    else\n"
+     "      i32.const " mid-true-ptr " local.set $mid-ptr\n"
+     "      i32.const " mid-true-len " local.set $mid-len\n"
+     "    end\n"
+     "    local.get $c-len i32.const " pref-len " i32.add local.get $mid-len i32.add local.set $total\n"
+     "    local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "    i32.const 0 local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " pref-ptr " i32.const " pref-len " memory.copy\n"
+     "    local.get $cursor i32.const " pref-len " i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add local.get $c-ptr local.get $c-len memory.copy\n"
+     "    local.get $cursor local.get $c-len i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add local.get $mid-ptr local.get $mid-len memory.copy\n"
      "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
      "    local.get $out i32.store\n"
      "    local.get $ret local.get $total i32.store offset=4\n"
@@ -11474,6 +11622,9 @@
     :headers-edn-append
     (wasm-tools/parse-wat
      (headers-edn-append-wat (first (exported-functions kir))))
+    :http-result-err-edn
+    (wasm-tools/parse-wat
+     (http-result-err-edn-wat (first (exported-functions kir))))
     :string-length
     (wasm-tools/parse-wat
      (string-length-wat (first (exported-functions kir))))

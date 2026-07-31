@@ -1426,6 +1426,62 @@
         (is (= "" (read-string (str/trim (:out empty-acc))))))
       (finally (Files/deleteIfExists path)))))
 
+(def http-result-err-edn-kir
+  "T8.3 result error arm skeleton (WAT owns scan + retryable gate)."
+  {:format :kotoba.kir/v4
+   :exports ['http_result_err_edn]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_result_err_edn
+     :params ['code 'retryable]
+     :param-types [:string :i64]
+     :result :string
+     :effects #{}
+     :body
+     '(let [qc (edn_quoted code)]
+        (if (= (string-byte-length qc) 0)
+          ""
+          (if (= retryable 0)
+            (string-concat "{:tag :error :code "
+                           (string-concat qc " :retryable false}"))
+            (if (= retryable 1)
+              (string-concat "{:tag :error :code "
+                             (string-concat qc " :retryable true}"))
+              ""))))}]})
+
+(deftest http-result-err-edn-canonical-lowering
+  "T8.3 reject-path: ok retryable true/false, bad atom, bad retryable."
+  (is (= :http-result-err-edn (core/assert-supported! http-result-err-edn-kir)))
+  (let [world (wit/emit http-result-err-edn-kir)
+        core-bytes (core/emit http-result-err-edn-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-result-err-edn-kir world)
+        path (Files/createTempFile "kc-http-result-err-edn-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-result-err-edn (:canonical-lowering packaged)))
+      (let [ok0 (shell/sh "wasmtime" "run" "--invoke"
+                          "http-result-err-edn(\"timeout\",0)" (str path))
+            ok1 (shell/sh "wasmtime" "run" "--invoke"
+                          "http-result-err-edn(\"timeout\",1)" (str path))
+            bad-atom (shell/sh "wasmtime" "run" "--invoke"
+                               "http-result-err-edn(\"a\\\"b\",1)" (str path))
+            bad-retry (shell/sh "wasmtime" "run" "--invoke"
+                                "http-result-err-edn(\"timeout\",2)" (str path))]
+        (is (zero? (:exit ok0)) (:err ok0))
+        (is (= "{:tag :error :code \"timeout\" :retryable false}"
+               (read-string (str/trim (:out ok0)))))
+        (is (zero? (:exit ok1)) (:err ok1))
+        (is (= "{:tag :error :code \"timeout\" :retryable true}"
+               (read-string (str/trim (:out ok1)))))
+        (is (zero? (:exit bad-atom)) (:err bad-atom))
+        (is (= "" (read-string (str/trim (:out bad-atom)))))
+        (is (zero? (:exit bad-retry)) (:err bad-retry))
+        (is (= "" (read-string (str/trim (:out bad-retry))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
   (is (= :string-expression-package
