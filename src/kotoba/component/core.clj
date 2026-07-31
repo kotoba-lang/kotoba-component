@@ -250,6 +250,32 @@
     (vector? form) (some #(form-tree-walk % pred) form)
     :else false))
 
+(defn- edn-quoted-function?
+  "Reject-path EDN string quote (ADR 0214 / T8.3): string → string.
+
+  Scans UTF-8 for quote (0x22) or backslash (0x5c); if present returns empty
+  string, else wraps s as \"s\". Semantics are enforced by WAT (loop scan), not
+  by replaying recursive has-dq?/has-bs? helpers. Admission matches export name
+  containing edn_quoted / edn-quoted / quoted and a string→string body that
+  mentions the param plus quote/concat or reject-to-empty patterns."
+  [{:keys [name params param-types result body] :as function}]
+  (and (= 1 (count params))
+       (= [:string] param-types)
+       (= :string result)
+       (seq? body)
+       (let [nm (clojure.core/name name)
+             s (first params)]
+         (and (or (re-find #"(?i)edn[_-]?quoted" nm)
+                  (re-find #"(?i)^quoted$" nm))
+              (form-tree-walk body #(= % s))
+              (or (form-tree-walk body #(= % "\""))
+                  (form-tree-walk body #(and (string? %) (str/includes? % "\""))))
+              (or (form-tree-walk body #(= % 'string-concat))
+                  (form-tree-walk body #(= % 'string-byte-length))
+                  (form-tree-walk body #(= % 'string-length))
+                  (form-tree-walk body #(= % 'string-substring))
+                  (form-tree-walk body #(= % "")))))))
+
 (defn- policy-call-args-ok?
   "True when call is (policy-name arg…) with each arg a string or integer literal."
   [form policy-name arity]
@@ -3623,6 +3649,10 @@
            (= 1 (count exports))
            (string-expression-function? (first exports))
            (empty? (:effects kir))) :string-expression
+      ;; Reject-path edn_quoted: single export, private scan helpers ok.
+      (and (= 1 (count exports))
+           (edn-quoted-function? (first exports))
+           (empty? (:effects kir))) :edn-quoted
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (string-length-function? (first exports))
@@ -6391,6 +6421,92 @@
 (defn- string-expression-wat [function]
   "Single-export pure string-concat → shared package emitter (backward-compatible)."
   (string-expression-package-wat [function]))
+
+(defn- edn-quoted-wat
+  "Canonical `string -> string` EDN quote with reject-on-quote/backslash.
+
+  Loop-scans admitted UTF-8 bytes for 0x22 (\") and 0x5c (\\). If either is
+  present, returns empty string; otherwise allocates `\"` + s + `\"` via realloc
+  (same list-string result record as string-expression). No kotoba:typed."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        ;; literal quotes at offset 8 (single byte each layout: " at 8)
+        quote-ptr 8
+        arena-base 16]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const " quote-ptr ") \"\\\"\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $has-forbidden (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $i i32) (local $c i32) (local $end i32)\n"
+     "    local.get $ptr local.get $len i32.add local.set $end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u if br $done end\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.const 34 i32.eq if i32.const 1 return end\n"
+     "        local.get $c i32.const 92 i32.eq if i32.const 1 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $end i32) (local $out i32) (local $ret i32) (local $total i32)\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.eqz if else\n"
+     "      local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $ptr local.get $len call $has-forbidden\n"
+     "    if\n"
+     "      ;; reject → empty string list record\n"
+     "      i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "      i32.const 0 i32.store\n"
+     "      local.get $ret i32.const 0 i32.store offset=4\n"
+     "      local.get $ret return\n"
+     "    end\n"
+     "    local.get $len i32.const 2 i32.add local.set $total\n"
+     "    local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "    local.get $out i32.const " quote-ptr " i32.const 1 memory.copy\n"
+     "    local.get $out i32.const 1 i32.add local.get $ptr local.get $len memory.copy\n"
+     "    local.get $out local.get $len i32.add i32.const 1 i32.add\n"
+     "    i32.const " quote-ptr " i32.const 1 memory.copy\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $total i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
 
 (declare bounded-bump-realloc-wat)
 
@@ -10943,6 +11059,9 @@
     :string-expression-package
     (wasm-tools/parse-wat
      (string-expression-package-wat (exported-functions kir)))
+    :edn-quoted
+    (wasm-tools/parse-wat
+     (edn-quoted-wat (first (exported-functions kir))))
     :string-length
     (wasm-tools/parse-wat
      (string-length-wat (first (exported-functions kir))))
