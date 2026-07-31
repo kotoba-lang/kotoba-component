@@ -1426,6 +1426,84 @@
         (is (= "" (read-string (str/trim (:out empty-acc))))))
       (finally (Files/deleteIfExists path)))))
 
+(def headers-names-add-kir
+  "T8.3 true-set name list append skeleton (WAT owns element equality)."
+  {:format :kotoba.kir/v4
+   :exports ['headers_names_add]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'headers_names_add
+     :params ['acc 'name]
+     :param-types [:string :string]
+     :result :string
+     :effects #{}
+     :body
+     '(if (or (= (string-byte-length acc) 0)
+              (= (string-byte-length name) 0))
+        ""
+        (if (headers_names_has acc name)
+          ""
+          (if (string=? acc "[]")
+            (string-concat "[" (string-concat "\"" (string-concat name "\"]")))
+            (let [body (string-substring acc 0 (- (string-byte-length acc) 1))]
+              (string-concat body
+                             (string-concat " "
+                                            (string-concat "\""
+                                                           (string-concat name
+                                                                          "\"]"))))))))}]})
+
+(deftest headers-names-add-canonical-lowering
+  "T8.3 Component twin of true-set uniqueness: empty→one, second, dup reject, bad atom."
+  (is (= :headers-names-add (core/assert-supported! headers-names-add-kir)))
+  (let [world (wit/emit headers-names-add-kir)
+        core-bytes (core/emit headers-names-add-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes headers-names-add-kir world)
+        path (Files/createTempFile "kc-headers-names-add-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :headers-names-add (:canonical-lowering packaged)))
+      (let [one (shell/sh "wasmtime" "run" "--invoke"
+                          "headers-names-add(\"[]\",\"Host\")"
+                          (str path))
+            two (shell/sh "wasmtime" "run" "--invoke"
+                          (str "headers-names-add("
+                               "\"[\\\"Host\\\"]\","
+                               "\"Accept\")")
+                          (str path))
+            dup (shell/sh "wasmtime" "run" "--invoke"
+                          (str "headers-names-add("
+                               "\"[\\\"Host\\\"]\","
+                               "\"Host\")")
+                          (str path))
+            ;; Prefix of another name must not collide (true equality)
+            pref (shell/sh "wasmtime" "run" "--invoke"
+                           (str "headers-names-add("
+                                "\"[\\\"Host\\\"]\","
+                                "\"Ho\")")
+                           (str path))
+            bad (shell/sh "wasmtime" "run" "--invoke"
+                          "headers-names-add(\"[]\",\"a\\\"b\")"
+                          (str path))
+            empty-acc (shell/sh "wasmtime" "run" "--invoke"
+                                "headers-names-add(\"\",\"Host\")"
+                                (str path))]
+        (is (zero? (:exit one)) (:err one))
+        (is (= "[\"Host\"]" (read-string (str/trim (:out one)))))
+        (is (zero? (:exit two)) (:err two))
+        (is (= "[\"Host\" \"Accept\"]" (read-string (str/trim (:out two)))))
+        (is (zero? (:exit dup)) (:err dup))
+        (is (= "" (read-string (str/trim (:out dup)))))
+        (is (zero? (:exit pref)) (:err pref))
+        (is (= "[\"Host\" \"Ho\"]" (read-string (str/trim (:out pref)))))
+        (is (zero? (:exit bad)) (:err bad))
+        (is (= "" (read-string (str/trim (:out bad)))))
+        (is (zero? (:exit empty-acc)) (:err empty-acc))
+        (is (= "" (read-string (str/trim (:out empty-acc))))))
+      (finally (Files/deleteIfExists path)))))
+
 (def http-result-err-edn-kir
   "T8.3 result error arm skeleton (WAT owns scan + retryable gate)."
   {:format :kotoba.kir/v4

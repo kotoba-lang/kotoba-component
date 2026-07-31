@@ -338,6 +338,38 @@
                   (form-tree-walk body #(= % 'string-length))
                   (form-tree-walk body #(= % "")))))))
 
+(defn- headers-names-add-function?
+  "T8.3 Component twin of true header-name uniqueness (ADR 0223/0224):
+  string×string → string.
+
+  Acc is an EDN vector of quoted names (`[]` / `[\"Host\" \"Accept\"]`).
+  Membership is **element-bound exact equality** (open-quote preceded by
+  `[` or space; close-quote followed by space or `]`) — not substring
+  `:name \"…\"` scan and not kotoba:typed. WAT owns scan + splice.
+  Complements wasm32 `http-headers-name-set` (typed-set guest record)."
+  [{:keys [name params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:string :string] param-types)
+       (= :string result)
+       (seq? body)
+       (let [nm (clojure.core/name name)
+             acc (nth params 0)
+             n (nth params 1)]
+         (and (re-find #"(?i)headers?[_-]?names?[_-]?add" nm)
+              (form-tree-walk body #(= % acc))
+              (form-tree-walk body #(= % n))
+              (or (form-tree-walk body #(= % 'string-concat))
+                  (form-tree-walk body #(= % 'headers_names_has))
+                  (form-tree-walk body #(= % 'string-substring))
+                  (form-tree-walk body #(= % "")))
+              (or (form-tree-walk body #(= % "[]"))
+                  (form-tree-walk body #(= % "["))
+                  (form-tree-walk body #(= % "]"))
+                  (form-tree-walk body #(= % "\""))
+                  (form-tree-walk body #(= % 'string-byte-length))
+                  (form-tree-walk body #(= % 'string-length))
+                  (form-tree-walk body #(= % "")))))))
+
 (defn- http-result-err-edn-function?
   "Reject-path result error arm (T8.3 / ADR 0210 composition on edn_quoted):
   string×i64 → string.
@@ -3898,6 +3930,10 @@
       (and (= 1 (count exports))
            (headers-edn-append-function? (first exports))
            (empty? (:effects kir))) :headers-edn-append
+      ;; True-set name list append (EDN string vector; element equality).
+      (and (= 1 (count exports))
+           (headers-names-add-function? (first exports))
+           (empty? (:effects kir))) :headers-names-add
       ;; Result error arm composition on edn_quoted (string×i64 → string).
       (and (= 1 (count exports))
            (http-result-err-edn-function? (first exports))
@@ -7101,6 +7137,213 @@
      "      local.get $out local.get $body-len i32.add i32.const 1 i32.add\n"
      "      local.get $h local.get $h-len memory.copy\n"
      "      local.get $out local.get $body-len i32.add i32.const 1 i32.add local.get $h-len i32.add\n"
+     "      i32.const " close-ptr " i32.const 1 memory.copy\n"
+     "    end\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $total i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- headers-names-add-wat
+  "Canonical `string×string -> string` true-set name list append (T8.3).
+
+  Acc is EDN vector of quoted names: `[]` / `[\"Host\" \"Accept\"]`. Membership
+  is element-bound exact equality (open quote preceded by `[`/space; close
+  quote followed by space/`]`) — not `:name \"…\"` substring scan, no
+  kotoba:typed. Empty on reject, empty acc, bad atom, or duplicate. Else
+  splice `\"name\"` into the vector."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        ;; literals from offset 8
+        empty-ptr 8 empty-len 2
+        open-ptr 10
+        close-ptr 11
+        space-ptr 12
+        quote-ptr 13
+        arena-base 16]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const " empty-ptr ") \"[]\")\n"
+     "  (data (i32.const " open-ptr ") \"[\")\n"
+     "  (data (i32.const " close-ptr ") \"]\")\n"
+     "  (data (i32.const " space-ptr ") \" \")\n"
+     "  (data (i32.const " quote-ptr ") \"\\\"\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $has-forbidden (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $i i32) (local $c i32)\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u if br $done end\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.const 34 i32.eq if i32.const 1 return end\n"
+     "        local.get $c i32.const 92 i32.eq if i32.const 1 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func $empty-string (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    i32.const 0 i32.store\n"
+     "    local.get $ret i32.const 0 i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func $has-prefix-at (param $h-ptr i32) (param $h-len i32)\n"
+     "    (param $n-ptr i32) (param $n-len i32) (param $i i32) (result i32)\n"
+     "    (local $j i32)\n"
+     "    local.get $i local.get $n-len i32.add local.get $h-len i32.gt_u if i32.const 0 return end\n"
+     "    i32.const 0 local.set $j\n"
+     "    (block $done\n"
+     "      (loop $cmp\n"
+     "        local.get $j local.get $n-len i32.ge_u if br $done end\n"
+     "        local.get $h-ptr local.get $i i32.add local.get $j i32.add i32.load8_u\n"
+     "        local.get $n-ptr local.get $j i32.add i32.load8_u i32.ne\n"
+     "        if i32.const 0 return end\n"
+     "        local.get $j i32.const 1 i32.add local.set $j\n"
+     "        br $cmp))\n"
+     "    i32.const 1)\n"
+     "  ;; Element-bound membership: [ or space, then \"name\", then space or ]\n"
+     "  (func $has-name-element (param $a-ptr i32) (param $a-len i32)\n"
+     "    (param $n-ptr i32) (param $n-len i32) (result i32)\n"
+     "    (local $i i32) (local $prev i32) (local $after i32) (local $c i32)\n"
+     "    local.get $n-len i32.const 2 i32.add local.get $a-len i32.gt_u if i32.const 0 return end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $n-len i32.add i32.const 1 i32.add\n"
+     "        local.get $a-len i32.gt_u if br $done end\n"
+     "        local.get $a-ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.const 34 i32.eq\n"
+     "        if\n"
+     "          ;; prev boundary: need [ (91) or space (32) immediately before quote\n"
+     "          local.get $i i32.eqz\n"
+     "          if (result i32)\n"
+     "            i32.const 0\n"
+     "          else\n"
+     "            local.get $a-ptr local.get $i i32.const 1 i32.sub i32.add i32.load8_u\n"
+     "          end\n"
+     "          local.set $prev\n"
+     "          local.get $prev i32.const 91 i32.eq\n"
+     "          local.get $prev i32.const 32 i32.eq\n"
+     "          i32.or\n"
+     "          if\n"
+     "            local.get $a-ptr local.get $a-len local.get $n-ptr local.get $n-len\n"
+     "            local.get $i i32.const 1 i32.add call $has-prefix-at\n"
+     "            if\n"
+     "              local.get $i i32.const 1 i32.add local.get $n-len i32.add local.set $after\n"
+     "              local.get $after local.get $a-len i32.lt_u\n"
+     "              if\n"
+     "                local.get $a-ptr local.get $after i32.add i32.load8_u local.set $c\n"
+     "                local.get $c i32.const 34 i32.eq\n"
+     "                if\n"
+     "                  ;; after closing quote: space or ] or end\n"
+     "                  local.get $after i32.const 1 i32.add local.get $a-len i32.ge_u\n"
+     "                  if i32.const 1 return end\n"
+     "                  local.get $a-ptr local.get $after i32.const 1 i32.add i32.add i32.load8_u local.set $c\n"
+     "                  local.get $c i32.const 32 i32.eq\n"
+     "                  local.get $c i32.const 93 i32.eq\n"
+     "                  i32.or\n"
+     "                  if i32.const 1 return end\n"
+     "                end\n"
+     "              end\n"
+     "            end\n"
+     "          end\n"
+     "        end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func $is-empty-vec (param $ptr i32) (param $len i32) (result i32)\n"
+     "    local.get $len i32.const 2 i32.ne if i32.const 0 return end\n"
+     "    local.get $ptr i32.load8_u i32.const 91 i32.ne if i32.const 0 return end\n"
+     "    local.get $ptr i32.const 1 i32.add i32.load8_u i32.const 93 i32.ne if i32.const 0 return end\n"
+     "    i32.const 1)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $a-ptr i32) (param $a-len i32)"
+     " (param $n-ptr i32) (param $n-len i32) (result i32)\n"
+     "    (local $end i32) (local $out i32) (local $ret i32)\n"
+     "    (local $total i32) (local $body-len i32) (local $elem-len i32)\n"
+     "    local.get $a-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $n-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $a-len i32.eqz if else\n"
+     "      local.get $a-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $n-len i32.eqz if else\n"
+     "      local.get $n-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $a-ptr local.get $a-len i32.add local.tee $end\n"
+     "    local.get $a-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $n-ptr local.get $n-len i32.add local.tee $end\n"
+     "    local.get $n-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    ;; empty acc or empty name => reject\n"
+     "    local.get $a-len i32.eqz if call $empty-string return end\n"
+     "    local.get $n-len i32.eqz if call $empty-string return end\n"
+     "    ;; forbid quote/backslash in name\n"
+     "    local.get $n-ptr local.get $n-len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    ;; true-set membership (element equality)\n"
+     "    local.get $a-ptr local.get $a-len local.get $n-ptr local.get $n-len\n"
+     "    call $has-name-element\n"
+     "    if call $empty-string return end\n"
+     "    ;; elem = \" + name + \"\n"
+     "    local.get $n-len i32.const 2 i32.add local.set $elem-len\n"
+     "    local.get $elem-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $a-ptr local.get $a-len call $is-empty-vec\n"
+     "    if\n"
+     "      ;; \"[\" + \"name\" + \"]\" = 2 + elem-len\n"
+     "      local.get $elem-len i32.const 2 i32.add local.set $total\n"
+     "      local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "      i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "      local.get $out i32.const " open-ptr " i32.const 1 memory.copy\n"
+     "      local.get $out i32.const 1 i32.add i32.const " quote-ptr " i32.const 1 memory.copy\n"
+     "      local.get $out i32.const 2 i32.add local.get $n-ptr local.get $n-len memory.copy\n"
+     "      local.get $out i32.const 2 i32.add local.get $n-len i32.add\n"
+     "      i32.const " quote-ptr " i32.const 1 memory.copy\n"
+     "      local.get $out i32.const 3 i32.add local.get $n-len i32.add\n"
+     "      i32.const " close-ptr " i32.const 1 memory.copy\n"
+     "    else\n"
+     "      ;; body = acc[0..len-1] + space + \"name\" + ]\n"
+     "      local.get $a-len i32.const 1 i32.sub local.set $body-len\n"
+     "      local.get $body-len local.get $elem-len i32.add i32.const 2 i32.add local.set $total\n"
+     "      local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "      i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "      local.get $out local.get $a-ptr local.get $body-len memory.copy\n"
+     "      local.get $out local.get $body-len i32.add i32.const " space-ptr " i32.const 1 memory.copy\n"
+     "      local.get $out local.get $body-len i32.add i32.const 1 i32.add\n"
+     "      i32.const " quote-ptr " i32.const 1 memory.copy\n"
+     "      local.get $out local.get $body-len i32.add i32.const 2 i32.add\n"
+     "      local.get $n-ptr local.get $n-len memory.copy\n"
+     "      local.get $out local.get $body-len i32.add i32.const 2 i32.add local.get $n-len i32.add\n"
+     "      i32.const " quote-ptr " i32.const 1 memory.copy\n"
+     "      local.get $out local.get $body-len i32.add i32.const 3 i32.add local.get $n-len i32.add\n"
      "      i32.const " close-ptr " i32.const 1 memory.copy\n"
      "    end\n"
      "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
@@ -12784,6 +13027,9 @@
     :headers-edn-append
     (wasm-tools/parse-wat
      (headers-edn-append-wat (first (exported-functions kir))))
+    :headers-names-add
+    (wasm-tools/parse-wat
+     (headers-names-add-wat (first (exported-functions kir))))
     :http-result-err-edn
     (wasm-tools/parse-wat
      (http-result-err-edn-wat (first (exported-functions kir))))
