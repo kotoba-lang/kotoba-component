@@ -2209,6 +2209,83 @@
         (is (= "-3" (str/trim (:out pbad)))))
       (finally (Files/deleteIfExists path)))))
 
+
+(def http-headers-set-package-with-main-kir
+  {:format :kotoba.kir/v4
+   :exports ['http_headers_begin 'http_headers_pair 'http_headers_end 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_headers_begin
+     :params ['n]
+     :param-types [:i64]
+     :result :i64
+     :effects #{}
+     :body '(if (if (< n 0) true (> n 32)) -4 n)}
+    {:name 'http_headers_pair
+     :params ['state 'name 'value]
+     :param-types [:i64 :string :string]
+     :result :i64
+     :effects #{}
+     :body
+     '(if (< state 0)
+        state
+        (if (<= state 0)
+          -8
+          (let [pr (pair-ok name value)]
+            (if (if (= pr 0) false true) pr (- state 1)))))}
+    {:name 'http_headers_end
+     :params ['state]
+     :param-types [:i64]
+     :result :i64
+     :effects #{}
+     :body '(if (< state 0) state (if (if (= state 0) false true) -7 0))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body
+     '(let [a (http_headers_end (http_headers_begin 0))
+            b (http_headers_end
+               (http_headers_pair (http_headers_begin 1) "X-Ok" "yes"))
+            c (http_headers_pair (http_headers_begin 1) "Bad Name" "yes")
+            d (http_headers_pair (http_headers_begin 1) "X-Ok" "x\ny")
+            e (http_headers_begin 40)
+            f (http_headers_end (http_headers_begin 1))]
+        (+ (* a 100000) (* b 10000) (* c 1000) (* d 100) (* e 10) f))}]})
+
+(deftest http-headers-set-package-with-main-live-vector
+  "T8.3 multi-export: begin+pair+end+nested main → -3647."
+  (is (= :http-headers-set-package-with-main
+         (core/assert-supported! http-headers-set-package-with-main-kir)))
+  (let [world (wit/emit http-headers-set-package-with-main-kir)
+        core-bytes (core/emit http-headers-set-package-with-main-kir
+                              :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes
+                                   http-headers-set-package-with-main-kir
+                                   world)
+        path (Files/createTempFile "kc-headers-set-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-headers-set-package-with-main (:canonical-lowering packaged)))
+      (is (= 4 (count (:exports world))))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            b0 (shell/sh "wasmtime" "run" "--invoke" "http-headers-begin(0)" (str path))
+            bbad (shell/sh "wasmtime" "run" "--invoke" "http-headers-begin(40)" (str path))
+            e0 (shell/sh "wasmtime" "run" "--invoke" "http-headers-end(0)" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-3647" (str/trim (:out main))))
+        (is (zero? (:exit b0)) (:err b0))
+        (is (= "0" (str/trim (:out b0))))
+        (is (zero? (:exit bbad)) (:err bbad))
+        (is (= "-4" (str/trim (:out bbad))))
+        (is (zero? (:exit e0)) (:err e0))
+        (is (= "0" (str/trim (:out e0)))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest http-header-name-ok-desugared-live-vector
   "T8.3: real frontend loop desugar + live main → -130."
   (is (= :http-header-name-ok-with-main

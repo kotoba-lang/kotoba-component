@@ -827,6 +827,96 @@
          (live-main-named-policies?
           main {(:name value) 1 (:name pair) 2}))))
 
+
+(defn- http-headers-begin-function?
+  "http_headers_begin [n:i64]→i64: -4 if n∉[0,32] else n."
+  [{:keys [params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [n (first params)]
+         (boolean
+          (and (form-tree-walk body #(= % n))
+               (form-tree-walk body #(= % -4))
+               (or (form-tree-walk body #(= % 32))
+                   (form-tree-walk body #(= % 33))))))))
+
+(defn- http-headers-pair-function?
+  "http_headers_pair [state:i64 name:string value:string]→i64.
+  Prior err sticky; -8 when remaining=0; else name/value policy or remaining-1."
+  [{:keys [params param-types result body]}]
+  (and (= 3 (count params))
+       (= [:i64 :string :string] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (nth params 0)
+             nm (nth params 1)
+             val (nth params 2)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % nm))
+               (form-tree-walk body #(= % val))
+               (form-tree-walk body #(= % -8)))))))
+
+(defn- http-headers-end-function?
+  "http_headers_end [state:i64]→i64: prior err; -7 incomplete; 0 ok."
+  [{:keys [params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (first params)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % -7))
+               (form-tree-walk body #(and (number? %) (zero? %))))))))
+
+(defn- nested-policy-expr?
+  "i64/string lit or (policy arg…) with nested args under policy-arities map."
+  [form policy-arities]
+  (cond
+    (integer? form) true
+    (string? form) true
+    (and (seq? form)
+         (symbol? (first form))
+         (contains? policy-arities (first form))
+         (= (inc (get policy-arities (first form))) (count form))
+         (every? #(nested-policy-expr? % policy-arities) (rest form))) true
+    :else false))
+
+(defn- live-main-nested-policies?
+  "main [] :i64 with let bindings of nested pure policy composition + pure i64 arith."
+  [main-fn policy-arities]
+  (and (= 'main (:name main-fn))
+       (empty? (:params main-fn))
+       (= :i64 (:result main-fn))
+       (seq? (:body main-fn))
+       (= 'let (first (:body main-fn)))
+       (= 3 (count (:body main-fn)))
+       (let [bindings (nth (:body main-fn) 1)
+             expr (nth (:body main-fn) 2)]
+         (and (vector? bindings)
+              (even? (count bindings))
+              (let [pairs (partition 2 bindings)
+                    names (mapv first pairs)
+                    vals (mapv second pairs)]
+                (and (every? symbol? names)
+                     (every? #(nested-policy-expr? % policy-arities) vals)
+                     (pure-i64-arith? expr (set names))))))))
+
+(defn- http-headers-set-package-with-main?
+  "Four-export: begin + pair + end + live nested main (provider → -3647)."
+  [exports]
+  (let [begin (first (filter http-headers-begin-function? exports))
+        pair (first (filter http-headers-pair-function? exports))
+        end (first (filter http-headers-end-function? exports))
+        main (first (filter #(= 'main (:name %)) exports))]
+    (and begin pair end main
+         (= 4 (count exports))
+         (live-main-nested-policies?
+          main {(:name begin) 1 (:name pair) 3 (:name end) 1}))))
+
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
@@ -3231,6 +3321,15 @@
       (and (= 1 (count exports))
            (http-header-pair-ok-function? (first exports))
            (empty? (:effects kir))) :http-header-pair-ok
+      (and (= 4 (count exports))
+           (http-headers-set-package-with-main? exports)
+           (empty? (:effects kir))) :http-headers-set-package-with-main
+      (and (= 1 (count exports))
+           (http-headers-begin-function? (first exports))
+           (empty? (:effects kir))) :http-headers-begin
+      (and (= 1 (count exports))
+           (http-headers-end-function? (first exports))
+           (empty? (:effects kir))) :http-headers-end
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (vector-i64-identity-function? (first exports))
@@ -4763,6 +4862,233 @@
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
+
+
+(defn- http-headers-set-package-wat
+  "Four-export package: begin + pair + end + nested live main → -3647.
+
+  begin(n): -4 if n∉[0,32] else n (remaining).
+  pair(state,name,value): sticky err; -8 if remaining=0; name/value policy;
+    else remaining-1.
+  end(state): sticky err; -7 if remaining≠0; else 0.
+  main: nested pure policy composition with string/i64 lits."
+  [begin-fn pair-fn end-fn main-fn]
+  (let [begin-export (wit-name (:name begin-fn))
+        pair-export (wit-name (:name pair-fn))
+        end-export (wit-name (:name end-fn))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        begin-name (:name begin-fn)
+        pair-name (:name pair-fn)
+        end-name (:name end-fn)
+        ;; Collect all string literals from nested main exprs
+        collect-strings
+        (fn collect [form]
+          (cond
+            (string? form) [form]
+            (seq? form) (mapcat collect (rest form))
+            (vector? form) (mapcat collect form)
+            :else []))
+        main-string-lits
+        (let [vals (mapv second (partition 2 (nth (:body main-fn) 1)))]
+          (vec (distinct (mapcat collect-strings vals))))
+        prepared-strs
+        (loop [remaining main-string-lits
+               offset 8
+               acc []]
+          (if-let [s (first remaining)]
+            (let [b (.getBytes ^String s StandardCharsets/UTF_8)
+                  len (alength b)]
+              (if (zero? len)
+                (recur (next remaining) offset
+                       (conj acc {:value s :bytes [] :length 0 :pointer 0}))
+                (recur (next remaining)
+                       (+ offset len)
+                       (conj acc {:value s :bytes (vec b) :length len :pointer offset}))))
+            acc))
+        non-empty (filterv #(pos? (:length %)) prepared-strs)
+        arena-base (align-up (if (seq non-empty)
+                               (+ (:pointer (last non-empty))
+                                  (:length (last non-empty)))
+                               8)
+                             8)
+        str-ptr (into {} (map (juxt :value :pointer) prepared-strs))
+        str-len (into {} (map (juxt :value :length) prepared-strs))
+        main-data
+        (apply str
+               (map (fn [leaf]
+                      (str "  (data (i32.const " (:pointer leaf) ") \""
+                           (wat-data (:bytes leaf)) "\")\n"))
+                    non-empty))
+        main-locals
+        (let [names (mapv first (partition 2 (nth (:body main-fn) 1)))]
+          (apply str (map #(str " (local $" (name %) " i64)") names)))
+        ;; Recursive nested expr → WAT that leaves one i64 on stack
+        emit-expr
+        (fn emit [form]
+          (cond
+            (integer? form)
+            (str "    i64.const " form "\n")
+            (and (seq? form) (= (first form) begin-name))
+            (str (emit (nth form 1)) "    call $begin\n")
+            (and (seq? form) (= (first form) end-name))
+            (str (emit (nth form 1)) "    call $end\n")
+            (and (seq? form) (= (first form) pair-name))
+            (let [st (nth form 1)
+                  nm (nth form 2)
+                  val (nth form 3)]
+              (when-not (and (string? nm) (string? val))
+                (reject "headers-set pair requires string lit name/value"
+                        {:name nm :value val}))
+              (str (emit st)
+                   "    i32.const " (get str-ptr nm)
+                   " i32.const " (get str-len nm) "\n"
+                   "    i32.const " (get str-ptr val)
+                   " i32.const " (get str-len val) "\n"
+                   "    call $pair\n"))
+            :else (reject "unsupported nested headers-set main expr" {:form form})))
+        main-calls
+        (let [pairs (partition 2 (nth (:body main-fn) 1))]
+          (apply str
+                 (map (fn [[sym call]]
+                        (str (emit-expr call)
+                             "    local.set $" (name sym) "\n"))
+                      pairs)))
+        main-expr (nth (:body main-fn) 2)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     main-data
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     ;; tchar
+     "  (func $tchar-ok (param $c i32) (result i32)\n"
+     "    local.get $c i32.const 48 i32.ge_u\n"
+     "    local.get $c i32.const 57 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 65 i32.ge_u\n"
+     "    local.get $c i32.const 90 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 97 i32.ge_u\n"
+     "    local.get $c i32.const 122 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 33 i32.eq\n"
+     "    local.get $c i32.const 35 i32.eq i32.or\n"
+     "    local.get $c i32.const 36 i32.eq i32.or\n"
+     "    local.get $c i32.const 37 i32.eq i32.or\n"
+     "    local.get $c i32.const 38 i32.eq i32.or\n"
+     "    local.get $c i32.const 39 i32.eq i32.or\n"
+     "    local.get $c i32.const 42 i32.eq i32.or\n"
+     "    local.get $c i32.const 43 i32.eq i32.or\n"
+     "    local.get $c i32.const 45 i32.eq i32.or\n"
+     "    local.get $c i32.const 46 i32.eq i32.or\n"
+     "    local.get $c i32.const 94 i32.eq i32.or\n"
+     "    local.get $c i32.const 95 i32.eq i32.or\n"
+     "    local.get $c i32.const 96 i32.eq i32.or\n"
+     "    local.get $c i32.const 124 i32.eq i32.or\n"
+     "    local.get $c i32.const 126 i32.eq i32.or)\n"
+     "  (func $name (param $ptr i32) (param $len i32) (result i64)\n"
+     "    (local $end i32) (local $i i32) (local $c i32)\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.eqz if i64.const -1 return end\n"
+     "    local.get $len i32.const 128 i32.gt_u if i64.const -2 return end\n"
+     "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $ok\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u br_if $ok\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c call $tchar-ok i32.eqz if i64.const -3 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i64.const 0)\n"
+     "  (func $value (param $ptr i32) (param $len i32) (result i64)\n"
+     "    (local $end i32) (local $i i32) (local $c i32)\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.const 8192 i32.gt_u if i64.const -2 return end\n"
+     "    local.get $len i32.eqz if i64.const 0 return end\n"
+     "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $ok\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u br_if $ok\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.eqz if i64.const -3 return end\n"
+     "        local.get $c i32.const 10 i32.eq if i64.const -3 return end\n"
+     "        local.get $c i32.const 13 i32.eq if i64.const -3 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i64.const 0)\n"
+     "  (func $begin (param $n i64) (result i64)\n"
+     "    local.get $n i64.const 0 i64.lt_s if i64.const -4 return end\n"
+     "    local.get $n i64.const 32 i64.gt_s if i64.const -4 return end\n"
+     "    local.get $n)\n"
+     "  (func $pair (param $state i64)\n"
+     "              (param $n-ptr i32) (param $n-len i32)\n"
+     "              (param $v-ptr i32) (param $v-len i32) (result i64)\n"
+     "    (local $nr i64) (local $vr i64)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 0 i64.le_s if i64.const -8 return end\n"
+     "    local.get $n-ptr local.get $n-len call $name local.set $nr\n"
+     "    local.get $nr i64.const 0 i64.ne if local.get $nr return end\n"
+     "    local.get $v-ptr local.get $v-len call $value local.set $vr\n"
+     "    local.get $vr i64.const 0 i64.ne if\n"
+     "      local.get $vr i64.const -2 i64.eq if i64.const -5 return end\n"
+     "      local.get $vr i64.const -3 i64.eq if i64.const -6 return end\n"
+     "      local.get $vr return\n"
+     "    end\n"
+     "    local.get $state i64.const 1 i64.sub)\n"
+     "  (func $end (param $state i64) (result i64)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 0 i64.ne if i64.const -7 return end\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" begin-export "\") (param $n i64) (result i64)\n"
+     "    local.get $n call $begin)\n"
+     "  (func (export \"cm32p2||" begin-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" pair-export "\") (param $state i64)\n"
+     "    (param $n-ptr i32) (param $n-len i32)\n"
+     "    (param $v-ptr i32) (param $v-len i32) (result i64)\n"
+     "    local.get $state local.get $n-ptr local.get $n-len\n"
+     "    local.get $v-ptr local.get $v-len call $pair)\n"
+     "  (func (export \"cm32p2||" pair-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" end-export "\") (param $state i64) (result i64)\n"
+     "    local.get $state call $end)\n"
+     "  (func (export \"cm32p2||" end-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||main\") (result i64)\n"
+     "    " main-locals "\n"
+     main-calls
+     "    " (emit-i64-arith-wat main-expr) ")\n"
+     "  (func (export \"cm32p2||main_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 
 (defn- string-expression-wat [function]
   (let [export (wit-name (:name function))
@@ -9465,6 +9791,13 @@
           pair (first (filter http-header-pair-ok-function? exports))
           main (first (filter #(= 'main (:name %)) exports))]
       (wasm-tools/parse-wat (http-header-value-package-wat value pair main)))
+    :http-headers-set-package-with-main
+    (let [exports (exported-functions kir)
+          begin (first (filter http-headers-begin-function? exports))
+          pair (first (filter http-headers-pair-function? exports))
+          end (first (filter http-headers-end-function? exports))
+          main (first (filter #(= 'main (:name %)) exports))]
+      (wasm-tools/parse-wat (http-headers-set-package-wat begin pair end main)))
     :vector-i64-identity
     (wasm-tools/parse-wat
      (vector-i64-identity-wat (first (exported-functions kir))))
