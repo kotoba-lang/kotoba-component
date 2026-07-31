@@ -1530,3 +1530,97 @@
         (is (zero? (:exit bad-h)) (:err bad-h))
         (is (= "-2" (str/trim (:out bad-h)))))
       (finally (Files/deleteIfExists path)))))
+
+
+(def http-error-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['http-error-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http-error-ok
+     :params ['code 'message 'retryable]
+     :param-types [:string :string :i64]
+     :result :i64
+     :effects #{}
+     :body '(if (<= (string-length code) 0)
+              -1
+              (if (> (string-length code) 128)
+                -2
+                (if (> (string-length message) 65536)
+                  -4
+                  (if (< retryable 0)
+                    -5
+                    (if (> retryable 1)
+                      -5
+                      0)))))}]})
+
+(def http-result-arm-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['http-result-arm-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http-result-arm-ok
+     :params ['arm]
+     :param-types [:i64]
+     :result :i64
+     :effects #{}
+     :body '(if (< arm 0)
+              -1
+              (if (> arm 1)
+                -1
+                0))}]})
+
+(deftest http-error-ok-canonical-lowering
+  "T8.3 typed Component composition: error_ok packing without kotoba:typed."
+  (is (= :http-error-ok (core/assert-supported! http-error-ok-kir)))
+  (let [world (wit/emit http-error-ok-kir)
+        core-bytes (core/emit http-error-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-error-ok-kir world)
+        path (Files/createTempFile "kc-http-error-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-error-ok (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-error-ok(\"http/transport\",\"failed\",0)" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke"
+                            "http-error-ok(\"\",\"x\",0)" (str path))
+            badc (shell/sh "wasmtime" "run" "--invoke"
+                           "http-error-ok(\"bad name\",\"x\",0)" (str path))
+            badr (shell/sh "wasmtime" "run" "--invoke"
+                           "http-error-ok(\"http/ok\",\"x\",2)" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty))))
+        (is (zero? (:exit badc)) (:err badc))
+        (is (= "-3" (str/trim (:out badc))))
+        (is (zero? (:exit badr)) (:err badr))
+        (is (= "-5" (str/trim (:out badr)))))
+      (finally (Files/deleteIfExists path)))))
+
+(deftest http-result-arm-ok-canonical-lowering
+  "T8.3 typed Component composition: result arm tag without kotoba:typed."
+  (is (= :http-result-arm-ok (core/assert-supported! http-result-arm-ok-kir)))
+  (let [world (wit/emit http-result-arm-ok-kir)
+        core-bytes (core/emit http-result-arm-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-result-arm-ok-kir world)
+        path (Files/createTempFile "kc-http-result-arm-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-result-arm-ok (:canonical-lowering packaged)))
+      (let [ok0 (shell/sh "wasmtime" "run" "--invoke" "http-result-arm-ok(0)" (str path))
+            ok1 (shell/sh "wasmtime" "run" "--invoke" "http-result-arm-ok(1)" (str path))
+            bad (shell/sh "wasmtime" "run" "--invoke" "http-result-arm-ok(3)" (str path))]
+        (is (zero? (:exit ok0)) (:err ok0))
+        (is (= "0" (str/trim (:out ok0))))
+        (is (zero? (:exit ok1)) (:err ok1))
+        (is (= "0" (str/trim (:out ok1))))
+        (is (zero? (:exit bad)) (:err bad))
+        (is (= "-1" (str/trim (:out bad)))))
+      (finally (Files/deleteIfExists path)))))
