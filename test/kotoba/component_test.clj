@@ -1544,6 +1544,64 @@
         (is (= "" (read-string (str/trim (:out bad-hdr))))))
       (finally (Files/deleteIfExists path)))))
 
+(def http-request-edn0-kir
+  "T8.3 0-header request EDN skeleton (WAT owns scan + decimal timeout)."
+  {:format :kotoba.kir/v4
+   :exports ['http_request_edn0]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_request_edn0
+     :params ['url 'body 'timeout-ms]
+     :param-types [:string :string :i64]
+     :result :string
+     :effects #{}
+     :body
+     '(let [qu (edn_quoted url)
+            qb (edn_quoted body)]
+        (if (or (= (string-byte-length qu) 0)
+                (= (string-byte-length qb) 0)
+                (< timeout-ms 0))
+          ""
+          (string-concat "{:url "
+                         (string-concat qu
+                                        (string-concat " :headers [] :body "
+                                                       (string-concat qb
+                                                                      (string-concat " :timeout-ms "
+                                                                                     (string-concat (i64-str timeout-ms) "}"))))))))}]})
+
+(deftest http-request-edn0-canonical-lowering
+  "T8.3 reject-path: ok request, zero timeout, negative reject, bad atom."
+  (is (= :http-request-edn0 (core/assert-supported! http-request-edn0-kir)))
+  (let [world (wit/emit http-request-edn0-kir)
+        core-bytes (core/emit http-request-edn0-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-request-edn0-kir world)
+        path (Files/createTempFile "kc-http-request-edn0-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-request-edn0 (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-request-edn0(\"https://x\",\"{}\",1000)" (str path))
+            zero (shell/sh "wasmtime" "run" "--invoke"
+                           "http-request-edn0(\"https://x\",\"{}\",0)" (str path))
+            neg (shell/sh "wasmtime" "run" "--invoke"
+                          "http-request-edn0(\"https://x\",\"{}\",-1)" (str path))
+            bad (shell/sh "wasmtime" "run" "--invoke"
+                          "http-request-edn0(\"a\\\"b\",\"{}\",1)" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "{:url \"https://x\" :headers [] :body \"{}\" :timeout-ms 1000}"
+               (read-string (str/trim (:out ok)))))
+        (is (zero? (:exit zero)) (:err zero))
+        (is (= "{:url \"https://x\" :headers [] :body \"{}\" :timeout-ms 0}"
+               (read-string (str/trim (:out zero)))))
+        (is (zero? (:exit neg)) (:err neg))
+        (is (= "" (read-string (str/trim (:out neg)))))
+        (is (zero? (:exit bad)) (:err bad))
+        (is (= "" (read-string (str/trim (:out bad))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
   (is (= :string-expression-package
