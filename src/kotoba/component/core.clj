@@ -56,6 +56,46 @@
        (= 2 (count body))
        (= (first params) (second body))))
 
+(defn- string-atom?
+  "Parameter name or string literal admitted as a string-eq/substring operand."
+  [form parameters]
+  (or (and (symbol? form) (contains? parameters form))
+      (string? form)))
+
+(defn- string-eq-function?
+  "Canonical `string,string -> s64` equality (string=?). Returns 1/0 i64.
+
+  Each operand is a parameter or UTF-8 literal. No kotoba:typed."
+  [{:keys [params param-types result body]}]
+  (and (= (count params) (count param-types))
+       (every? #{:string} param-types)
+       (= :i64 result)
+       (seq? body)
+       (= 'string=? (first body))
+       (= 3 (count body))
+       (let [params-set (set params)]
+         (and (string-atom? (nth body 1) params-set)
+              (string-atom? (nth body 2) params-set)
+              ;; every parameter used is :string (already) and mentioned operands
+              ;; may be literals; unused params not allowed for this slice
+              (= (set (filter symbol? [(nth body 1) (nth body 2)]))
+                 (set params))))))
+
+(defn- string-substring-function?
+  "Canonical `string,s64,s64 -> string` UTF-8 byte-range slice.
+
+  Body: (string-substring s start end) with s/start/end the three params."
+  [{:keys [params param-types result body]}]
+  (and (= 3 (count params))
+       (= [:string :i64 :i64] param-types)
+       (= :string result)
+       (seq? body)
+       (= 'string-substring (first body))
+       (= 4 (count body))
+       (= (nth params 0) (nth body 1))
+       (= (nth params 1) (nth body 2))
+       (= (nth params 2) (nth body 3))))
+
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
@@ -2399,6 +2439,14 @@
            (empty? (:effects kir))) :string-length
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
+           (string-eq-function? (first exports))
+           (empty? (:effects kir))) :string-eq
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
+           (string-substring-function? (first exports))
+           (empty? (:effects kir))) :string-substring
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
            (vector-i64-identity-function? (first exports))
            (empty? (:effects kir))) :vector-i64-identity
       (and (= 1 (count (:functions kir)))
@@ -2549,6 +2597,200 @@
      "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
      "    local.get $len i64.extend_i32_u)\n"
      "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- string-operand-leaf
+  "Map a string=? operand (param symbol or literal) to a prepare-leaves-like leaf."
+  [form parameter-indices]
+  (if (symbol? form)
+    {:kind :parameter :name form :index (get parameter-indices form)}
+    (let [bytes (vec (.getBytes ^String form "UTF-8"))]
+      {:kind :literal :value form :bytes bytes :length (count bytes)})))
+
+(defn- string-eq-wat
+  "Canonical `string,string -> s64` equality (1 equal / 0 not).
+
+  Compares UTF-8 bytes via memory.compare after validating both operands.
+  Literals are embedded as data segments; params use Canonical (ptr,len)."
+  [function]
+  (let [export (wit-name (:name function))
+        params (:params function)
+        body (:body function)
+        left (nth body 1)
+        right (nth body 2)
+        parameter-indices (zipmap params (range))
+        left-leaf (string-operand-leaf left parameter-indices)
+        right-leaf (string-operand-leaf right parameter-indices)
+        literals (filterv #(= :literal (:kind %)) [left-leaf right-leaf])
+        ;; place literals starting at offset 8
+        prepared
+        (loop [remaining literals offset 8 acc []]
+          (if-let [leaf (first remaining)]
+            (recur (next remaining)
+                   (+ offset (:length leaf))
+                   (conj acc (assoc leaf :pointer offset)))
+            acc))
+        lit-by-value (into {} (map (juxt :value identity) prepared))
+        resolve-leaf (fn [leaf]
+                       (if (= :literal (:kind leaf))
+                         (get lit-by-value (:value leaf))
+                         leaf))
+        left* (resolve-leaf left-leaf)
+        right* (resolve-leaf right-leaf)
+        arena-base (align-up (if (seq prepared)
+                               (+ 8 (apply + (map :length prepared)))
+                               8)
+                             8)
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        string-param-count (count params)
+        params-wat
+        (apply str
+               (mapcat (fn [index]
+                         [(str " (param $p" index "-ptr i32)")
+                          (str " (param $p" index "-len i32)")])
+                       (range string-param-count)))
+        validate-params
+        (apply str
+               (map (fn [index]
+                      (str
+                       "    local.get $p" index "-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+                       "    local.get $p" index "-len i32.eqz if else\n"
+                       "      local.get $p" index "-ptr i32.const 8 i32.lt_u if unreachable end\n"
+                       "    end\n"
+                       "    local.get $p" index "-ptr local.get $p" index "-len i32.add\n"
+                       "    local.tee $end local.get $p" index "-ptr i32.lt_u if unreachable end\n"
+                       "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"))
+                    (range string-param-count)))
+        left-ptr (if (= :parameter (:kind left*))
+                   (str "local.get $p" (:index left*) "-ptr")
+                   (str "i32.const " (:pointer left*)))
+        left-len (if (= :parameter (:kind left*))
+                   (str "local.get $p" (:index left*) "-len")
+                   (str "i32.const " (:length left*)))
+        right-ptr (if (= :parameter (:kind right*))
+                    (str "local.get $p" (:index right*) "-ptr")
+                    (str "i32.const " (:pointer right*)))
+        right-len (if (= :parameter (:kind right*))
+                    (str "local.get $p" (:index right*) "-len")
+                    (str "i32.const " (:length right*)))
+        data-segments
+        (apply str
+               (map (fn [leaf]
+                      (str "  (data (i32.const " (:pointer leaf) ") \""
+                           (wat-data (:bytes leaf)) "\")\n"))
+                    prepared))]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func (export \"cm32p2||" export "\")" params-wat " (result i64)\n"
+     "    (local $end i32) (local $i i32) (local $n i32) (local $lp i32) (local $rp i32)\n"
+     validate-params
+     "    " left-len " " right-len " i32.ne if i64.const 0 return end\n"
+     "    " left-len " local.set $n\n"
+     "    " left-ptr " local.set $lp\n"
+     "    " right-ptr " local.set $rp\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $n i32.ge_u br_if $done\n"
+     "        local.get $lp local.get $i i32.add i32.load8_u\n"
+     "        local.get $rp local.get $i i32.add i32.load8_u\n"
+     "        i32.ne if i64.const 0 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i64.const 1)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     data-segments
+     ")\n")))
+
+(defn- string-substring-wat
+  "Canonical `string,s64,s64 -> string` UTF-8 byte slice.
+
+  Validates 0 <= start <= end <= len and (end-start) <= max string bytes,
+  then copies the range into a fresh realloc buffer and returns (ptr,len)."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        arena-base 8]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $ptr i32) (param $len i32) (param $start i64) (param $end i64)"
+     " (result i32)\n"
+     "    (local $end-ptr i32) (local $out-len i32) (local $out i32) (local $ret i32)\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.eqz if else\n"
+     "      local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end-ptr\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end-ptr i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $start i64.const 0 i64.lt_s if unreachable end\n"
+     "    local.get $end local.get $start i64.lt_s if unreachable end\n"
+     "    local.get $end local.get $len i64.extend_i32_u i64.gt_u if unreachable end\n"
+     "    local.get $end local.get $start i64.sub i32.wrap_i64 local.set $out-len\n"
+     "    local.get $out-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const 1 local.get $out-len\n"
+     "    call $realloc local.set $out\n"
+     "    local.get $out-len i32.eqz if else\n"
+     "      local.get $out local.get $ptr local.get $start i32.wrap_i64 i32.add\n"
+     "      local.get $out-len memory.copy\n"
+     "    end\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $out-len i32.store offset=4 local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
@@ -7191,6 +7433,12 @@
     :string-length
     (wasm-tools/parse-wat
      (string-length-wat (first (exported-functions kir))))
+    :string-eq
+    (wasm-tools/parse-wat
+     (string-eq-wat (first (exported-functions kir))))
+    :string-substring
+    (wasm-tools/parse-wat
+     (string-substring-wat (first (exported-functions kir))))
     :vector-i64-identity
     (wasm-tools/parse-wat
      (vector-i64-identity-wat (first (exported-functions kir))))

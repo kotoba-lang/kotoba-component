@@ -1211,3 +1211,104 @@
         (is (= "6" (str/trim (:out utf8)))))
       (finally
         (Files/deleteIfExists component-path)))))
+
+(def string-eq-kir
+  {:format :kotoba.kir/v4
+   :exports ['eq]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'eq
+     :params ['a 'b]
+     :param-types [:string :string]
+     :result :i64
+     :effects #{}
+     :body '(string=? a b)}]})
+
+(def string-eq-lit-kir
+  {:format :kotoba.kir/v4
+   :exports ['is-https]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'is-https
+     :params ['s]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body '(string=? s "https://")}]})
+
+(def string-substring-kir
+  {:format :kotoba.kir/v4
+   :exports ['slice]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'slice
+     :params ['s 'start 'end]
+     :param-types [:string :i64 :i64]
+     :result :string
+     :effects #{}
+     :body '(string-substring s start end)}]})
+
+(deftest string-eq-canonical-lowering
+  "T8.3 typed Component: string=? without kotoba:typed."
+  (is (= :string-eq (core/assert-supported! string-eq-kir)))
+  (is (= :string-eq (core/assert-supported! string-eq-lit-kir)))
+  (let [world (wit/emit string-eq-kir)
+        core-bytes (core/emit string-eq-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes string-eq-kir world)
+        path (Files/createTempFile "kc-string-eq-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :string-eq (:canonical-lowering packaged)))
+      (let [same (shell/sh "wasmtime" "run" "--invoke" "eq(\"ab\",\"ab\")" (str path))
+            diff (shell/sh "wasmtime" "run" "--invoke" "eq(\"ab\",\"ac\")" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke" "eq(\"\",\"\")" (str path))]
+        (is (zero? (:exit same)) (:err same))
+        (is (= "1" (str/trim (:out same))))
+        (is (zero? (:exit diff)) (:err diff))
+        (is (= "0" (str/trim (:out diff))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "1" (str/trim (:out empty)))))
+      (finally (Files/deleteIfExists path))))
+  (let [world (wit/emit string-eq-lit-kir)
+        core-bytes (core/emit string-eq-lit-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes string-eq-lit-kir world)
+        path (Files/createTempFile "kc-string-eq-lit-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke" "is-https(\"https://\")" (str path))
+            no (shell/sh "wasmtime" "run" "--invoke" "is-https(\"http://\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "1" (str/trim (:out ok))))
+        (is (zero? (:exit no)) (:err no))
+        (is (= "0" (str/trim (:out no)))))
+      (finally (Files/deleteIfExists path)))))
+
+(deftest string-substring-canonical-lowering
+  "T8.3 typed Component: string-substring without kotoba:typed."
+  (is (= :string-substring (core/assert-supported! string-substring-kir)))
+  (let [world (wit/emit string-substring-kir)
+        core-bytes (core/emit string-substring-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes string-substring-kir world)
+        path (Files/createTempFile "kc-string-substr-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :string-substring (:canonical-lowering packaged)))
+      (let [mid (shell/sh "wasmtime" "run" "--invoke" "slice(\"hello\",1,4)" (str path))
+            full (shell/sh "wasmtime" "run" "--invoke" "slice(\"ab\",0,2)" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke" "slice(\"ab\",1,1)" (str path))]
+        (is (zero? (:exit mid)) (:err mid))
+        (is (= "\"ell\"" (str/trim (:out mid))))
+        (is (zero? (:exit full)) (:err full))
+        (is (= "\"ab\"" (str/trim (:out full))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "\"\"" (str/trim (:out empty)))))
+      (finally (Files/deleteIfExists path)))))
