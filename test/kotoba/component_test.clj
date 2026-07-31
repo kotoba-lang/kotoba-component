@@ -1230,6 +1230,54 @@
                                                                                                       (string-concat "\" :timeout-ms "
                                                                                                                      (string-concat timeout-str "}"))))))))}]})
 
+(def edn-quoted-kir
+  "T8.3 reject-path edn_quoted: let + length + concat skeleton (WAT scans)."
+  {:format :kotoba.kir/v4
+   :exports ['edn_quoted]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'edn_quoted
+     :params ['s]
+     :param-types [:string]
+     :result :string
+     :effects #{}
+     :body
+     '(let [n (string-byte-length s)]
+        (if (or false false)
+          ""
+          (string-concat "\"" (string-concat s "\""))))}]})
+
+(deftest edn-quoted-canonical-lowering
+  "T8.3 reject-path: quote/backslash scan → empty; else wrap with quotes."
+  (is (= :edn-quoted (core/assert-supported! edn-quoted-kir)))
+  (let [world (wit/emit edn-quoted-kir)
+        core-bytes (core/emit edn-quoted-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes edn-quoted-kir world)
+        path (Files/createTempFile "kc-edn-quoted-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :edn-quoted (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke" "edn-quoted(\"hello\")"
+                         (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke" "edn-quoted(\"\")"
+                            (str path))
+            dq (shell/sh "wasmtime" "run" "--invoke"
+                         "edn-quoted(\"a\\\"b\")" (str path))
+            bs (shell/sh "wasmtime" "run" "--invoke"
+                         "edn-quoted(\"a\\\\b\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "\"hello\"" (read-string (str/trim (:out ok)))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "\"\"" (read-string (str/trim (:out empty)))))
+        (is (zero? (:exit dq)) (:err dq))
+        (is (= "" (read-string (str/trim (:out dq)))))
+        (is (zero? (:exit bs)) (:err bs))
+        (is (= "" (read-string (str/trim (:out bs))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
   (is (= :string-expression-package
