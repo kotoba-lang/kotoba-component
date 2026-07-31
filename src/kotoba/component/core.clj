@@ -388,6 +388,80 @@
                                                  (number? e5)
                                                  (zero? e5)))))))))))))))
 
+(defn- http-error-ok-function?
+  "Composition for http_error_ok (ADR 0191) without kotoba:typed.
+
+  Params: [code :string, message :string, retryable :i64] Result: :i64
+  Codes: -1 empty code, -2 code>128, -3 bad char (WAT), -4 msg>65536,
+  -5 retryable∉{0,1}, 0 ok.
+
+  Recognizes nested-if length/retryable skeleton; WAT always applies code
+  charset scan [A-Za-z0-9/_:.-]."
+  [{:keys [params param-types result body]}]
+  (and (= 3 (count params))
+       (= 3 (count param-types))
+       (= [:string :string :i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [code (nth params 0)
+             msg (nth params 1)
+             retry (nth params 2)
+             if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))
+             len-of? (fn [form sym]
+                       (and (seq? form)
+                            (contains? #{'string-length 'string-byte-length} (first form))
+                            (= 2 (count form))
+                            (= sym (second form))))]
+         (and (if4? body)
+              ;; (if (<= (string-length code) 0) -1 ...)
+              (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
+                (and (= -1 t1)
+                     (seq? c1) (contains? #{'<= '<} (first c1)) (len-of? (nth c1 1) code)
+                     (if4? e1)
+                     (let [c2 (nth e1 1) t2 (nth e1 2) e2 (nth e1 3)]
+                       (and (= -2 t2)
+                            (seq? c2) (contains? #{'> '>=} (first c2)) (len-of? (nth c2 1) code)
+                            (#{128 129} (nth c2 2))
+                            (if4? e2)
+                            (let [c3 (nth e2 1) t3 (nth e2 2) e3 (nth e2 3)]
+                              (and (= -4 t3)
+                                   (seq? c3) (contains? #{'> '>=} (first c3)) (len-of? (nth c3 1) msg)
+                                   (#{65536 65537} (nth c3 2))
+                                   (if4? e3)
+                                   (let [c4 (nth e3 1) t4 (nth e3 2) e4 (nth e3 3)]
+                                     (and (= -5 t4)
+                                          (seq? c4) (contains? #{'< '<=} (first c4))
+                                          (= retry (nth c4 1))
+                                          (if4? e4)
+                                          (let [c5 (nth e4 1) t5 (nth e4 2) e5 (nth e4 3)]
+                                            (and (= -5 t5)
+                                                 (seq? c5) (contains? #{'> '>=} (first c5))
+                                                 (= retry (nth c5 1))
+                                                 (#{1 2} (nth c5 2))
+                                                 (number? e5)
+                                                 (zero? e5)))))))))))))))
+
+(defn- http-result-arm-ok-function?
+  "Composition for http_result_arm_ok (ADR 0191): arm ∈ {0,1} → 0 else -1."
+  [{:keys [params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [arm (first params)
+             if4? (fn [form] (and (seq? form) (= 'if (first form)) (= 4 (count form))))]
+         (and (if4? body)
+              (let [c1 (nth body 1) t1 (nth body 2) e1 (nth body 3)]
+                (and (= -1 t1)
+                     (seq? c1) (contains? #{'< '<=} (first c1)) (= arm (nth c1 1))
+                     (if4? e1)
+                     (let [c2 (nth e1 1) t2 (nth e1 2) e2 (nth e1 3)]
+                       (and (= -1 t2)
+                            (seq? c2) (contains? #{'> '>=} (first c2)) (= arm (nth c2 1))
+                            (#{1 2} (nth c2 2))
+                            (number? e2)
+                            (zero? e2)))))))))
+
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
@@ -2719,6 +2793,11 @@
       (and (every? scalar-function? exports)
            (some? (scalar-capability-imports kir)))
       :scalar-with-capabilities
+      ;; Prefer specialized HTTP arm tag before generic :scalar (same ABI).
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
+           (http-result-arm-ok-function? (first exports))
+           (empty? (:effects kir))) :http-result-arm-ok
       (every? scalar-function? exports) :scalar
       match-module :structural-union-match-module
       (and (= 1 (count (:functions kir)))
@@ -2753,6 +2832,10 @@
            (= 1 (count exports))
            (http-response-ok-function? (first exports))
            (empty? (:effects kir))) :http-response-ok
+      (and (= 1 (count (:functions kir)))
+           (= 1 (count exports))
+           (http-error-ok-function? (first exports))
+           (empty? (:effects kir))) :http-error-ok
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (vector-i64-identity-function? (first exports))
@@ -3402,6 +3485,109 @@
      "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- http-error-ok-wat
+  "Composition: http_error_ok (ADR 0191) without kotoba:typed.
+
+  Params: code (ptr,len), message (ptr,len), retryable i64.
+  Codes: -1 empty code, -2 code>128, -3 bad char, -4 msg>65536, -5 retryable, 0 ok.
+  Charset [A-Za-z0-9/_:.-] scanned in WAT."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        arena-base 8]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $code-char-ok (param $c i32) (result i32)\n"
+     "    local.get $c i32.const 48 i32.ge_u\n"
+     "    local.get $c i32.const 57 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 65 i32.ge_u\n"
+     "    local.get $c i32.const 90 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 97 i32.ge_u\n"
+     "    local.get $c i32.const 122 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 47 i32.eq\n"
+     "    local.get $c i32.const 58 i32.eq i32.or\n"
+     "    local.get $c i32.const 46 i32.eq i32.or\n"
+     "    local.get $c i32.const 45 i32.eq i32.or\n"
+     "    local.get $c i32.const 95 i32.eq i32.or)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $code-ptr i32) (param $code-len i32)"
+     " (param $msg-ptr i32) (param $msg-len i32)"
+     " (param $retryable i64) (result i64)\n"
+     "    (local $end i32) (local $i i32) (local $c i32)\n"
+     "    local.get $code-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $code-len i32.eqz if i64.const -1 return end\n"
+     "    local.get $code-len i32.const 128 i32.gt_u if i64.const -2 return end\n"
+     "    local.get $code-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $code-ptr local.get $code-len i32.add local.tee $end\n"
+     "    local.get $code-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $code-ok\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $code-len i32.ge_u br_if $code-ok\n"
+     "        local.get $code-ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c call $code-char-ok i32.eqz if i64.const -3 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    local.get $msg-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $msg-len i32.eqz if else\n"
+     "      local.get $msg-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $msg-ptr local.get $msg-len i32.add local.tee $end\n"
+     "    local.get $msg-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $msg-len i32.const 65536 i32.gt_u if i64.const -4 return end\n"
+     "    local.get $retryable i64.const 0 i64.lt_s if i64.const -5 return end\n"
+     "    local.get $retryable i64.const 1 i64.gt_s if i64.const -5 return end\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- http-result-arm-ok-wat
+  "Composition: http_result_arm_ok (ADR 0191) — pure i64 arm ∈ {0,1}."
+  [function]
+  (let [export (wit-name (:name function))]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    i32.const 0)\n"
+     "  (func (export \"cm32p2||" export "\") (param $arm i64) (result i64)\n"
+     "    local.get $arm i64.const 0 i64.lt_s if i64.const -1 return end\n"
+     "    local.get $arm i64.const 1 i64.gt_s if i64.const -1 return end\n"
+     "    i64.const 0)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
      ")\n")))
 
 (defn- string-expression-wat [function]
@@ -8062,6 +8248,12 @@
     :http-response-ok
     (wasm-tools/parse-wat
      (http-response-ok-wat (first (exported-functions kir))))
+    :http-error-ok
+    (wasm-tools/parse-wat
+     (http-error-ok-wat (first (exported-functions kir))))
+    :http-result-arm-ok
+    (wasm-tools/parse-wat
+     (http-result-arm-ok-wat (first (exported-functions kir))))
     :vector-i64-identity
     (wasm-tools/parse-wat
      (vector-i64-identity-wat (first (exported-functions kir))))
