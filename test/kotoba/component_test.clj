@@ -2091,6 +2091,124 @@
            d (http_header_name_ok "x-request-id")]
         (+ (* a 1000) (* b 100) (* c 10) d))}]})
 
+
+(def http-header-value-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['http-header-value-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http-header-value-ok
+     :params ['value]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body '(if (> (string-length value) 8192)
+              -2
+              0)}]})
+
+(def http-header-value-package-with-main-kir
+  {:format :kotoba.kir/v4
+   :exports ['http_header_value_ok 'http_header_pair_ok 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_header_value_ok
+     :params ['value]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body
+     '(let [n (string-byte-length value)]
+        (if (> n 8192)
+          -2
+          (__kotoba_loop_2 0 n value)))}
+    {:name 'http_header_pair_ok
+     :params ['name 'value]
+     :param-types [:string :string]
+     :result :i64
+     :effects #{}
+     :body
+     '(let [nr (header-name-ok name)]
+        (if (if (= nr 0) false true)
+          nr
+          (let [vr (http_header_value_ok value)]
+            (if (if (= vr 0) false true)
+              (if (= vr -2) -5 (if (= vr -3) -6 vr))
+              0))))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body
+     '(let [a (http_header_value_ok "yes")
+            b (http_header_value_ok "x\ny")
+            c (http_header_pair_ok "X-Ok" "yes")
+            d (http_header_pair_ok "Bad Name" "yes")
+            e (http_header_pair_ok "X-Ok" "x\ny")]
+        (+ (* a 10000) (* b 1000) (* c 100) (* d 10) e))}]})
+
+(deftest http-header-value-ok-canonical-lowering
+  "T8.3 typed Component: header_value_ok CTL/length without kotoba:typed."
+  (is (= :http-header-value-ok (core/assert-supported! http-header-value-ok-kir)))
+  (let [world (wit/emit http-header-value-ok-kir)
+        core-bytes (core/emit http-header-value-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-header-value-ok-kir world)
+        path (Files/createTempFile "kc-header-value-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-header-value-ok (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-header-value-ok(\"yes\")" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke"
+                            "http-header-value-ok(\"\")" (str path))
+            ctl (shell/sh "wasmtime" "run" "--invoke"
+                          "http-header-value-ok(\"x\\ny\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "0" (str/trim (:out empty))))
+        (is (zero? (:exit ctl)) (:err ctl))
+        (is (= "-3" (str/trim (:out ctl)))))
+      (finally (Files/deleteIfExists path)))))
+
+(deftest http-header-value-package-with-main-live-vector
+  "T8.3 multi-export: value_ok + pair_ok + live main → -3036."
+  (is (= :http-header-value-package-with-main
+         (core/assert-supported! http-header-value-package-with-main-kir)))
+  (let [world (wit/emit http-header-value-package-with-main-kir)
+        core-bytes (core/emit http-header-value-package-with-main-kir
+                              :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes
+                                   http-header-value-package-with-main-kir
+                                   world)
+        path (Files/createTempFile "kc-header-value-pkg-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-header-value-package-with-main (:canonical-lowering packaged)))
+      (is (= 3 (count (:exports world))))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            vok (shell/sh "wasmtime" "run" "--invoke"
+                          "http-header-value-ok(\"yes\")" (str path))
+            pok (shell/sh "wasmtime" "run" "--invoke"
+                          "http-header-pair-ok(\"X-Ok\",\"yes\")" (str path))
+            pbad (shell/sh "wasmtime" "run" "--invoke"
+                           "http-header-pair-ok(\"Bad Name\",\"yes\")" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-3036" (str/trim (:out main))))
+        (is (zero? (:exit vok)) (:err vok))
+        (is (= "0" (str/trim (:out vok))))
+        (is (zero? (:exit pok)) (:err pok))
+        (is (= "0" (str/trim (:out pok))))
+        (is (zero? (:exit pbad)) (:err pbad))
+        (is (= "-3" (str/trim (:out pbad)))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest http-header-name-ok-desugared-live-vector
   "T8.3: real frontend loop desugar + live main → -130."
   (is (= :http-header-name-ok-with-main
