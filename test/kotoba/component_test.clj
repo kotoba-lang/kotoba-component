@@ -1360,3 +1360,69 @@
         (is (zero? (:exit short)) (:err short))
         (is (= "-3" (str/trim (:out short)))))
       (finally (Files/deleteIfExists path)))))
+
+
+(def http-post-request-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['http-post-request-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http-post-request-ok
+     :params ['url 'headers-n 'body 'timeout-ms]
+     :param-types [:string :i64 :string :i64]
+     :result :i64
+     :effects #{}
+     :body '(if (<= (string-length url) 0)
+              -1
+              (if (> (string-length url) 4096)
+                -2
+                (if (< (string-length url) 8)
+                  -3
+                  (if (string=? (string-substring url 0 8) "https://")
+                    (if (< headers-n 0)
+                      -4
+                      (if (> headers-n 32)
+                        -4
+                        (if (> (string-length body) 65536)
+                          -5
+                          (if (< timeout-ms 1)
+                            -6
+                            (if (> timeout-ms 30000)
+                              -6
+                              0)))))
+                    -3))))}]})
+
+(deftest http-post-request-ok-canonical-lowering
+  "T8.3 typed Component composition: full request_ok packing without kotoba:typed."
+  (is (= :http-post-request-ok (core/assert-supported! http-post-request-ok-kir)))
+  (let [world (wit/emit http-post-request-ok-kir)
+        core-bytes (core/emit http-post-request-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-post-request-ok-kir world)
+        path (Files/createTempFile "kc-http-request-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-post-request-ok (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-post-request-ok(\"https://x\",1,\"{}\",1000)" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke"
+                            "http-post-request-ok(\"\",1,\"{}\",1000)" (str path))
+            http (shell/sh "wasmtime" "run" "--invoke"
+                           "http-post-request-ok(\"http://x\",1,\"{}\",1000)" (str path))
+            headers (shell/sh "wasmtime" "run" "--invoke"
+                              "http-post-request-ok(\"https://x\",40,\"{}\",1000)" (str path))
+            timeout (shell/sh "wasmtime" "run" "--invoke"
+                              "http-post-request-ok(\"https://x\",1,\"{}\",0)" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty))))
+        (is (zero? (:exit http)) (:err http))
+        (is (= "-3" (str/trim (:out http))))
+        (is (zero? (:exit headers)) (:err headers))
+        (is (= "-4" (str/trim (:out headers))))
+        (is (zero? (:exit timeout)) (:err timeout))
+        (is (= "-6" (str/trim (:out timeout)))))
+      (finally (Files/deleteIfExists path)))))
