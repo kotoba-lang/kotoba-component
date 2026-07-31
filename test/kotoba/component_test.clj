@@ -1679,3 +1679,84 @@
         (is (zero? (:exit bad)) (:err bad))
         (is (= "-1" (str/trim (:out bad)))))
       (finally (Files/deleteIfExists path)))))
+
+(def http-post-request-ok-frontend-kir
+  "Frontend let+or desugar of provider http_post_request_ok body."
+  {:format :kotoba.kir/v4
+   :exports ['http_post_request_ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_post_request_ok
+     :params ['url 'headers-n 'body 'timeout-ms]
+     :param-types [:string :i64 :string :i64]
+     :result :i64
+     :effects #{}
+     :body
+     '(let [un (string-byte-length url) bn (string-byte-length body)]
+        (if (<= un 0)
+          -1
+          (if (> un 4096)
+            -2
+            (if (let [or-tmp (< un 8)]
+                  (if or-tmp or-tmp
+                    (if (string=? (string-substring url 0 8) "https://")
+                      false true)))
+              -3
+              (if (let [or-tmp (< headers-n 0)]
+                    (if or-tmp or-tmp (> headers-n 32)))
+                -4
+                (if (let [or-tmp (< bn 0)]
+                      (if or-tmp or-tmp (> bn 65536)))
+                  -5
+                  (if (let [or-tmp (< timeout-ms 1)]
+                        (if or-tmp or-tmp (> timeout-ms 30000)))
+                    -6
+                    0)))))))}]})
+
+(def http-post-request-ok-with-main-kir
+  (assoc http-post-request-ok-frontend-kir
+         :exports ['http_post_request_ok 'main]
+         :functions
+         (conj (:functions http-post-request-ok-frontend-kir)
+               {:name 'main
+                :params []
+                :param-types []
+                :result :i64
+                :effects #{}
+                :body
+                '(let [a (http_post_request_ok "https://x" 1 "{}" 1000)
+                      b (http_post_request_ok "" 1 "{}" 1000)
+                      c (http_post_request_ok "http://x" 1 "{}" 1000)
+                      d (http_post_request_ok "https://x" 40 "{}" 1000)
+                      e (http_post_request_ok "https://x" 1 "{}" 1000)
+                      f (http_post_request_ok "https://x" 1 "{}" 0)]
+                   (+ (* a 100000) (* b 10000) (* c 1000) (* d 100) (* e 10) f))})))
+
+(deftest http-post-request-ok-frontend-and-main
+  "T8.3: frontend let+or request-ok + multi-export live main → -13406."
+  (is (= :http-post-request-ok
+         (core/assert-supported! http-post-request-ok-frontend-kir)))
+  (is (= :http-post-request-ok-with-main
+         (core/assert-supported! http-post-request-ok-with-main-kir)))
+  (let [world (wit/emit http-post-request-ok-with-main-kir)
+        core-bytes (core/emit http-post-request-ok-with-main-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-post-request-ok-with-main-kir world)
+        path (Files/createTempFile "kc-req-ok-main-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-post-request-ok-with-main (:canonical-lowering packaged)))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-post-request-ok(\"https://x\",1,\"{}\",1000)" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke"
+                            "http-post-request-ok(\"\",1,\"{}\",1000)" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-13406" (str/trim (:out main))))
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty)))))
+      (finally (Files/deleteIfExists path)))))
