@@ -2447,3 +2447,102 @@
         (is (zero? (:exit ok-url)) (:err ok-url))
         (is (= "1" (str/trim (:out ok-url)))))
       (finally (Files/deleteIfExists path)))))
+
+(def http-result-pack-package-with-main-kir
+  {:format :kotoba.kir/v4
+   :exports ['http_result_begin 'http_result_status 'http_result_headers
+             'http_result_body 'http_result_code 'http_result_message
+             'http_result_retryable 'http_result_end 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_result_begin
+     :params ['arm] :param-types [:i64] :result :i64 :effects #{}
+     :body '(if (= arm 0) 1 (if (= arm 1) 11 -1))}
+    {:name 'http_result_status
+     :params ['state 'status] :param-types [:i64 :i64] :result :i64 :effects #{}
+     :body '(if (< state 0) state
+              (if (if (= state 1) false true) -10
+                (if (if (< status 100) true (> status 599)) -2 2)))}
+    {:name 'http_result_headers
+     :params ['state 'n] :param-types [:i64 :i64] :result :i64 :effects #{}
+     :body '(if (< state 0) state
+              (if (if (= state 2) false true) -10
+                (if (if (< n 0) true (> n 32)) -3 3)))}
+    {:name 'http_result_body
+     :params ['state 'body] :param-types [:i64 :string] :result :i64 :effects #{}
+     :body '(if (< state 0) state
+              (if (if (= state 3) false true) -10
+                (if (> (string-byte-length body) 65536) -4 4)))}
+    {:name 'http_result_code
+     :params ['state 'code] :param-types [:i64 :string] :result :i64 :effects #{}
+     :body '(if (< state 0) state
+              (if (if (= state 11) false true) -10
+                (let [cr (code-ok code)]
+                  (if (if (= cr 0) false true) cr 12))))}
+    {:name 'http_result_message
+     :params ['state 'message] :param-types [:i64 :string] :result :i64 :effects #{}
+     :body '(if (< state 0) state
+              (if (if (= state 12) false true) -10
+                (if (> (string-byte-length message) 65536) -8 13)))}
+    {:name 'http_result_retryable
+     :params ['state 'r] :param-types [:i64 :i64] :result :i64 :effects #{}
+     :body '(if (< state 0) state
+              (if (if (= state 13) false true) -10
+                (if (if (< r 0) true (> r 1)) -9 14)))}
+    {:name 'http_result_end
+     :params ['state] :param-types [:i64] :result :i64 :effects #{}
+     :body '(if (< state 0) state
+              (if (if (= state 4) true (= state 14)) 0 -11))}
+    {:name 'main
+     :params [] :param-types [] :result :i64 :effects #{}
+     :body
+     '(let [a (http_result_end
+               (http_result_body
+                (http_result_headers
+                 (http_result_status (http_result_begin 0) 200)
+                 1)
+                "ok"))
+            b (http_result_begin 3)
+            c (http_result_status (http_result_begin 0) 42)
+            d (http_result_end
+               (http_result_retryable
+                (http_result_message
+                 (http_result_code (http_result_begin 1) "http/transport")
+                 "failed")
+                0))
+            e (http_result_code (http_result_begin 1) "")
+            f (http_result_end (http_result_begin 0))]
+        (+ (* a 100000) (* b 10000) (* c 1000) (* d 100) (* e 10) f))}]})
+
+(deftest http-result-pack-package-with-main-live-vector
+  "T8.3 multi-export: result packing walk + nested main → -12061."
+  (is (= :http-result-pack-package-with-main
+         (core/assert-supported! http-result-pack-package-with-main-kir)))
+  (let [world (wit/emit http-result-pack-package-with-main-kir)
+        core-bytes (core/emit http-result-pack-package-with-main-kir
+                              :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes
+                                   http-result-pack-package-with-main-kir
+                                   world)
+        path (Files/createTempFile "kc-result-pack-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-result-pack-package-with-main (:canonical-lowering packaged)))
+      (is (= 9 (count (:exports world))))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            b0 (shell/sh "wasmtime" "run" "--invoke" "http-result-begin(0)" (str path))
+            bbad (shell/sh "wasmtime" "run" "--invoke" "http-result-begin(3)" (str path))
+            e0 (shell/sh "wasmtime" "run" "--invoke" "http-result-end(4)" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-12061" (str/trim (:out main))))
+        (is (zero? (:exit b0)) (:err b0))
+        (is (= "1" (str/trim (:out b0))))
+        (is (zero? (:exit bbad)) (:err bbad))
+        (is (= "-1" (str/trim (:out bbad))))
+        (is (zero? (:exit e0)) (:err e0))
+        (is (= "0" (str/trim (:out e0)))))
+      (finally (Files/deleteIfExists path)))))
+
