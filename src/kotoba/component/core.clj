@@ -3612,6 +3612,13 @@
            (empty? (:effects kir))) :http-status-ok
       (every? scalar-function? exports) :scalar
       match-module :structural-union-match-module
+      ;; Multi-export pure string-concat package (T8.3 request-edn trust path).
+      ;; All functions must be exported string-expression bodies; private helpers
+      ;; that call other defs are not admitted (string-leaves is concat-only).
+      (and (>= (count exports) 2)
+           (= (count (:functions kir)) (count exports))
+           (every? string-expression-function? exports)
+           (empty? (:effects kir))) :string-expression-package
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (string-expression-function? (first exports))
@@ -6237,13 +6244,49 @@
      ")\n")))
 
 
-(defn- string-expression-wat [function]
+(defn- prepare-package-leaves
+  "Shared literal layout for one or more string-expression functions.
+
+  Literals from every export are packed contiguously from offset 8 so a single
+  memory / realloc / initialize surface serves the multi-export package.
+  Parameter leaves keep per-function local indices ($pN-ptr/$pN-len)."
+  [functions]
+  (loop [remaining functions
+         offset 8
+         prepared []
+         literal-leaves []]
+    (if-let [function (first remaining)]
+      (let [parameter-indices (zipmap (:params function) (range))
+            leaves (string-leaves (:body function) (set (:params function)))]
+        (when-not (seq leaves)
+          (reject "string-expression export has no admitted leaves"
+                  {:name (:name function)}))
+        (let [[fn-leaves offset' lits]
+              (loop [rem leaves off offset acc [] lits []]
+                (if-let [leaf (first rem)]
+                  (if (= :parameter (:kind leaf))
+                    (recur (next rem) off
+                           (conj acc (assoc leaf :index
+                                            (get parameter-indices (:name leaf))))
+                           lits)
+                    (let [bytes (vec (.getBytes ^String (:value leaf) "UTF-8"))
+                          lit (assoc leaf :pointer off :bytes bytes
+                                     :length (count bytes))]
+                      (recur (next rem) (+ off (count bytes))
+                             (conj acc lit) (conj lits lit))))
+                  [acc off lits]))]
+          (recur (next remaining) offset'
+                 (conj prepared {:function function :leaves fn-leaves})
+                 (into literal-leaves lits))))
+      {:prepared prepared
+       :arena-base (align-up offset 8)
+       :literal-leaves literal-leaves})))
+
+(defn- string-expression-export-funcs-wat
+  "Emit cm32p2||export + _post pairs for one prepared string-expression export."
+  [function leaves capacity arena-base]
   (let [export (wit-name (:name function))
-        {:keys [leaves arena-base]} (prepare-leaves function)
         parameter-count (count (:params function))
-        required-bytes (+ arena-base (* (inc parameter-count) 65536) 8)
-        pages (max 1 (quot (+ required-bytes 65535) 65536))
-        capacity (* pages 65536)
         params (apply str
                       (mapcat (fn [index]
                                 [(str " (param $p" index "-ptr i32)")
@@ -6273,14 +6316,49 @@
                              (leaf-pointer leaf) " " length " memory.copy\n"
                              "    local.get $cursor " length
                              " i32.add local.set $cursor\n")))
-                    leaves))
+                    leaves))]
+    (str
+     "  (func (export \"cm32p2||" export "\")" params " (result i32)\n"
+     "    (local $end i32) (local $out i32) (local $ret i32)\n"
+     "    (local $cursor i32) (local $total i64)\n"
+     validate-parameters
+     "    i64.const 0 local.set $total\n"
+     sum-lengths
+     "    i32.const 0 i32.const 0 i32.const 1 local.get $total i32.wrap_i64\n"
+     "    call $realloc local.set $out\n"
+     "    i32.const 0 local.set $cursor\n"
+     copy-leaves
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $total i32.wrap_i64 i32.store offset=4 local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n")))
+
+(defn- string-expression-package-wat
+  "Shared-memory multi-export (or single-export) pure string-concat package.
+
+  Each export is an independent Canonical `string* -> string` adapter; all share
+  one memory, bump realloc, data segment pool, and initialize. Used for T8.3
+  nested-EDN trust packages (headers empty + header map + request/result arms)
+  without kotoba:typed."
+  [functions]
+  (let [{:keys [prepared arena-base literal-leaves]} (prepare-package-leaves functions)
+        max-params (apply max 0 (map #(count (:params (:function %))) prepared))
+        required-bytes (+ arena-base (* (inc max-params) 65536) 8)
+        pages (max 1 (quot (+ required-bytes 65535) 65536))
+        capacity (* pages 65536)
+        export-funcs
+        (apply str
+               (map (fn [{:keys [function leaves]}]
+                      (string-expression-export-funcs-wat
+                       function leaves capacity arena-base))
+                    prepared))
         data-segments
         (apply str
-               (keep (fn [leaf]
-                       (when (= :literal (:kind leaf))
-                         (str "  (data (i32.const " (:pointer leaf) ") \""
-                              (wat-data (:bytes leaf)) "\")\n")))
-                     leaves))]
+               (map (fn [leaf]
+                      (str "  (data (i32.const " (:pointer leaf) ") \""
+                           (wat-data (:bytes leaf)) "\")\n"))
+                    literal-leaves))]
     (str
      "(module\n"
      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
@@ -6305,24 +6383,14 @@
      "      local.set $copy-size\n"
      "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
      "    end local.get $ptr)\n"
-     "  (func (export \"cm32p2||" export "\")" params " (result i32)\n"
-     "    (local $end i32) (local $out i32) (local $ret i32)\n"
-     "    (local $cursor i32) (local $total i64)\n"
-     validate-parameters
-     "    i64.const 0 local.set $total\n"
-     sum-lengths
-     "    i32.const 0 i32.const 0 i32.const 1 local.get $total i32.wrap_i64\n"
-     "    call $realloc local.set $out\n"
-     "    i32.const 0 local.set $cursor\n"
-     copy-leaves
-     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
-     "    local.get $out i32.store\n"
-     "    local.get $ret local.get $total i32.wrap_i64 i32.store offset=4 local.get $ret)\n"
-     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
-     "    i32.const " arena-base " global.set $next)\n"
+     export-funcs
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      data-segments
      ")\n")))
+
+(defn- string-expression-wat [function]
+  "Single-export pure string-concat → shared package emitter (backward-compatible)."
+  (string-expression-package-wat [function]))
 
 (declare bounded-bump-realloc-wat)
 
@@ -10872,6 +10940,9 @@
      kir (structural-union-match-module kir) target opts)
     :string-expression (wasm-tools/parse-wat
                         (string-expression-wat (first (exported-functions kir))))
+    :string-expression-package
+    (wasm-tools/parse-wat
+     (string-expression-package-wat (exported-functions kir)))
     :string-length
     (wasm-tools/parse-wat
      (string-length-wat (first (exported-functions kir))))
