@@ -1480,3 +1480,53 @@
         (is (zero? (:exit timeout)) (:err timeout))
         (is (= "-6" (str/trim (:out timeout)))))
       (finally (Files/deleteIfExists path)))))
+
+
+(def http-response-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['http-response-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http-response-ok
+     :params ['status 'headers-n 'body]
+     :param-types [:i64 :i64 :string]
+     :result :i64
+     :effects #{}
+     :body '(if (< status 100)
+              -1
+              (if (> status 599)
+                -1
+                (if (< headers-n 0)
+                  -2
+                  (if (> headers-n 32)
+                    -2
+                    (if (> (string-length body) 65536)
+                      -3
+                      0)))))}]})
+
+(deftest http-response-ok-canonical-lowering
+  "T8.3 typed Component composition: response_ok packing without kotoba:typed."
+  (is (= :http-response-ok (core/assert-supported! http-response-ok-kir)))
+  (let [world (wit/emit http-response-ok-kir)
+        core-bytes (core/emit http-response-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-response-ok-kir world)
+        path (Files/createTempFile "kc-http-response-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-response-ok (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-response-ok(200,1,\"ok\")" (str path))
+            bad-st (shell/sh "wasmtime" "run" "--invoke"
+                             "http-response-ok(42,0,\"\")" (str path))
+            bad-h (shell/sh "wasmtime" "run" "--invoke"
+                            "http-response-ok(200,40,\"\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit bad-st)) (:err bad-st))
+        (is (= "-1" (str/trim (:out bad-st))))
+        (is (zero? (:exit bad-h)) (:err bad-h))
+        (is (= "-2" (str/trim (:out bad-h)))))
+      (finally (Files/deleteIfExists path)))))
