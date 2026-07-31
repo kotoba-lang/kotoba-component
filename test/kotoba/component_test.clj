@@ -1760,3 +1760,99 @@
         (is (zero? (:exit empty)) (:err empty))
         (is (= "-1" (str/trim (:out empty)))))
       (finally (Files/deleteIfExists path)))))
+
+(def http-status-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['http-status-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http-status-ok
+     :params ['status]
+     :param-types [:i64]
+     :result :i64
+     :effects #{}
+     :body '(if (< status 100)
+              -1
+              (if (> status 599)
+                -1
+                0))}]})
+
+(def http-response-package-with-main-kir
+  {:format :kotoba.kir/v4
+   :exports ['http_status_ok 'http_response_ok 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_status_ok
+     :params ['status]
+     :param-types [:i64]
+     :result :i64
+     :effects #{}
+     :body '(if (< status 100)
+              -1
+              (if (> status 599)
+                -1
+                0))}
+    {:name 'http_response_ok
+     :params ['status 'headers-n 'body]
+     :param-types [:i64 :i64 :string]
+     :result :i64
+     :effects #{}
+     :body '(if (< status 100)
+              -1
+              (if (> status 599)
+                -1
+                (if (< headers-n 0)
+                  -2
+                  (if (> headers-n 32)
+                    -2
+                    (if (> (string-length body) 65536)
+                      -3
+                      0)))))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body
+     '(let [a (http_status_ok 200)
+            b (http_status_ok 99)
+            c (http_response_ok 200 1 "ok")
+            d (http_response_ok 42 0 "")
+            e (http_response_ok 200 40 "")]
+        (+ (* a 10000) (* b 1000) (* c 100) (* d 10) e))}]})
+
+(deftest http-response-package-with-main-live-vector
+  "T8.3 multi-export: status_ok + response_ok + live main → -1012."
+  (is (= :http-status-ok (core/assert-supported! http-status-ok-kir)))
+  (is (= :http-response-package-with-main
+         (core/assert-supported! http-response-package-with-main-kir)))
+  (let [world (wit/emit http-response-package-with-main-kir)
+        core-bytes (core/emit http-response-package-with-main-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-response-package-with-main-kir world)
+        path (Files/createTempFile "kc-resp-pkg-main-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-response-package-with-main (:canonical-lowering packaged)))
+      (is (= 3 (count (:exports world))))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            st-ok (shell/sh "wasmtime" "run" "--invoke" "http-status-ok(200)" (str path))
+            st-bad (shell/sh "wasmtime" "run" "--invoke" "http-status-ok(99)" (str path))
+            resp-ok (shell/sh "wasmtime" "run" "--invoke"
+                              "http-response-ok(200,1,\"ok\")" (str path))
+            resp-h (shell/sh "wasmtime" "run" "--invoke"
+                             "http-response-ok(200,40,\"\")" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-1012" (str/trim (:out main))))
+        (is (zero? (:exit st-ok)) (:err st-ok))
+        (is (= "0" (str/trim (:out st-ok))))
+        (is (zero? (:exit st-bad)) (:err st-bad))
+        (is (= "-1" (str/trim (:out st-bad))))
+        (is (zero? (:exit resp-ok)) (:err resp-ok))
+        (is (= "0" (str/trim (:out resp-ok))))
+        (is (zero? (:exit resp-h)) (:err resp-h))
+        (is (= "-2" (str/trim (:out resp-h)))))
+      (finally (Files/deleteIfExists path)))))
