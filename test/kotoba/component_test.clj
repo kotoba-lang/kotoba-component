@@ -1382,7 +1382,8 @@
                                               (string-concat h "]"))))))))}]})
 
 (deftest headers-edn-append-canonical-lowering
-  "T8.3 reject-path: empty-vec append, second append, duplicate name reject, bad atom."
+  "T8.3 reject-path: empty-vec append, second, dup reject, prefix non-collide, bad atom.
+  Uniqueness is map-element-bound name field (not free substring :name scan)."
   (is (= :headers-edn-append (core/assert-supported! headers-edn-append-kir)))
   (let [world (wit/emit headers-edn-append-kir)
         core-bytes (core/emit headers-edn-append-kir :wasm32-wasi-kotoba-v1)
@@ -1406,6 +1407,12 @@
                                "\"[{:name \\\"Host\\\" :value \\\"ex.com\\\"}]\","
                                "\"Host\",\"other\")")
                           (str path))
+            ;; Prefix of another name must not collide (true field equality)
+            pref (shell/sh "wasmtime" "run" "--invoke"
+                           (str "headers-edn-append("
+                                "\"[{:name \\\"Host\\\" :value \\\"ex.com\\\"}]\","
+                                "\"Ho\",\"x\")")
+                           (str path))
             bad (shell/sh "wasmtime" "run" "--invoke"
                           "headers-edn-append(\"[]\",\"a\\\"b\",\"v\")"
                           (str path))
@@ -1420,6 +1427,9 @@
                (read-string (str/trim (:out two)))))
         (is (zero? (:exit dup)) (:err dup))
         (is (= "" (read-string (str/trim (:out dup)))))
+        (is (zero? (:exit pref)) (:err pref))
+        (is (= "[{:name \"Host\" :value \"ex.com\"} {:name \"Ho\" :value \"x\"}]"
+               (read-string (str/trim (:out pref)))))
         (is (zero? (:exit bad)) (:err bad))
         (is (= "" (read-string (str/trim (:out bad)))))
         (is (zero? (:exit empty-acc)) (:err empty-acc))
