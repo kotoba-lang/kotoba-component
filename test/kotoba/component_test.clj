@@ -1530,3 +1530,58 @@
         (is (zero? (:exit bad-h)) (:err bad-h))
         (is (= "-2" (str/trim (:out bad-h)))))
       (finally (Files/deleteIfExists path)))))
+
+(def https-url-ok-with-main-kir
+  {:format :kotoba.kir/v4
+   :exports ['http_url_ok 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_url_ok
+     :params ['url]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body '(let [n (string-byte-length url)]
+              (if (<= n 0) -1
+                (if (> n 4096) -2
+                  (if (< n 8) -3
+                    (if (string=? (string-substring url 0 8) "https://")
+                      0 -3)))))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body '(let [a (http_url_ok "https://x")
+                  b (http_url_ok "")
+                  c (http_url_ok "http://x")
+                  d (http_url_ok "https://ok.example/a")]
+              (+ (* a 1000) (* b 100) (* c 10) d))}]})
+
+(deftest https-url-ok-with-main-live-vector
+  "T8.3 multi-export: policy + live main vector (provider package shape)."
+  (let [exports (filterv #(contains? #{'http_url_ok 'main} (:name %))
+                         (:functions https-url-ok-with-main-kir))]
+    (is (= :https-url-ok-with-main
+           (core/assert-supported! https-url-ok-with-main-kir))))
+  (let [world (wit/emit https-url-ok-with-main-kir)
+        core-bytes (core/emit https-url-ok-with-main-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes https-url-ok-with-main-kir world)
+        path (Files/createTempFile "kc-https-url-ok-main-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :https-url-ok-with-main (:canonical-lowering packaged)))
+      (is (= 2 (count (:exports world))))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            ok (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"https://x\")" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"\")" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-130" (str/trim (:out main))))
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty)))))
+      (finally (Files/deleteIfExists path)))))
