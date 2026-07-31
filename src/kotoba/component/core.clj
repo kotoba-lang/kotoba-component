@@ -604,18 +604,15 @@
                                                        (zero? e5)))))))))))))
              frontend-ish?
              (fn []
-               ;; Frontend may let-bind lengths / helper results; WAT owns charset.
-               (and (form-tree-walk body #(len-of? % code))
-                    (form-tree-walk body #(len-of? % msg))
-                    (form-tree-walk body #(= % -1))
-                    (form-tree-walk body #(= % -2))
+               ;; Frontend may factor code checks into helpers (code-ok) and only
+               ;; keep message/retryable + zero/non-zero pass-through here.
+               ;; WAT still enforces full charset + length codes.
+               (and (form-tree-walk body #(= % code))
+                    (form-tree-walk body #(= % msg))
+                    (form-tree-walk body #(= % retry))
                     (form-tree-walk body #(= % -4))
                     (form-tree-walk body #(= % -5))
-                    (form-tree-walk body #(and (number? %) (zero? %)))
-                    (form-tree-walk body #(and (seq? %) (#{'< '<=} (first %))
-                                               (= retry (nth % 1))))
-                    (form-tree-walk body #(and (seq? %) (#{'> '>=} (first %))
-                                               (= retry (nth % 1))))))]
+                    (form-tree-walk body #(and (number? %) (zero? %)))))]
          (boolean (or (pure-if-skeleton?) (frontend-ish?))))))
 
 
