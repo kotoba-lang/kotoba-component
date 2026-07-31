@@ -2059,3 +2059,56 @@
         (is (zero? (:exit space)) (:err space))
         (is (= "-3" (str/trim (:out space)))))
       (finally (Files/deleteIfExists path)))))
+
+(def http-header-name-ok-desugared-kir
+  "Frontend loop desugar: (__kotoba_loop_1 ...) — matches real provider compile."
+  {:format :kotoba.kir/v4
+   :exports ['http_header_name_ok 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_header_name_ok
+     :params ['name]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body
+     '(let [n (string-byte-length name)]
+        (if (<= n 0)
+          -1
+          (if (> n 128)
+            -2
+            (__kotoba_loop_1 0 n name))))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body
+     '(let [a (http_header_name_ok "Content-Type")
+           b (http_header_name_ok "")
+           c (http_header_name_ok "Bad Name")
+           d (http_header_name_ok "x-request-id")]
+        (+ (* a 1000) (* b 100) (* c 10) d))}]})
+
+(deftest http-header-name-ok-desugared-live-vector
+  "T8.3: real frontend loop desugar + live main → -130."
+  (is (= :http-header-name-ok-with-main
+         (core/assert-supported! http-header-name-ok-desugared-kir)))
+  (let [world (wit/emit http-header-name-ok-desugared-kir)
+        core-bytes (core/emit http-header-name-ok-desugared-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-header-name-ok-desugared-kir world)
+        path (Files/createTempFile "kc-header-name-desug-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-header-name-ok-with-main (:canonical-lowering packaged)))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            space (shell/sh "wasmtime" "run" "--invoke"
+                            "http-header-name-ok(\"Bad Name\")" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-130" (str/trim (:out main))))
+        (is (zero? (:exit space)) (:err space))
+        (is (= "-3" (str/trim (:out space)))))
+      (finally (Files/deleteIfExists path)))))

@@ -698,16 +698,46 @@
                                       (form-tree-walk e2 #(and (number? %) (zero? %))))))))))
              frontend-ish?
              (fn []
-               ;; Provider source uses private tchar? + loop; frontend may factor
-               ;; helpers. WAT still enforces full tchar + length codes.
+               ;; Provider source uses private tchar? + loop; frontend desugars
+               ;; loop to (__kotoba_loop_* ...) so -3 may live only in the
+               ;; unexported loop body. Length skeleton on the export is enough;
+               ;; WAT always enforces full tchar + length codes including -3.
                (and (form-tree-walk body #(= % nm))
                     (form-tree-walk body #(= % -1))
                     (form-tree-walk body #(= % -2))
-                    (form-tree-walk body #(= % -3))
-                    (form-tree-walk body #(and (number? %) (zero? %)))
+                    (or (form-tree-walk body #(and (number? %) (zero? %)))
+                        ;; loop call stands in for the success path
+                        (form-tree-walk body #(and (seq? %)
+                                                   (symbol? (first %))
+                                                   (let [s (name (first %))]
+                                                     (.startsWith s "__kotoba_loop")))))
                     (or (form-tree-walk body len-of?)
-                        (form-tree-walk body #(= % 128)))))]
-         (boolean (or (pure-if-skeleton?) (frontend-ish?))))))
+                        (form-tree-walk body #(= % 128)))))
+             let-length-if-skeleton?
+             (fn []
+               ;; (let [n (string-*-length name)]
+               ;;   (if (<= n 0) -1 (if (> n 128) -2 <ok-or-loop>)))
+               (and (seq? body) (= 'let (first body)) (= 3 (count body))
+                    (vector? (nth body 1)) (= 2 (count (nth body 1)))
+                    (symbol? (nth (nth body 1) 0))
+                    (len-of? (nth (nth body 1) 1))
+                    (let [nsym (nth (nth body 1) 0)
+                          tree (nth body 2)]
+                      (and (if4? tree)
+                           (= -1 (nth tree 2))
+                           (seq? (nth tree 1))
+                           (contains? #{'<= '<} (first (nth tree 1)))
+                           (= nsym (nth (nth tree 1) 1))
+                           (if4? (nth tree 3))
+                           (let [e1 (nth tree 3)]
+                             (and (= -2 (nth e1 2))
+                                  (seq? (nth e1 1))
+                                  (contains? #{'> '>=} (first (nth e1 1)))
+                                  (= nsym (nth (nth e1 1) 1))
+                                  (#{128 129} (nth (nth e1 1) 2))))))))]
+         (boolean (or (pure-if-skeleton?)
+                      (let-length-if-skeleton?)
+                      (frontend-ish?))))))
 
 (defn- http-header-name-ok-with-main?
   "Two-export: header_name_ok + live main (provider shape → -130)."
