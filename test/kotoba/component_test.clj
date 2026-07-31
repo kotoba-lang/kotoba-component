@@ -1166,3 +1166,48 @@
                                :params ['item-id 'item_id]
                                :param-types [:i64 :i64]
                                :result :i64 :body 'item-id}]}))))
+
+
+(def string-length-kir
+  {:format :kotoba.kir/v4
+   :exports ['len]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'len
+     :params ['s]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body '(string-length s)}]})
+
+(deftest string-length-canonical-lowering
+  "T8.3 typed Component world first slice: string -> s64 without kotoba:typed."
+  (is (= :string-length (core/assert-supported! string-length-kir)))
+  (let [alias (assoc-in string-length-kir [:functions 0 :body] '(string-byte-length s))]
+    (is (= :string-length (core/assert-supported! alias))))
+  (let [world (wit/emit string-length-kir)
+        core-bytes (core/emit string-length-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes string-length-kir world)
+        component-path (Files/createTempFile
+                        "kotoba-component-string-length-" ".wasm"
+                        (make-array FileAttribute 0))]
+    (try
+      (Files/write component-path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :string-length (:canonical-lowering packaged)))
+      (is (pos? (alength ^bytes (:bytes packaged))))
+      (let [empty (shell/sh "wasmtime" "run" "--invoke" "len(\"\")"
+                            (str component-path))
+            hello (shell/sh "wasmtime" "run" "--invoke" "len(\"hello\")"
+                            (str component-path))
+            utf8 (shell/sh "wasmtime" "run" "--invoke" "len(\"安全\")"
+                           (str component-path))]
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "0" (str/trim (:out empty))))
+        (is (zero? (:exit hello)) (:err hello))
+        (is (= "5" (str/trim (:out hello))))
+        (is (zero? (:exit utf8)) (:err utf8))
+        (is (= "6" (str/trim (:out utf8)))))
+      (finally
+        (Files/deleteIfExists component-path)))))
