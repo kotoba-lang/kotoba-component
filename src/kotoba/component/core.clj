@@ -698,12 +698,13 @@
                                       (form-tree-walk e2 #(and (number? %) (zero? %))))))))))
              frontend-ish?
              (fn []
-               ;; Provider source uses private tchar? + loop; frontend may factor
-               ;; helpers. WAT still enforces full tchar + length codes.
+               ;; Provider source factors tchar into private helpers + desugared
+               ;; loop (`__kotoba_loop_1`); export body may only keep length
+               ;; gates (-1/-2) and a loop/helper call. -3 (non-tchar) can live
+               ;; only in the helper. WAT still enforces full tchar + lengths.
                (and (form-tree-walk body #(= % nm))
                     (form-tree-walk body #(= % -1))
                     (form-tree-walk body #(= % -2))
-                    (form-tree-walk body #(= % -3))
                     (form-tree-walk body #(and (number? %) (zero? %)))
                     (or (form-tree-walk body len-of?)
                         (form-tree-walk body #(= % 128)))))]

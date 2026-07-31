@@ -1998,10 +1998,60 @@
                       d (http_header_name_ok "X-Ok")]
                    (+ (* a 1000) (* b 100) (* c 10) d))})))
 
+;; Full provider desugar: loop is a private helper; export body has no -3.
+(def http-header-name-ok-helper-loop-kir
+  {:format :kotoba.kir/v4
+   :exports ['http_header_name_ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_header_name_ok
+     :params ['name]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body
+     '(let [n (string-byte-length name)]
+        (if (<= n 0)
+          -1
+          (if (> n 128)
+            -2
+            (__kotoba_loop_1 0 n name))))}
+    {:name '__kotoba_loop_1
+     :params ['i 'n 'name]
+     :param-types [:i64 :i64 :string]
+     :result :i64
+     :effects #{}
+     :body
+     '(if (>= i n)
+        0
+        (let [c (string-code-point-at name i)]
+          (if (= c 32)
+            -3
+            (__kotoba_loop_1 (+ i 1) n name))))}]})
+
+(def http-header-name-ok-helper-loop-with-main-kir
+  (assoc http-header-name-ok-helper-loop-kir
+         :exports ['http_header_name_ok 'main]
+         :functions
+         (conj (:functions http-header-name-ok-helper-loop-kir)
+               {:name 'main
+                :params []
+                :param-types []
+                :result :i64
+                :effects #{}
+                :body
+                '(let [a (http_header_name_ok "Content-Type")
+                      b (http_header_name_ok "")
+                      c (http_header_name_ok "Bad Name")
+                      d (http_header_name_ok "x-request-id")]
+                   (+ (* a 1000) (* b 100) (* c 10) d))})))
+
 (deftest http-header-name-ok-canonical-lowering
   "T8.3 typed Component: header_name_ok tchar policy without kotoba:typed."
   (is (= :http-header-name-ok (core/assert-supported! http-header-name-ok-kir)))
   (is (= :http-header-name-ok (core/assert-supported! http-header-name-ok-frontend-kir)))
+  (is (= :http-header-name-ok (core/assert-supported! http-header-name-ok-helper-loop-kir)))
   (let [world (wit/emit http-header-name-ok-kir)
         core-bytes (core/emit http-header-name-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-header-name-ok-kir world)
@@ -2033,9 +2083,14 @@
   "T8.3 multi-export: header_name_ok + live main → -130."
   (is (= :http-header-name-ok-with-main
          (core/assert-supported! http-header-name-ok-with-main-kir)))
-  (let [world (wit/emit http-header-name-ok-with-main-kir)
-        core-bytes (core/emit http-header-name-ok-with-main-kir :wasm32-wasi-kotoba-v1)
-        packaged (artifact/package core-bytes http-header-name-ok-with-main-kir world)
+  (is (= :http-header-name-ok-with-main
+         (core/assert-supported! http-header-name-ok-helper-loop-with-main-kir)))
+  (let [world (wit/emit http-header-name-ok-helper-loop-with-main-kir)
+        core-bytes (core/emit http-header-name-ok-helper-loop-with-main-kir
+                              :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes
+                                   http-header-name-ok-helper-loop-with-main-kir
+                                   world)
         path (Files/createTempFile "kc-header-name-main-" ".wasm"
                                    (make-array FileAttribute 0))]
     (try
