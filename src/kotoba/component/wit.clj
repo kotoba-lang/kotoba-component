@@ -93,6 +93,58 @@
     (coll? descriptor) (reduce into #{} (map referenced-schema-names descriptor))
     :else #{}))
 
+(defn- reject-recursive-schemas!
+  "`:recursive-schema :reject-v1` in the Component baseline: a schema whose
+  type graph reaches itself has no WIT representation, because a WIT record is
+  sized and cannot contain itself.
+
+  This was not enforced. `type-text` renders `[:ref :ns/name]` as the bare type
+  name, so a self-referential schema emitted
+
+    record t-n {
+      v: s64,
+      next: t-n,
+    }
+
+  which wasm-tools rejects outright:
+
+    error: type `t-n` depends on itself
+      --> next: t-n,
+
+  Emitting WIT that the official tooling refuses is worse than refusing it here:
+  the failure surfaces later, in another tool, with no connection to the schema
+  that caused it. Reject at the boundary that owns the rule, and name the cycle."
+  [schemas]
+  ;; Edges come from a schema's PAYLOAD, not from the descriptor as a whole.
+  ;; `referenced-schema-names` includes a record's own nominal identity -- it
+  ;; feeds the `use types.{…}` line, where that is correct -- so using it
+  ;; directly makes every record look self-referential.
+  (let [payload (fn [descriptor]
+                  (if (and (vector? descriptor)
+                           (contains? #{:record :variant} (first descriptor)))
+                    (nth descriptor 2)
+                    descriptor))
+        edges (into {} (map (fn [[name descriptor]]
+                              [name (referenced-schema-names (payload descriptor))]))
+                    schemas)
+        reaches (fn reaches [start]
+                  (loop [seen #{} todo [start]]
+                    (if-let [n (first todo)]
+                      (if (seen n)
+                        (recur seen (rest todo))
+                        (recur (conj seen n)
+                               (concat (rest todo) (get edges n))))
+                      seen)))]
+    (doseq [[name _] (sort-by (comp str key) schemas)]
+      (let [from (disj (reaches name) name)
+            cyclic (or (contains? (get edges name #{}) name)
+                       (some #(contains? (reaches %) name) from))]
+        (when cyclic
+          (reject "recursive schema has no WIT representation"
+                  {:schema name
+                   :cycle (vec (sort-by str (conj (filter #(contains? (reaches %) name) from)
+                                                  name)))}))))))
+
 (defn- type-uses [descriptors]
   (->> descriptors (mapcat referenced-schema-names) distinct (sort-by str) vec))
 
@@ -178,6 +230,7 @@
         canonical-names (map wit-name schema-names)]
     (when-not (= (count canonical-names) (count (distinct canonical-names)))
       (reject "schema names collide after WIT canonicalization" {}))
+    (reject-recursive-schemas! schemas)
     (let [by-id (capability-index)
           capabilities
           (mapv (fn [{:keys [id request-type result-type]}]
