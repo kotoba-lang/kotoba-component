@@ -435,6 +435,48 @@
                   (form-tree-walk body #(= % 'string-length))
                   (form-tree-walk body #(= % "")))))))
 
+(defn- http-request-edn-function?
+  "Reject-path multi-header request EDN (T8.3 / ADR 0209–0211 composition):
+  string×string×string×i64 → string.
+
+  Builds `{:url \"…\" :headers […] :body \"…\" :timeout-ms N}` when url/body
+  pass quote/backslash scan, headers are `[…]` shape, and timeout-ms ≥ 0.
+  Name must match request_edn but not request_edn0. WAT owns dual scan +
+  headers shape + non-neg timeout + i64 decimal. True set / multi-export kit
+  body still open."
+  [{:keys [name params param-types result body]}]
+  (and (= 4 (count params))
+       (= [:string :string :string :i64] param-types)
+       (= :string result)
+       (seq? body)
+       (let [nm (clojure.core/name name)
+             url (nth params 0)
+             headers (nth params 1)
+             body-p (nth params 2)
+             timeout (nth params 3)]
+         (and (re-find #"(?i)request[_-]?edn" nm)
+              (not (re-find #"(?i)request[_-]?edn0" nm))
+              (not (re-find #"(?i)request[_-]?edn[_-]?0" nm))
+              (not (re-find #"(?i)trust" nm))
+              (form-tree-walk body #(= % url))
+              (form-tree-walk body #(= % headers))
+              (form-tree-walk body #(= % body-p))
+              (form-tree-walk body #(= % timeout))
+              (or (form-tree-walk body #(= % 'string-concat))
+                  (form-tree-walk body #(= % 'edn_quoted))
+                  (form-tree-walk body #(= % 'edn-quoted))
+                  (form-tree-walk body #(= % 'headers_edn_shape_ok))
+                  (form-tree-walk body #(= % "")))
+              (or (form-tree-walk body #(= % "[]"))
+                  (form-tree-walk body #(= % "["))
+                  (form-tree-walk body #(= % "]"))
+                  (form-tree-walk body #(and (string? %) (str/includes? % "headers")))
+                  (form-tree-walk body #(and (string? %) (str/includes? % "timeout")))
+                  (form-tree-walk body #(= % 'i64-str))
+                  (form-tree-walk body #(= % 'string-byte-length))
+                  (form-tree-walk body #(= % 'string-length))
+                  (form-tree-walk body #(= % "")))))))
+
 (defn- policy-call-args-ok?
   "True when call is (policy-name arg…) with each arg a string or integer literal."
   [form policy-name arity]
@@ -3824,6 +3866,11 @@
       (and (= 1 (count exports))
            (http-request-edn0-function? (first exports))
            (empty? (:effects kir))) :http-request-edn0
+      ;; Multi-header request EDN (string×string×string×i64 → string).
+      ;; After edn0 so names ending in 0 take the specialized path.
+      (and (= 1 (count exports))
+           (http-request-edn-function? (first exports))
+           (empty? (:effects kir))) :http-request-edn
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (string-expression-function? (first exports))
@@ -7458,6 +7505,196 @@
      "    local.get $cursor local.get $b-len i32.add local.set $cursor\n"
      "    local.get $out local.get $cursor i32.add i32.const " mid2-ptr " i32.const " mid2-len " memory.copy\n"
      "    local.get $cursor i32.const " mid2-len " i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add local.get $timeout call $write-u64 drop\n"
+     "    local.get $cursor local.get $dlen i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " suf-ptr " i32.const " suf-len " memory.copy\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $total i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- http-request-edn-wat
+  "Canonical `string×string×string×i64 -> string` multi-header request EDN.
+
+  Params: url, headers, body, timeout-ms. Dual quote/backslash scan on
+  url/body; headers must be `[…]` shape; reject timeout < 0. Else builds
+  `{:url \"…\" :headers … :body \"…\" :timeout-ms N}`. Composition on
+  edn_quoted + headers_edn_append path. True set / multi-export open."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        ;; pref "{:url \"" (7)
+        ;; mid1 "\" :headers " (11)
+        ;; mid2 " :body \"" (8)
+        ;; mid3 "\" :timeout-ms " (14)
+        ;; suf "}" (1)
+        ;; digits "0123456789" (10)
+        pref-ptr 8
+        pref-len 7
+        mid1-ptr 15
+        mid1-len 11
+        mid2-ptr 26
+        mid2-len 8
+        mid3-ptr 34
+        mid3-len 14
+        suf-ptr 48
+        suf-len 1
+        digits-ptr 49
+        arena-base 64
+        fixed-overhead (+ pref-len mid1-len mid2-len mid3-len suf-len)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const " pref-ptr ") \"{:url \\\"\")\n"
+     "  (data (i32.const " mid1-ptr ") \"\\\" :headers \")\n"
+     "  (data (i32.const " mid2-ptr ") \" :body \\\"\")\n"
+     "  (data (i32.const " mid3-ptr ") \"\\\" :timeout-ms \")\n"
+     "  (data (i32.const " suf-ptr ") \"}\")\n"
+     "  (data (i32.const " digits-ptr ") \"0123456789\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $has-forbidden (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $i i32) (local $c i32)\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u if br $done end\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.const 34 i32.eq if i32.const 1 return end\n"
+     "        local.get $c i32.const 92 i32.eq if i32.const 1 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func $empty-string (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    i32.const 0 i32.store\n"
+     "    local.get $ret i32.const 0 i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func $headers-shape-ok (param $ptr i32) (param $len i32) (result i32)\n"
+     "    local.get $len i32.const 2 i32.lt_u if i32.const 0 return end\n"
+     "    local.get $ptr i32.load8_u i32.const 91 i32.ne if i32.const 0 return end\n"
+     "    local.get $ptr local.get $len i32.add i32.const 1 i32.sub i32.load8_u\n"
+     "    i32.const 93 i32.ne if i32.const 0 return end\n"
+     "    i32.const 1)\n"
+     "  (func $write-u64 (param $out i32) (param $n i64) (result i32)\n"
+     "    (local $tmp i64) (local $len i32) (local $i i32) (local $d i32)\n"
+     "    local.get $n i64.const 0 i64.eq if\n"
+     "      local.get $out i32.const 48 i32.store8\n"
+     "      i32.const 1 return\n"
+     "    end\n"
+     "    local.get $n local.set $tmp\n"
+     "    i32.const 0 local.set $len\n"
+     "    (loop $count\n"
+     "      local.get $tmp i64.const 0 i64.eq if else\n"
+     "        local.get $len i32.const 1 i32.add local.set $len\n"
+     "        local.get $tmp i64.const 10 i64.div_u local.set $tmp\n"
+     "        br $count\n"
+     "      end)\n"
+     "    local.get $n local.set $tmp\n"
+     "    local.get $len local.set $i\n"
+     "    (loop $write\n"
+     "      local.get $i i32.eqz if else\n"
+     "        local.get $i i32.const 1 i32.sub local.set $i\n"
+     "        local.get $tmp i64.const 10 i64.rem_u i32.wrap_i64 local.set $d\n"
+     "        local.get $out local.get $i i32.add\n"
+     "        i32.const " digits-ptr " local.get $d i32.add i32.load8_u i32.store8\n"
+     "        local.get $tmp i64.const 10 i64.div_u local.set $tmp\n"
+     "        br $write\n"
+     "      end)\n"
+     "    local.get $len)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $u-ptr i32) (param $u-len i32)"
+     " (param $h-ptr i32) (param $h-len i32)"
+     " (param $b-ptr i32) (param $b-len i32)"
+     " (param $timeout i64) (result i32)\n"
+     "    (local $end i32) (local $out i32) (local $ret i32) (local $total i32)\n"
+     "    (local $cursor i32) (local $dlen i32) (local $tmp i64)\n"
+     "    local.get $u-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $h-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $b-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $u-len i32.eqz if else\n"
+     "      local.get $u-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $h-len i32.eqz if else\n"
+     "      local.get $h-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $b-len i32.eqz if else\n"
+     "      local.get $b-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $u-ptr local.get $u-len i32.add local.tee $end\n"
+     "    local.get $u-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $h-ptr local.get $h-len i32.add local.tee $end\n"
+     "    local.get $h-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $b-ptr local.get $b-len i32.add local.tee $end\n"
+     "    local.get $b-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $timeout i64.const 0 i64.lt_s if call $empty-string return end\n"
+     "    local.get $u-ptr local.get $u-len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    local.get $b-ptr local.get $b-len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    local.get $h-ptr local.get $h-len call $headers-shape-ok\n"
+     "    i32.eqz if call $empty-string return end\n"
+     "    local.get $timeout i64.const 0 i64.eq\n"
+     "    if\n"
+     "      i32.const 1 local.set $dlen\n"
+     "    else\n"
+     "      local.get $timeout local.set $tmp\n"
+     "      i32.const 0 local.set $dlen\n"
+     "      (loop $c\n"
+     "        local.get $tmp i64.const 0 i64.eq if else\n"
+     "          local.get $dlen i32.const 1 i32.add local.set $dlen\n"
+     "          local.get $tmp i64.const 10 i64.div_u local.set $tmp\n"
+     "          br $c\n"
+     "        end)\n"
+     "    end\n"
+     "    local.get $u-len local.get $h-len i32.add local.get $b-len i32.add\n"
+     "    i32.const " fixed-overhead " i32.add local.get $dlen i32.add local.set $total\n"
+     "    local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "    i32.const 0 local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " pref-ptr " i32.const " pref-len " memory.copy\n"
+     "    local.get $cursor i32.const " pref-len " i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add local.get $u-ptr local.get $u-len memory.copy\n"
+     "    local.get $cursor local.get $u-len i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " mid1-ptr " i32.const " mid1-len " memory.copy\n"
+     "    local.get $cursor i32.const " mid1-len " i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add local.get $h-ptr local.get $h-len memory.copy\n"
+     "    local.get $cursor local.get $h-len i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " mid2-ptr " i32.const " mid2-len " memory.copy\n"
+     "    local.get $cursor i32.const " mid2-len " i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add local.get $b-ptr local.get $b-len memory.copy\n"
+     "    local.get $cursor local.get $b-len i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " mid3-ptr " i32.const " mid3-len " memory.copy\n"
+     "    local.get $cursor i32.const " mid3-len " i32.add local.set $cursor\n"
      "    local.get $out local.get $cursor i32.add local.get $timeout call $write-u64 drop\n"
      "    local.get $cursor local.get $dlen i32.add local.set $cursor\n"
      "    local.get $out local.get $cursor i32.add i32.const " suf-ptr " i32.const " suf-len " memory.copy\n"
@@ -12039,6 +12276,9 @@
     :http-request-edn0
     (wasm-tools/parse-wat
      (http-request-edn0-wat (first (exported-functions kir))))
+    :http-request-edn
+    (wasm-tools/parse-wat
+     (http-request-edn-wat (first (exported-functions kir))))
     :string-length
     (wasm-tools/parse-wat
      (string-length-wat (first (exported-functions kir))))
