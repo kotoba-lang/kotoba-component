@@ -276,6 +276,35 @@
                   (form-tree-walk body #(= % 'string-substring))
                   (form-tree-walk body #(= % "")))))))
 
+(defn- http-header-edn-function?
+  "Reject-path EDN header map (T8.3 composition on edn_quoted): string×string → string.
+
+  Builds `{:name \"…\" :value \"…\"}` when both atoms pass quote/backslash scan;
+  otherwise empty. WAT owns the dual scan + concat; admission matches export
+  name containing header_edn / header-edn (not trust) and a body that mentions
+  both params plus concat / reject-empty / quoted skeleton."
+  [{:keys [name params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:string :string] param-types)
+       (= :string result)
+       (seq? body)
+       (let [nm (clojure.core/name name)
+             n (nth params 0)
+             v (nth params 1)]
+         (and (re-find #"(?i)header[_-]?edn" nm)
+              (not (re-find #"(?i)trust" nm))
+              (form-tree-walk body #(= % n))
+              (form-tree-walk body #(= % v))
+              (or (form-tree-walk body #(= % 'string-concat))
+                  (form-tree-walk body #(= % 'edn_quoted))
+                  (form-tree-walk body #(= % 'edn-quoted))
+                  (form-tree-walk body #(= % "")))
+              (or (form-tree-walk body #(= % "\""))
+                  (form-tree-walk body #(and (string? %) (str/includes? % "name")))
+                  (form-tree-walk body #(= % 'string-byte-length))
+                  (form-tree-walk body #(= % 'string-length))
+                  (form-tree-walk body #(= % "")))))))
+
 (defn- policy-call-args-ok?
   "True when call is (policy-name arg…) with each arg a string or integer literal."
   [form policy-name arity]
@@ -3645,6 +3674,11 @@
            (= (count (:functions kir)) (count exports))
            (every? string-expression-function? exports)
            (empty? (:effects kir))) :string-expression-package
+      ;; Reject-path header map composition on edn_quoted (before pure concat
+      ;; so header_edn skeletons that look like string-expression take this path).
+      (and (= 1 (count exports))
+           (http-header-edn-function? (first exports))
+           (empty? (:effects kir))) :http-header-edn
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (string-expression-function? (first exports))
@@ -6499,6 +6533,118 @@
      "    local.get $out i32.const 1 i32.add local.get $ptr local.get $len memory.copy\n"
      "    local.get $out local.get $len i32.add i32.const 1 i32.add\n"
      "    i32.const " quote-ptr " i32.const 1 memory.copy\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $total i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- http-header-edn-wat
+  "Canonical `string×string -> string` reject-path EDN header map.
+
+  Dual UTF-8 scan for quote/backslash on name and value; if either fails,
+  returns empty. Else builds `{:name \"…\" :value \"…\"}` via realloc copies
+  (composition on edn_quoted semantics; no kotoba:typed)."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        ;; literals packed from offset 8
+        ;; pref = "{:name \""  (8 bytes)
+        ;; mid  = "\" :value \"" (10 bytes)
+        ;; suf  = "\"}" (2 bytes)
+        pref-ptr 8
+        pref-len 8
+        mid-ptr 16
+        mid-len 10
+        suf-ptr 26
+        suf-len 2
+        arena-base 32
+        fixed-overhead (+ pref-len mid-len suf-len)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const " pref-ptr ") \"{:name \\\"\")\n"
+     "  (data (i32.const " mid-ptr ") \"\\\" :value \\\"\")\n"
+     "  (data (i32.const " suf-ptr ") \"\\\"}\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $has-forbidden (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $i i32) (local $c i32)\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u if br $done end\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.const 34 i32.eq if i32.const 1 return end\n"
+     "        local.get $c i32.const 92 i32.eq if i32.const 1 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func $empty-string (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    i32.const 0 i32.store\n"
+     "    local.get $ret i32.const 0 i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $n-ptr i32) (param $n-len i32)"
+     " (param $v-ptr i32) (param $v-len i32) (result i32)\n"
+     "    (local $end i32) (local $out i32) (local $ret i32) (local $total i32) (local $cursor i32)\n"
+     "    local.get $n-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $v-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $n-len i32.eqz if else\n"
+     "      local.get $n-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $v-len i32.eqz if else\n"
+     "      local.get $v-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $n-ptr local.get $n-len i32.add local.tee $end\n"
+     "    local.get $n-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $v-ptr local.get $v-len i32.add local.tee $end\n"
+     "    local.get $v-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $n-ptr local.get $n-len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    local.get $v-ptr local.get $v-len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    local.get $n-len local.get $v-len i32.add i32.const " fixed-overhead " i32.add local.set $total\n"
+     "    local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "    i32.const 0 local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " pref-ptr " i32.const " pref-len " memory.copy\n"
+     "    local.get $cursor i32.const " pref-len " i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add local.get $n-ptr local.get $n-len memory.copy\n"
+     "    local.get $cursor local.get $n-len i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " mid-ptr " i32.const " mid-len " memory.copy\n"
+     "    local.get $cursor i32.const " mid-len " i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add local.get $v-ptr local.get $v-len memory.copy\n"
+     "    local.get $cursor local.get $v-len i32.add local.set $cursor\n"
+     "    local.get $out local.get $cursor i32.add i32.const " suf-ptr " i32.const " suf-len " memory.copy\n"
      "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
      "    local.get $out i32.store\n"
      "    local.get $ret local.get $total i32.store offset=4\n"
@@ -11062,6 +11208,9 @@
     :edn-quoted
     (wasm-tools/parse-wat
      (edn-quoted-wat (first (exported-functions kir))))
+    :http-header-edn
+    (wasm-tools/parse-wat
+     (http-header-edn-wat (first (exported-functions kir))))
     :string-length
     (wasm-tools/parse-wat
      (string-length-wat (first (exported-functions kir))))
