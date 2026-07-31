@@ -1856,3 +1856,83 @@
         (is (zero? (:exit resp-h)) (:err resp-h))
         (is (= "-2" (str/trim (:out resp-h)))))
       (finally (Files/deleteIfExists path)))))
+
+(def http-error-package-with-main-kir
+  {:format :kotoba.kir/v4
+   :exports ['http_error_ok 'http_result_arm_ok 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_error_ok
+     :params ['code 'message 'retryable]
+     :param-types [:string :string :i64]
+     :result :i64
+     :effects #{}
+     :body '(if (<= (string-length code) 0)
+              -1
+              (if (> (string-length code) 128)
+                -2
+                (if (> (string-length message) 65536)
+                  -4
+                  (if (< retryable 0)
+                    -5
+                    (if (> retryable 1)
+                      -5
+                      0)))))}
+    {:name 'http_result_arm_ok
+     :params ['arm]
+     :param-types [:i64]
+     :result :i64
+     :effects #{}
+     :body '(if (< arm 0)
+              -1
+              (if (> arm 1)
+                -1
+                0))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body
+     '(let [a (http_error_ok "http/transport" "failed" 0)
+            b (http_error_ok "" "x" 0)
+            c (http_error_ok "bad name" "x" 0)
+            d (http_error_ok "http/ok" "x" 2)
+            e (http_result_arm_ok 1)
+            f (http_result_arm_ok 3)]
+        (+ (* a 100000) (* b 10000) (* c 1000) (* d 100) (* e 10) f))}]})
+
+(deftest http-error-package-with-main-live-vector
+  "T8.3 multi-export: error_ok + arm_ok + live main → -13501."
+  (is (= :http-error-package-with-main
+         (core/assert-supported! http-error-package-with-main-kir)))
+  (let [world (wit/emit http-error-package-with-main-kir)
+        core-bytes (core/emit http-error-package-with-main-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-error-package-with-main-kir world)
+        path (Files/createTempFile "kc-err-pkg-main-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-error-package-with-main (:canonical-lowering packaged)))
+      (is (= 3 (count (:exports world))))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-error-ok(\"http/transport\",\"failed\",0)" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke"
+                            "http-error-ok(\"\",\"x\",0)" (str path))
+            badc (shell/sh "wasmtime" "run" "--invoke"
+                           "http-error-ok(\"bad name\",\"x\",0)" (str path))
+            arm0 (shell/sh "wasmtime" "run" "--invoke" "http-result-arm-ok(0)" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-13501" (str/trim (:out main))))
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty))))
+        (is (zero? (:exit badc)) (:err badc))
+        (is (= "-3" (str/trim (:out badc))))
+        (is (zero? (:exit arm0)) (:err arm0))
+        (is (= "0" (str/trim (:out arm0)))))
+      (finally (Files/deleteIfExists path)))))
