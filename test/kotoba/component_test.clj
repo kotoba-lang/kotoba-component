@@ -2149,6 +2149,106 @@
             e (http_header_pair_ok "X-Ok" "x\ny")]
         (+ (* a 10000) (* b 1000) (* c 100) (* d 10) e))}]})
 
+
+(def secret-name-ok-kir
+  {:format :kotoba.kir/v4
+   :exports ['secret-name-ok]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'secret-name-ok
+     :params ['name]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body '(if (<= (string-length name) 0)
+              -1
+              (if (> (string-length name) 128)
+                -2
+                0))}]})
+
+(def secret-name-ok-with-main-kir
+  {:format :kotoba.kir/v4
+   :exports ['secret_name_ok 'main]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'secret_name_ok
+     :params ['name]
+     :param-types [:string]
+     :result :i64
+     :effects #{}
+     :body
+     '(let [n (string-byte-length name)]
+        (if (<= n 0)
+          -1
+          (if (> n 128)
+            -2
+            (__kotoba_loop_1 0 n name))))}
+    {:name 'main
+     :params []
+     :param-types []
+     :result :i64
+     :effects #{}
+     :body
+     '(let [a (secret_name_ok "ok")
+            b (secret_name_ok "")
+            c (secret_name_ok "has/slash")
+            d (secret_name_ok "ok-name")]
+        (+ (* a 1000) (* b 100) (* c 10) d))}]})
+
+(deftest secret-name-ok-canonical-lowering
+  "T8.3 secret_name_ok denylist charset (not header tchar)."
+  (is (= :secret-name-ok (core/assert-supported! secret-name-ok-kir)))
+  ;; Must NOT match header-name-ok (would accept *)
+  (is (not= :http-header-name-ok (core/assert-supported! secret-name-ok-kir)))
+  (let [world (wit/emit secret-name-ok-kir)
+        core-bytes (core/emit secret-name-ok-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes secret-name-ok-kir world)
+        path (Files/createTempFile "kc-secret-name-ok-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :secret-name-ok (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"ok\")" (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"\")" (str path))
+            star (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"ok*\")" (str path))
+            slash (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"has/slash\")" (str path))
+            sp (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"ok name\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "0" (str/trim (:out ok))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "-1" (str/trim (:out empty))))
+        (is (zero? (:exit star)) (:err star))
+        (is (= "-3" (str/trim (:out star))) "denylist must reject *")
+        (is (zero? (:exit slash)) (:err slash))
+        (is (= "-3" (str/trim (:out slash))))
+        (is (zero? (:exit sp)) (:err sp))
+        (is (= "-3" (str/trim (:out sp)))))
+      (finally (Files/deleteIfExists path)))))
+
+(deftest secret-name-ok-with-main-live-vector
+  "T8.3 multi-export secret_name_ok + main → -130."
+  (is (= :secret-name-ok-with-main
+         (core/assert-supported! secret-name-ok-with-main-kir)))
+  (let [world (wit/emit secret-name-ok-with-main-kir)
+        core-bytes (core/emit secret-name-ok-with-main-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes secret-name-ok-with-main-kir world)
+        path (Files/createTempFile "kc-secret-name-main-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :secret-name-ok-with-main (:canonical-lowering packaged)))
+      (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
+            star (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"ok*\")" (str path))]
+        (is (zero? (:exit main)) (:err main))
+        (is (= "-130" (str/trim (:out main))))
+        (is (zero? (:exit star)) (:err star))
+        (is (= "-3" (str/trim (:out star)))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest http-header-value-ok-canonical-lowering
   "T8.3 typed Component: header_value_ok CTL/length without kotoba:typed."
   (is (= :http-header-value-ok (core/assert-supported! http-header-value-ok-kir)))
