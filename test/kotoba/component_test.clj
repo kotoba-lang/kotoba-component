@@ -1482,6 +1482,68 @@
         (is (= "" (read-string (str/trim (:out bad-retry))))))
       (finally (Files/deleteIfExists path)))))
 
+(def http-result-ok-edn-kir
+  "T8.3 result ok arm skeleton (WAT owns status decimal + body scan + headers shape)."
+  {:format :kotoba.kir/v4
+   :exports ['http_result_ok_edn]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'http_result_ok_edn
+     :params ['status 'headers 'body]
+     :param-types [:i64 :string :string]
+     :result :string
+     :effects #{}
+     :body
+     '(if (or (< status 0) (> status 999))
+        ""
+        (string-concat "{:tag :ok :status "
+                       (string-concat (i64-str status)
+                                      (string-concat " :headers "
+                                                     (string-concat headers
+                                                                    (string-concat " :body \""
+                                                                                   (string-concat body "\"}")))))))}]})
+
+(deftest http-result-ok-edn-canonical-lowering
+  "T8.3 reject-path: ok status+body, bad status, bad body, bad headers shape."
+  (is (= :http-result-ok-edn (core/assert-supported! http-result-ok-edn-kir)))
+  (let [world (wit/emit http-result-ok-edn-kir)
+        core-bytes (core/emit http-result-ok-edn-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes http-result-ok-edn-kir world)
+        path (Files/createTempFile "kc-http-result-ok-edn-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :http-result-ok-edn (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "http-result-ok-edn(200,\"[]\",\"ok\")" (str path))
+            ok3 (shell/sh "wasmtime" "run" "--invoke"
+                          "http-result-ok-edn(404,\"[]\",\"\")" (str path))
+            bad-st (shell/sh "wasmtime" "run" "--invoke"
+                             "http-result-ok-edn(1000,\"[]\",\"x\")" (str path))
+            bad-neg (shell/sh "wasmtime" "run" "--invoke"
+                              "http-result-ok-edn(-1,\"[]\",\"x\")" (str path))
+            bad-body (shell/sh "wasmtime" "run" "--invoke"
+                               "http-result-ok-edn(200,\"[]\",\"a\\\"b\")" (str path))
+            bad-hdr (shell/sh "wasmtime" "run" "--invoke"
+                              "http-result-ok-edn(200,\"x\",\"ok\")" (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "{:tag :ok :status 200 :headers [] :body \"ok\"}"
+               (read-string (str/trim (:out ok)))))
+        (is (zero? (:exit ok3)) (:err ok3))
+        (is (= "{:tag :ok :status 404 :headers [] :body \"\"}"
+               (read-string (str/trim (:out ok3)))))
+        (is (zero? (:exit bad-st)) (:err bad-st))
+        (is (= "" (read-string (str/trim (:out bad-st)))))
+        (is (zero? (:exit bad-neg)) (:err bad-neg))
+        (is (= "" (read-string (str/trim (:out bad-neg)))))
+        (is (zero? (:exit bad-body)) (:err bad-body))
+        (is (= "" (read-string (str/trim (:out bad-body)))))
+        (is (zero? (:exit bad-hdr)) (:err bad-hdr))
+        (is (= "" (read-string (str/trim (:out bad-hdr))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
   (is (= :string-expression-package
