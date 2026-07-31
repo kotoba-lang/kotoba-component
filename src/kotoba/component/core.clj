@@ -541,11 +541,15 @@
   "Multi-export reject-path EDN kit body (T8.3): ≥3 pure exports, each a known
   reject-path role, shared memory. Must include headers empty + append + at
   least one request arm. Optional: headers-names-add (true-set name list),
-  result arms, header-edn, edn-quoted. No private helpers required (WAT owns
-  scans)."
+  result arms, header-edn, edn-quoted.
+
+  Private helpers are allowed (T8.3 multi-file monomorph / multi-ns project
+  kit body). WAT owns scans for exports; non-export functions are ignored for
+  role classification. Every export must still classify uniquely."
   [exports functions]
   (and (>= (count exports) 3)
-       (= (count functions) (count exports))
+       ;; exports are function maps from exported-functions. Multi-file
+       ;; monomorph may leave private helpers in `functions` beyond exports.
        (let [roles (mapv classify-edn-reject-export exports)]
          (and (every? some? roles)
               (some #{:headers-edn-empty} roles)
