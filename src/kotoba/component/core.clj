@@ -1017,6 +1017,164 @@
                 (:name body) 2
                 (:name end) 2}))))
 
+
+(defn- http-result-begin-function?
+  "http_result_begin [arm:i64]→i64: 0→1, 1→11, else -1."
+  [{:keys [params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [arm (first params)]
+         (boolean
+          (and (form-tree-walk body #(= % arm))
+               (form-tree-walk body #(= % -1))
+               (form-tree-walk body #(and (number? %) (= 1 %)))
+               (form-tree-walk body #(and (number? %) (= 11 %))))))))
+
+(defn- http-result-status-function?
+  "http_result_status [state:i64 status:i64]→i64.
+  sticky; phase≠1 → -10; status∉[100,599] → -2; else 2."
+  [{:keys [params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:i64 :i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (nth params 0) status (nth params 1)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % status))
+               (form-tree-walk body #(= % -10))
+               (form-tree-walk body #(= % -2))
+               (form-tree-walk body #(and (number? %) (= 2 %))))))))
+
+(defn- http-result-headers-function?
+  "http_result_headers [state:i64 n:i64]→i64.
+  sticky; phase≠2 → -10; n∉[0,32] → -3; else 3."
+  [{:keys [params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:i64 :i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (nth params 0) n (nth params 1)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % n))
+               (form-tree-walk body #(= % -10))
+               (form-tree-walk body #(= % -3))
+               (form-tree-walk body #(and (number? %) (= 3 %))))))))
+
+(defn- http-result-body-function?
+  "http_result_body [state:i64 body:string]→i64.
+  sticky; phase≠3 → -10; len∉[0,65536] → -4; else 4."
+  [{:keys [params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:i64 :string] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (nth params 0) bod (nth params 1)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % bod))
+               (form-tree-walk body #(= % -10))
+               (form-tree-walk body #(= % -4))
+               (form-tree-walk body #(and (number? %) (= 4 %))))))))
+
+(defn- http-result-code-function?
+  "http_result_code [state:i64 code:string]→i64.
+  sticky; phase≠11 → -10; code empty/-5 >128/-6 badchar/-7; else 12.
+  Frontend may call private code-ok; -5/-6/-7 may live in helper."
+  [{:keys [params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:i64 :string] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (nth params 0) code (nth params 1)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % code))
+               (form-tree-walk body #(= % -10))
+               (form-tree-walk body #(and (number? %) (= 12 %)))
+               (or (form-tree-walk body #(= % -5))
+                   (form-tree-walk body #(= % -6))
+                   (form-tree-walk body #(= % -7))
+                   ;; helper-mediated code-ok call
+                   (form-tree-walk body #(and (seq? %)
+                                              (symbol? (first %))
+                                              (not= (first %) 'if)
+                                              (not= (first %) 'let)))))))))
+
+(defn- http-result-message-function?
+  "http_result_message [state:i64 message:string]→i64.
+  sticky; phase≠12 → -10; len>65536 → -8; else 13."
+  [{:keys [params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:i64 :string] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (nth params 0) msg (nth params 1)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % msg))
+               (form-tree-walk body #(= % -10))
+               (form-tree-walk body #(= % -8))
+               (form-tree-walk body #(and (number? %) (= 13 %))))))))
+
+(defn- http-result-retryable-function?
+  "http_result_retryable [state:i64 r:i64]→i64.
+  sticky; phase≠13 → -10; r∉{0,1} → -9; else 14."
+  [{:keys [params param-types result body]}]
+  (and (= 2 (count params))
+       (= [:i64 :i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (nth params 0) r (nth params 1)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % r))
+               (form-tree-walk body #(= % -10))
+               (form-tree-walk body #(= % -9))
+               (form-tree-walk body #(and (number? %) (= 14 %))))))))
+
+(defn- http-result-end-function?
+  "http_result_end [state:i64]→i64: sticky; 4 or 14 → 0; else -11."
+  [{:keys [params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:i64] param-types)
+       (= :i64 result)
+       (seq? body)
+       (let [state (first params)]
+         (boolean
+          (and (form-tree-walk body #(= % state))
+               (form-tree-walk body #(= % -11))
+               (form-tree-walk body #(and (number? %) (zero? %)))
+               (or (form-tree-walk body #(and (number? %) (= 4 %)))
+                   (form-tree-walk body #(and (number? %) (= 14 %)))))))))
+
+(defn- http-result-pack-package-with-main?
+  "Nine-export: begin/status/headers/body/code/message/retryable/end + nested main → -12061."
+  [exports]
+  (let [begin (first (filter http-result-begin-function? exports))
+        status (first (filter http-result-status-function? exports))
+        headers (first (filter http-result-headers-function? exports))
+        body (first (filter http-result-body-function? exports))
+        code (first (filter http-result-code-function? exports))
+        message (first (filter http-result-message-function? exports))
+        retryable (first (filter http-result-retryable-function? exports))
+        end (first (filter http-result-end-function? exports))
+        main (first (filter #(= 'main (:name %)) exports))]
+    (and begin status headers body code message retryable end main
+         (= 9 (count exports))
+         (live-main-nested-policies?
+          main {(:name begin) 1
+                (:name status) 2
+                (:name headers) 2
+                (:name body) 2
+                (:name code) 2
+                (:name message) 2
+                (:name retryable) 2
+                (:name end) 1}))))
+
 (defn- vector-i64-identity-function?
   [{:keys [params param-types result body]}]
   (and (= 1 (count params))
@@ -3433,6 +3591,9 @@
       (and (= 6 (count exports))
            (http-request-pack-package-with-main? exports)
            (empty? (:effects kir))) :http-request-pack-package-with-main
+      (and (= 9 (count exports))
+           (http-result-pack-package-with-main? exports)
+           (empty? (:effects kir))) :http-result-pack-package-with-main
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (vector-i64-identity-function? (first exports))
@@ -5408,6 +5569,279 @@
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      ")\n")))
+
+
+(defn- http-result-pack-package-wat
+  "Nine-export result packing walk + nested live main → -12061 (ADR 0192).
+
+  ok path: begin(0)=1 → status→2 → headers→3 → body→4 → end=0
+  err path: begin(1)=11 → code→12 → message→13 → retryable→14 → end=0
+  Codes: begin -1; status -2; headers -3; body -4; code -5/-6/-7; message -8;
+  retryable -9; wrong-phase -10; incomplete -11."
+  [begin-fn status-fn headers-fn body-fn code-fn message-fn retryable-fn end-fn main-fn]
+  (let [begin-export (wit-name (:name begin-fn))
+        status-export (wit-name (:name status-fn))
+        headers-export (wit-name (:name headers-fn))
+        body-export (wit-name (:name body-fn))
+        code-export (wit-name (:name code-fn))
+        message-export (wit-name (:name message-fn))
+        retryable-export (wit-name (:name retryable-fn))
+        end-export (wit-name (:name end-fn))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        begin-name (:name begin-fn)
+        status-name (:name status-fn)
+        headers-name (:name headers-fn)
+        body-name (:name body-fn)
+        code-name (:name code-fn)
+        message-name (:name message-fn)
+        retryable-name (:name retryable-fn)
+        end-name (:name end-fn)
+        collect-strings
+        (fn collect [form]
+          (cond
+            (string? form) [form]
+            (seq? form) (mapcat collect (rest form))
+            (vector? form) (mapcat collect form)
+            :else []))
+        main-string-lits
+        (let [vals (mapv second (partition 2 (nth (:body main-fn) 1)))]
+          (vec (distinct (mapcat collect-strings vals))))
+        prepared-strs
+        (loop [remaining main-string-lits
+               offset 8
+               acc []]
+          (if-let [s (first remaining)]
+            (let [b (.getBytes ^String s StandardCharsets/UTF_8)
+                  len (alength b)]
+              (if (zero? len)
+                (recur (next remaining) offset
+                       (conj acc {:value s :bytes [] :length 0 :pointer 0}))
+                (recur (next remaining)
+                       (+ offset len)
+                       (conj acc {:value s :bytes (vec b) :length len :pointer offset}))))
+            acc))
+        non-empty (filterv #(pos? (:length %)) prepared-strs)
+        arena-base (align-up (if (seq non-empty)
+                               (+ (:pointer (last non-empty))
+                                  (:length (last non-empty)))
+                               8)
+                             8)
+        str-ptr (into {} (map (juxt :value :pointer) prepared-strs))
+        str-len (into {} (map (juxt :value :length) prepared-strs))
+        main-data
+        (apply str
+               (map (fn [leaf]
+                      (str "  (data (i32.const " (:pointer leaf) ") \""
+                           (wat-data (:bytes leaf)) "\")\n"))
+                    non-empty))
+        main-locals
+        (let [names (mapv first (partition 2 (nth (:body main-fn) 1)))]
+          (apply str (map #(str " (local $" (name %) " i64)") names)))
+        emit-expr
+        (fn emit [form]
+          (cond
+            (integer? form)
+            (str "    i64.const " form "\n")
+            (and (seq? form) (= (first form) begin-name) (= 2 (count form)))
+            (str (emit (nth form 1)) "    call $begin\n")
+            (and (seq? form) (= (first form) status-name) (= 3 (count form)))
+            (str (emit (nth form 1)) (emit (nth form 2)) "    call $status\n")
+            (and (seq? form) (= (first form) headers-name) (= 3 (count form)))
+            (str (emit (nth form 1)) (emit (nth form 2)) "    call $headers\n")
+            (and (seq? form) (= (first form) body-name) (= 3 (count form)))
+            (let [st (nth form 1) s (nth form 2)]
+              (when-not (string? s)
+                (reject "result-pack body requires string lit" {:body s}))
+              (str (emit st)
+                   "    i32.const " (get str-ptr s)
+                   " i32.const " (get str-len s) "\n"
+                   "    call $body\n"))
+            (and (seq? form) (= (first form) code-name) (= 3 (count form)))
+            (let [st (nth form 1) s (nth form 2)]
+              (when-not (string? s)
+                (reject "result-pack code requires string lit" {:code s}))
+              (str (emit st)
+                   "    i32.const " (get str-ptr s)
+                   " i32.const " (get str-len s) "\n"
+                   "    call $code\n"))
+            (and (seq? form) (= (first form) message-name) (= 3 (count form)))
+            (let [st (nth form 1) s (nth form 2)]
+              (when-not (string? s)
+                (reject "result-pack message requires string lit" {:message s}))
+              (str (emit st)
+                   "    i32.const " (get str-ptr s)
+                   " i32.const " (get str-len s) "\n"
+                   "    call $message\n"))
+            (and (seq? form) (= (first form) retryable-name) (= 3 (count form)))
+            (str (emit (nth form 1)) (emit (nth form 2)) "    call $retryable\n")
+            (and (seq? form) (= (first form) end-name) (= 2 (count form)))
+            (str (emit (nth form 1)) "    call $end\n")
+            :else (reject "unsupported nested result-pack main expr" {:form form})))
+        main-calls
+        (let [pairs (partition 2 (nth (:body main-fn) 1))]
+          (apply str
+                 (map (fn [[sym call]]
+                        (str (emit-expr call)
+                             "    local.set $" (name sym) "\n"))
+                      pairs)))
+        main-expr (nth (:body main-fn) 2)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     main-data
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     ;; error code charset [A-Za-z0-9/_:.-]
+     "  (func $code-char-ok (param $c i32) (result i32)\n"
+     "    local.get $c i32.const 48 i32.ge_u\n"
+     "    local.get $c i32.const 57 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 65 i32.ge_u\n"
+     "    local.get $c i32.const 90 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 97 i32.ge_u\n"
+     "    local.get $c i32.const 122 i32.le_u i32.and if i32.const 1 return end\n"
+     "    local.get $c i32.const 47 i32.eq\n"
+     "    local.get $c i32.const 58 i32.eq i32.or\n"
+     "    local.get $c i32.const 46 i32.eq i32.or\n"
+     "    local.get $c i32.const 45 i32.eq i32.or\n"
+     "    local.get $c i32.const 95 i32.eq i32.or)\n"
+     "  (func $begin (param $arm i64) (result i64)\n"
+     "    local.get $arm i64.const 0 i64.eq if i64.const 1 return end\n"
+     "    local.get $arm i64.const 1 i64.eq if i64.const 11 return end\n"
+     "    i64.const -1)\n"
+     "  (func $status (param $state i64) (param $status i64) (result i64)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 1 i64.ne if i64.const -10 return end\n"
+     "    local.get $status i64.const 100 i64.lt_s if i64.const -2 return end\n"
+     "    local.get $status i64.const 599 i64.gt_s if i64.const -2 return end\n"
+     "    i64.const 2)\n"
+     "  (func $headers (param $state i64) (param $n i64) (result i64)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 2 i64.ne if i64.const -10 return end\n"
+     "    local.get $n i64.const 0 i64.lt_s if i64.const -3 return end\n"
+     "    local.get $n i64.const 32 i64.gt_s if i64.const -3 return end\n"
+     "    i64.const 3)\n"
+     "  (func $body (param $state i64) (param $ptr i32) (param $len i32) (result i64)\n"
+     "    (local $end i32)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 3 i64.ne if i64.const -10 return end\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.const 65536 i32.gt_u if i64.const -4 return end\n"
+     "    local.get $len i32.eqz if else\n"
+     "      local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    i64.const 4)\n"
+     "  (func $code (param $state i64) (param $ptr i32) (param $len i32) (result i64)\n"
+     "    (local $end i32) (local $i i32) (local $c i32)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 11 i64.ne if i64.const -10 return end\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.eqz if i64.const -5 return end\n"
+     "    local.get $len i32.const 128 i32.gt_u if i64.const -6 return end\n"
+     "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $ok\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u br_if $ok\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c call $code-char-ok i32.eqz if i64.const -7 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i64.const 12)\n"
+     "  (func $message (param $state i64) (param $ptr i32) (param $len i32) (result i64)\n"
+     "    (local $end i32)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 12 i64.ne if i64.const -10 return end\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $len i32.const 65536 i32.gt_u if i64.const -8 return end\n"
+     "    local.get $len i32.eqz if else\n"
+     "      local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    i64.const 13)\n"
+     "  (func $retryable (param $state i64) (param $r i64) (result i64)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 13 i64.ne if i64.const -10 return end\n"
+     "    local.get $r i64.const 0 i64.lt_s if i64.const -9 return end\n"
+     "    local.get $r i64.const 1 i64.gt_s if i64.const -9 return end\n"
+     "    i64.const 14)\n"
+     "  (func $end (param $state i64) (result i64)\n"
+     "    local.get $state i64.const 0 i64.lt_s if local.get $state return end\n"
+     "    local.get $state i64.const 4 i64.eq if i64.const 0 return end\n"
+     "    local.get $state i64.const 14 i64.eq if i64.const 0 return end\n"
+     "    i64.const -11)\n"
+     "  (func (export \"cm32p2||" begin-export "\") (param $arm i64) (result i64)\n"
+     "    local.get $arm call $begin)\n"
+     "  (func (export \"cm32p2||" begin-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" status-export "\") (param $state i64) (param $status i64) (result i64)\n"
+     "    local.get $state local.get $status call $status)\n"
+     "  (func (export \"cm32p2||" status-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" headers-export "\") (param $state i64) (param $n i64) (result i64)\n"
+     "    local.get $state local.get $n call $headers)\n"
+     "  (func (export \"cm32p2||" headers-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" body-export "\") (param $state i64)\n"
+     "    (param $ptr i32) (param $len i32) (result i64)\n"
+     "    local.get $state local.get $ptr local.get $len call $body)\n"
+     "  (func (export \"cm32p2||" body-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" code-export "\") (param $state i64)\n"
+     "    (param $ptr i32) (param $len i32) (result i64)\n"
+     "    local.get $state local.get $ptr local.get $len call $code)\n"
+     "  (func (export \"cm32p2||" code-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" message-export "\") (param $state i64)\n"
+     "    (param $ptr i32) (param $len i32) (result i64)\n"
+     "    local.get $state local.get $ptr local.get $len call $message)\n"
+     "  (func (export \"cm32p2||" message-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" retryable-export "\") (param $state i64) (param $r i64) (result i64)\n"
+     "    local.get $state local.get $r call $retryable)\n"
+     "  (func (export \"cm32p2||" retryable-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||" end-export "\") (param $state i64) (result i64)\n"
+     "    local.get $state call $end)\n"
+     "  (func (export \"cm32p2||" end-export "_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2||main\") (result i64)\n"
+     "    " main-locals "\n"
+     main-calls
+     "    " (emit-i64-arith-wat main-expr) ")\n"
+     "  (func (export \"cm32p2||main_post\") (param i64)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
 
 (defn- string-expression-wat [function]
   (let [export (wit-name (:name function))
@@ -10127,6 +10561,20 @@
           main (first (filter #(= 'main (:name %)) exports))]
       (wasm-tools/parse-wat
        (http-request-pack-package-wat begin url headers body end main)))
+    :http-result-pack-package-with-main
+    (let [exports (exported-functions kir)
+          begin (first (filter http-result-begin-function? exports))
+          status (first (filter http-result-status-function? exports))
+          headers (first (filter http-result-headers-function? exports))
+          body (first (filter http-result-body-function? exports))
+          code (first (filter http-result-code-function? exports))
+          message (first (filter http-result-message-function? exports))
+          retryable (first (filter http-result-retryable-function? exports))
+          end (first (filter http-result-end-function? exports))
+          main (first (filter #(= 'main (:name %)) exports))]
+      (wasm-tools/parse-wat
+       (http-result-pack-package-wat begin status headers body code message
+                                     retryable end main)))
     :vector-i64-identity
     (wasm-tools/parse-wat
      (vector-i64-identity-wat (first (exported-functions kir))))
