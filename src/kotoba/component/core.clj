@@ -305,6 +305,39 @@
                   (form-tree-walk body #(= % 'string-length))
                   (form-tree-walk body #(= % "")))))))
 
+(defn- headers-edn-append-function?
+  "Reject-path multi-header append + name uniqueness (T8.3 / ADR 0211):
+  string×string×string → string.
+
+  Host-sequenced fold: acc is `[]` or `[{…} …]`. Builds header via dual
+  quote/backslash scan; rejects on bad atoms, empty acc, or existing
+  `:name \"…\"` marker (substring scan — not a true set / W4). WAT owns
+  scan + uniqueness + vector splice."
+  [{:keys [name params param-types result body]}]
+  (and (= 3 (count params))
+       (= [:string :string :string] param-types)
+       (= :string result)
+       (seq? body)
+       (let [nm (clojure.core/name name)
+             acc (nth params 0)
+             n (nth params 1)
+             v (nth params 2)]
+         (and (re-find #"(?i)headers?[_-]?edn[_-]?append" nm)
+              (form-tree-walk body #(= % acc))
+              (form-tree-walk body #(= % n))
+              (form-tree-walk body #(= % v))
+              (or (form-tree-walk body #(= % 'string-concat))
+                  (form-tree-walk body #(= % 'http_header_edn))
+                  (form-tree-walk body #(= % 'headers_edn_has_name))
+                  (form-tree-walk body #(= % 'string-substring))
+                  (form-tree-walk body #(= % "")))
+              (or (form-tree-walk body #(= % "[]"))
+                  (form-tree-walk body #(= % "["))
+                  (form-tree-walk body #(= % "]"))
+                  (form-tree-walk body #(= % 'string-byte-length))
+                  (form-tree-walk body #(= % 'string-length))
+                  (form-tree-walk body #(= % "")))))))
+
 (defn- policy-call-args-ok?
   "True when call is (policy-name arg…) with each arg a string or integer literal."
   [form policy-name arity]
@@ -3679,6 +3712,10 @@
       (and (= 1 (count exports))
            (http-header-edn-function? (first exports))
            (empty? (:effects kir))) :http-header-edn
+      ;; Multi-header append + name uniqueness (composition on header_edn).
+      (and (= 1 (count exports))
+           (headers-edn-append-function? (first exports))
+           (empty? (:effects kir))) :headers-edn-append
       (and (= 1 (count (:functions kir)))
            (= 1 (count exports))
            (string-expression-function? (first exports))
@@ -6645,6 +6682,229 @@
      "    local.get $out local.get $cursor i32.add local.get $v-ptr local.get $v-len memory.copy\n"
      "    local.get $cursor local.get $v-len i32.add local.set $cursor\n"
      "    local.get $out local.get $cursor i32.add i32.const " suf-ptr " i32.const " suf-len " memory.copy\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $total i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- headers-edn-append-wat
+  "Canonical `string×string×string -> string` multi-header append + uniqueness.
+
+  Params: acc (header vector EDN), name, value. Dual scan name/value; substring
+  scan for `:name \"…\"` marker in acc (not a true set). Empty on reject, bad
+  atoms, or duplicate. Else splice header map into vector. No kotoba:typed."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        ;; literals from offset 8
+        ;; empty-vec "[]" (2), open "[", close "]", space " "
+        ;; header: pref "{:name \"", mid "\" :value \"", suf "\"}"
+        ;; marker-pref ":name \""
+        empty-ptr 8
+        empty-len 2
+        open-ptr 10
+        open-len 1
+        close-ptr 11
+        close-len 1
+        space-ptr 12
+        space-len 1
+        pref-ptr 13
+        pref-len 8
+        mid-ptr 21
+        mid-len 10
+        suf-ptr 31
+        suf-len 2
+        marker-ptr 33
+        marker-len 7  ;; ":name \""
+        quote-ptr 40
+        quote-len 1
+        arena-base 48
+        header-overhead (+ pref-len mid-len suf-len)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const " empty-ptr ") \"[]\")\n"
+     "  (data (i32.const " open-ptr ") \"[\")\n"
+     "  (data (i32.const " close-ptr ") \"]\")\n"
+     "  (data (i32.const " space-ptr ") \" \")\n"
+     "  (data (i32.const " pref-ptr ") \"{:name \\\"\")\n"
+     "  (data (i32.const " mid-ptr ") \"\\\" :value \\\"\")\n"
+     "  (data (i32.const " suf-ptr ") \"\\\"}\")\n"
+     "  (data (i32.const " marker-ptr ") \":name \\\"\")\n"
+     "  (data (i32.const " quote-ptr ") \"\\\"\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $has-forbidden (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $i i32) (local $c i32)\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u if br $done end\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.const 34 i32.eq if i32.const 1 return end\n"
+     "        local.get $c i32.const 92 i32.eq if i32.const 1 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func $empty-string (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    i32.const 0 i32.store\n"
+     "    local.get $ret i32.const 0 i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  ;; has-prefix-at? haystack[i..] starts with needle\n"
+     "  (func $has-prefix-at (param $h-ptr i32) (param $h-len i32)\n"
+     "    (param $n-ptr i32) (param $n-len i32) (param $i i32) (result i32)\n"
+     "    (local $j i32)\n"
+     "    local.get $i local.get $n-len i32.add local.get $h-len i32.gt_u if i32.const 0 return end\n"
+     "    i32.const 0 local.set $j\n"
+     "    (block $done\n"
+     "      (loop $cmp\n"
+     "        local.get $j local.get $n-len i32.ge_u if br $done end\n"
+     "        local.get $h-ptr local.get $i i32.add local.get $j i32.add i32.load8_u\n"
+     "        local.get $n-ptr local.get $j i32.add i32.load8_u i32.ne\n"
+     "        if i32.const 0 return end\n"
+     "        local.get $j i32.const 1 i32.add local.set $j\n"
+     "        br $cmp))\n"
+     "    i32.const 1)\n"
+     "  ;; contains-str? for marker = \":name \\\"\" + name + \"\\\"\"\n"
+     "  (func $has-name-marker (param $acc-ptr i32) (param $acc-len i32)\n"
+     "    (param $name-ptr i32) (param $name-len i32) (result i32)\n"
+     "    (local $i i32) (local $m-len i32)\n"
+     "    local.get $name-len i32.const " marker-len " i32.add i32.const 1 i32.add local.set $m-len\n"
+     "    local.get $m-len local.get $acc-len i32.gt_u if i32.const 0 return end\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $m-len i32.add local.get $acc-len i32.gt_u if br $done end\n"
+     "        ;; check marker pref at i\n"
+     "        local.get $acc-ptr local.get $acc-len\n"
+     "        i32.const " marker-ptr " i32.const " marker-len "\n"
+     "        local.get $i call $has-prefix-at\n"
+     "        if\n"
+     "          ;; check name at i+marker-len\n"
+     "          local.get $acc-ptr local.get $acc-len\n"
+     "          local.get $name-ptr local.get $name-len\n"
+     "          local.get $i i32.const " marker-len " i32.add call $has-prefix-at\n"
+     "          if\n"
+     "            ;; check closing quote at i+marker-len+name-len\n"
+     "            local.get $acc-ptr local.get $acc-len\n"
+     "            i32.const " quote-ptr " i32.const " quote-len "\n"
+     "            local.get $i i32.const " marker-len " i32.add local.get $name-len i32.add\n"
+     "            call $has-prefix-at\n"
+     "            if i32.const 1 return end\n"
+     "          end\n"
+     "        end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func $is-empty-vec (param $ptr i32) (param $len i32) (result i32)\n"
+     "    local.get $len i32.const 2 i32.ne if i32.const 0 return end\n"
+     "    local.get $ptr i32.load8_u i32.const 91 i32.ne if i32.const 0 return end\n"
+     "    local.get $ptr i32.const 1 i32.add i32.load8_u i32.const 93 i32.ne if i32.const 0 return end\n"
+     "    i32.const 1)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $a-ptr i32) (param $a-len i32)"
+     " (param $n-ptr i32) (param $n-len i32)"
+     " (param $v-ptr i32) (param $v-len i32) (result i32)\n"
+     "    (local $end i32) (local $h i32) (local $h-len i32) (local $out i32)\n"
+     "    (local $ret i32) (local $total i32) (local $cursor i32) (local $body-len i32)\n"
+     "    ;; bounds\n"
+     "    local.get $a-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $n-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $v-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $a-len i32.eqz if else\n"
+     "      local.get $a-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $n-len i32.eqz if else\n"
+     "      local.get $n-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $v-len i32.eqz if else\n"
+     "      local.get $v-ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    end\n"
+     "    local.get $a-ptr local.get $a-len i32.add local.tee $end\n"
+     "    local.get $a-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $n-ptr local.get $n-len i32.add local.tee $end\n"
+     "    local.get $n-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $v-ptr local.get $v-len i32.add local.tee $end\n"
+     "    local.get $v-ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    ;; empty acc => reject\n"
+     "    local.get $a-len i32.eqz if call $empty-string return end\n"
+     "    ;; dual scan name/value\n"
+     "    local.get $n-ptr local.get $n-len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    local.get $v-ptr local.get $v-len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    ;; uniqueness\n"
+     "    local.get $a-ptr local.get $a-len local.get $n-ptr local.get $n-len\n"
+     "    call $has-name-marker\n"
+     "    if call $empty-string return end\n"
+     "    ;; build header map into $h\n"
+     "    local.get $n-len local.get $v-len i32.add i32.const " header-overhead " i32.add local.set $h-len\n"
+     "    local.get $h-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const 1 local.get $h-len call $realloc local.set $h\n"
+     "    i32.const 0 local.set $cursor\n"
+     "    local.get $h local.get $cursor i32.add i32.const " pref-ptr " i32.const " pref-len " memory.copy\n"
+     "    local.get $cursor i32.const " pref-len " i32.add local.set $cursor\n"
+     "    local.get $h local.get $cursor i32.add local.get $n-ptr local.get $n-len memory.copy\n"
+     "    local.get $cursor local.get $n-len i32.add local.set $cursor\n"
+     "    local.get $h local.get $cursor i32.add i32.const " mid-ptr " i32.const " mid-len " memory.copy\n"
+     "    local.get $cursor i32.const " mid-len " i32.add local.set $cursor\n"
+     "    local.get $h local.get $cursor i32.add local.get $v-ptr local.get $v-len memory.copy\n"
+     "    local.get $cursor local.get $v-len i32.add local.set $cursor\n"
+     "    local.get $h local.get $cursor i32.add i32.const " suf-ptr " i32.const " suf-len " memory.copy\n"
+     "    ;; empty vec vs append\n"
+     "    local.get $a-ptr local.get $a-len call $is-empty-vec\n"
+     "    if\n"
+     "      ;; \"[\" + h + \"]\"\n"
+     "      local.get $h-len i32.const 2 i32.add local.set $total\n"
+     "      local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "      i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "      local.get $out i32.const " open-ptr " i32.const 1 memory.copy\n"
+     "      local.get $out i32.const 1 i32.add local.get $h local.get $h-len memory.copy\n"
+     "      local.get $out local.get $h-len i32.add i32.const 1 i32.add\n"
+     "      i32.const " close-ptr " i32.const 1 memory.copy\n"
+     "    else\n"
+     "      ;; body = acc[0..len-1] + \" \" + h + \"]\"\n"
+     "      local.get $a-len i32.const 1 i32.sub local.set $body-len\n"
+     "      local.get $body-len local.get $h-len i32.add i32.const 2 i32.add local.set $total\n"
+     "      local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "      i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "      local.get $out local.get $a-ptr local.get $body-len memory.copy\n"
+     "      local.get $out local.get $body-len i32.add i32.const " space-ptr " i32.const 1 memory.copy\n"
+     "      local.get $out local.get $body-len i32.add i32.const 1 i32.add\n"
+     "      local.get $h local.get $h-len memory.copy\n"
+     "      local.get $out local.get $body-len i32.add i32.const 1 i32.add local.get $h-len i32.add\n"
+     "      i32.const " close-ptr " i32.const 1 memory.copy\n"
+     "    end\n"
      "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
      "    local.get $out i32.store\n"
      "    local.get $ret local.get $total i32.store offset=4\n"
@@ -11211,6 +11471,9 @@
     :http-header-edn
     (wasm-tools/parse-wat
      (http-header-edn-wat (first (exported-functions kir))))
+    :headers-edn-append
+    (wasm-tools/parse-wat
+     (headers-edn-append-wat (first (exported-functions kir))))
     :string-length
     (wasm-tools/parse-wat
      (string-length-wat (first (exported-functions kir))))

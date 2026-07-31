@@ -1354,6 +1354,78 @@
         (is (= "" (read-string (str/trim (:out bs))))))
       (finally (Files/deleteIfExists path)))))
 
+(def headers-edn-append-kir
+  "T8.3 multi-header append + uniqueness skeleton (WAT owns scan/splice)."
+  {:format :kotoba.kir/v4
+   :exports ['headers_edn_append]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'headers_edn_append
+     :params ['acc 'name 'value]
+     :param-types [:string :string :string]
+     :result :string
+     :effects #{}
+     :body
+     '(let [h (http_header_edn name value)
+            an (string-byte-length acc)
+            hn (string-byte-length h)]
+        (if (or (= hn 0) (= an 0))
+          ""
+          (if (headers_edn_has_name acc name)
+            ""
+            (if (string=? acc "[]")
+              (string-concat "[" (string-concat h "]"))
+              (let [body (string-substring acc 0 (- an 1))]
+                (string-concat body
+                               (string-concat " "
+                                              (string-concat h "]"))))))))}]})
+
+(deftest headers-edn-append-canonical-lowering
+  "T8.3 reject-path: empty-vec append, second append, duplicate name reject, bad atom."
+  (is (= :headers-edn-append (core/assert-supported! headers-edn-append-kir)))
+  (let [world (wit/emit headers-edn-append-kir)
+        core-bytes (core/emit headers-edn-append-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes headers-edn-append-kir world)
+        path (Files/createTempFile "kc-headers-edn-append-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :headers-edn-append (:canonical-lowering packaged)))
+      (let [one (shell/sh "wasmtime" "run" "--invoke"
+                          "headers-edn-append(\"[]\",\"Host\",\"ex.com\")"
+                          (str path))
+            two (shell/sh "wasmtime" "run" "--invoke"
+                          (str "headers-edn-append("
+                               "\"[{:name \\\"Host\\\" :value \\\"ex.com\\\"}]\","
+                               "\"Accept\",\"*/*\")")
+                          (str path))
+            dup (shell/sh "wasmtime" "run" "--invoke"
+                          (str "headers-edn-append("
+                               "\"[{:name \\\"Host\\\" :value \\\"ex.com\\\"}]\","
+                               "\"Host\",\"other\")")
+                          (str path))
+            bad (shell/sh "wasmtime" "run" "--invoke"
+                          "headers-edn-append(\"[]\",\"a\\\"b\",\"v\")"
+                          (str path))
+            empty-acc (shell/sh "wasmtime" "run" "--invoke"
+                                "headers-edn-append(\"\",\"Host\",\"v\")"
+                                (str path))]
+        (is (zero? (:exit one)) (:err one))
+        (is (= "[{:name \"Host\" :value \"ex.com\"}]"
+               (read-string (str/trim (:out one)))))
+        (is (zero? (:exit two)) (:err two))
+        (is (= "[{:name \"Host\" :value \"ex.com\"} {:name \"Accept\" :value \"*/*\"}]"
+               (read-string (str/trim (:out two)))))
+        (is (zero? (:exit dup)) (:err dup))
+        (is (= "" (read-string (str/trim (:out dup)))))
+        (is (zero? (:exit bad)) (:err bad))
+        (is (= "" (read-string (str/trim (:out bad)))))
+        (is (zero? (:exit empty-acc)) (:err empty-acc))
+        (is (= "" (read-string (str/trim (:out empty-acc))))))
+      (finally (Files/deleteIfExists path)))))
+
 (deftest string-expression-package-multi-export
   "T8.3 multi-export string-expression package: shared memory, 4 EDN exports."
   (is (= :string-expression-package
