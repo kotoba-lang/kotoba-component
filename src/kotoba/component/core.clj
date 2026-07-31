@@ -526,6 +526,7 @@
   (cond
     (headers-edn-empty-function? function) :headers-edn-empty
     (headers-edn-append-function? function) :headers-edn-append
+    (headers-names-add-function? function) :headers-names-add
     (http-request-edn0-function? function) :http-request-edn0
     (http-request-edn-function? function) :http-request-edn
     (http-result-ok-edn-function? function) :http-result-ok-edn
@@ -537,7 +538,9 @@
 (defn- http-edn-reject-package?
   "Multi-export reject-path EDN kit body (T8.3): ≥3 pure exports, each a known
   reject-path role, shared memory. Must include headers empty + append + at
-  least one request arm. No private helpers required (WAT owns scans)."
+  least one request arm. Optional: headers-names-add (true-set name list),
+  result arms, header-edn, edn-quoted. No private helpers required (WAT owns
+  scans)."
   [exports functions]
   (and (>= (count exports) 3)
        (= (count functions) (count exports))
@@ -7997,9 +8000,10 @@
   "Shared-memory multi-export reject-path EDN kit body (T8.3).
 
   Required roles: headers-edn-empty, headers-edn-append, and one of
-  http-request-edn / http-request-edn0. Optional: header-edn, edn-quoted,
-  result-ok, result-err. Shared realloc / has-forbidden / write-u64 / shape.
-  True set / W4 still open; no kotoba:typed."
+  http-request-edn / http-request-edn0. Optional: headers-names-add
+  (true-set name list via element equality), header-edn, edn-quoted,
+  result-ok, result-err. Shared realloc / has-forbidden / write-u64 / shape /
+  has-name-element. W4 recursive nested EDN still open; no kotoba:typed."
   [exports]
   (let [pages wasm/component-memory-pages
         capacity wasm/component-arena-capacity
@@ -8139,6 +8143,54 @@
          "            local.get $i i32.const " marker-len " i32.add local.get $name-len i32.add\n"
          "            call $has-prefix-at\n"
          "            if i32.const 1 return end\n"
+         "          end\n"
+         "        end\n"
+         "        local.get $i i32.const 1 i32.add local.set $i\n"
+         "        br $scan))\n"
+         "    i32.const 0)\n"
+         "  ;; Element-bound name membership for true-set name lists (ADR 0225)\n"
+         "  (func $has-name-element (param $a-ptr i32) (param $a-len i32)\n"
+         "    (param $n-ptr i32) (param $n-len i32) (result i32)\n"
+         "    (local $i i32) (local $prev i32) (local $after i32) (local $c i32)\n"
+         "    local.get $n-len i32.const 2 i32.add local.get $a-len i32.gt_u if i32.const 0 return end\n"
+         "    i32.const 0 local.set $i\n"
+         "    (block $done\n"
+         "      (loop $scan\n"
+         "        local.get $i local.get $n-len i32.add i32.const 1 i32.add\n"
+         "        local.get $a-len i32.gt_u if br $done end\n"
+         "        local.get $a-ptr local.get $i i32.add i32.load8_u local.set $c\n"
+         "        local.get $c i32.const 34 i32.eq\n"
+         "        if\n"
+         "          local.get $i i32.eqz\n"
+         "          if (result i32)\n"
+         "            i32.const 0\n"
+         "          else\n"
+         "            local.get $a-ptr local.get $i i32.const 1 i32.sub i32.add i32.load8_u\n"
+         "          end\n"
+         "          local.set $prev\n"
+         "          local.get $prev i32.const 91 i32.eq\n"
+         "          local.get $prev i32.const 32 i32.eq\n"
+         "          i32.or\n"
+         "          if\n"
+         "            local.get $a-ptr local.get $a-len local.get $n-ptr local.get $n-len\n"
+         "            local.get $i i32.const 1 i32.add call $has-prefix-at\n"
+         "            if\n"
+         "              local.get $i i32.const 1 i32.add local.get $n-len i32.add local.set $after\n"
+         "              local.get $after local.get $a-len i32.lt_u\n"
+         "              if\n"
+         "                local.get $a-ptr local.get $after i32.add i32.load8_u local.set $c\n"
+         "                local.get $c i32.const 34 i32.eq\n"
+         "                if\n"
+         "                  local.get $after i32.const 1 i32.add local.get $a-len i32.ge_u\n"
+         "                  if i32.const 1 return end\n"
+         "                  local.get $a-ptr local.get $after i32.const 1 i32.add i32.add i32.load8_u local.set $c\n"
+         "                  local.get $c i32.const 32 i32.eq\n"
+         "                  local.get $c i32.const 93 i32.eq\n"
+         "                  i32.or\n"
+         "                  if i32.const 1 return end\n"
+         "                end\n"
+         "              end\n"
+         "            end\n"
          "          end\n"
          "        end\n"
          "        local.get $i i32.const 1 i32.add local.set $i\n"
@@ -8457,6 +8509,62 @@
                "    local.get $ret)\n"
                "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
                "    i32.const " arena-base " global.set $next)\n")
+              :headers-names-add
+              (str
+               "  (func (export \"cm32p2||" export "\")"
+               " (param $a-ptr i32) (param $a-len i32)"
+               " (param $n-ptr i32) (param $n-len i32) (result i32)\n"
+               "    (local $end i32) (local $out i32) (local $ret i32)\n"
+               "    (local $total i32) (local $body-len i32) (local $elem-len i32)\n"
+               "    local.get $a-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+               "    local.get $n-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+               "    local.get $a-len i32.eqz if else local.get $a-ptr i32.const 8 i32.lt_u if unreachable end end\n"
+               "    local.get $n-len i32.eqz if else local.get $n-ptr i32.const 8 i32.lt_u if unreachable end end\n"
+               "    local.get $a-ptr local.get $a-len i32.add local.tee $end local.get $a-ptr i32.lt_u if unreachable end\n"
+               "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+               "    local.get $n-ptr local.get $n-len i32.add local.tee $end local.get $n-ptr i32.lt_u if unreachable end\n"
+               "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+               "    local.get $a-len i32.eqz if call $empty-string return end\n"
+               "    local.get $n-len i32.eqz if call $empty-string return end\n"
+               "    local.get $n-ptr local.get $n-len call $has-forbidden if call $empty-string return end\n"
+               "    local.get $a-ptr local.get $a-len local.get $n-ptr local.get $n-len call $has-name-element\n"
+               "    if call $empty-string return end\n"
+               "    local.get $n-len i32.const 2 i32.add local.set $elem-len\n"
+               "    local.get $elem-len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+               "    local.get $a-ptr local.get $a-len call $is-empty-vec\n"
+               "    if\n"
+               "      local.get $elem-len i32.const 2 i32.add local.set $total\n"
+               "      local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+               "      i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+               "      local.get $out i32.const " open-ptr " i32.const 1 memory.copy\n"
+               "      local.get $out i32.const 1 i32.add i32.const " quote-ptr " i32.const 1 memory.copy\n"
+               "      local.get $out i32.const 2 i32.add local.get $n-ptr local.get $n-len memory.copy\n"
+               "      local.get $out i32.const 2 i32.add local.get $n-len i32.add\n"
+               "      i32.const " quote-ptr " i32.const 1 memory.copy\n"
+               "      local.get $out i32.const 3 i32.add local.get $n-len i32.add\n"
+               "      i32.const " close-ptr " i32.const 1 memory.copy\n"
+               "    else\n"
+               "      local.get $a-len i32.const 1 i32.sub local.set $body-len\n"
+               "      local.get $body-len local.get $elem-len i32.add i32.const 2 i32.add local.set $total\n"
+               "      local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+               "      i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+               "      local.get $out local.get $a-ptr local.get $body-len memory.copy\n"
+               "      local.get $out local.get $body-len i32.add i32.const " space-ptr " i32.const 1 memory.copy\n"
+               "      local.get $out local.get $body-len i32.add i32.const 1 i32.add\n"
+               "      i32.const " quote-ptr " i32.const 1 memory.copy\n"
+               "      local.get $out local.get $body-len i32.add i32.const 2 i32.add\n"
+               "      local.get $n-ptr local.get $n-len memory.copy\n"
+               "      local.get $out local.get $body-len i32.add i32.const 2 i32.add local.get $n-len i32.add\n"
+               "      i32.const " quote-ptr " i32.const 1 memory.copy\n"
+               "      local.get $out local.get $body-len i32.add i32.const 3 i32.add local.get $n-len i32.add\n"
+               "      i32.const " close-ptr " i32.const 1 memory.copy\n"
+               "    end\n"
+               "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+               "    local.get $out i32.store\n"
+               "    local.get $ret local.get $total i32.store offset=4\n"
+               "    local.get $ret)\n"
+               "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+               "    i32.const " arena-base " global.set $next)\n")
               ;; optional roles not in this package slice
               (reject "unsupported role in edn-reject-package" {:role role :name (:name f)}))))
         export-funcs (apply str (map export-fn roles))]
@@ -8468,6 +8576,7 @@
      ")\n")))
 
 (declare bounded-bump-realloc-wat)
+
 
 (defn- vector-i64-identity-wat
   "Canonical `list<s64> -> list<s64>` identity.
