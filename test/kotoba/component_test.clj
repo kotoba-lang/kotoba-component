@@ -1354,6 +1354,63 @@
         (is (= "" (read-string (str/trim (:out bs))))))
       (finally (Files/deleteIfExists path)))))
 
+(def secret-request-edn-kir
+  "T8.3 secret get-request fixed-depth EDN (ADR 0236 Component twin skeleton)."
+  {:format :kotoba.kir/v4
+   :exports ['secret_request_edn]
+   :schemas {}
+   :effects #{}
+   :functions
+   [{:name 'secret_request_edn
+     :params ['name]
+     :param-types [:string]
+     :result :string
+     :effects #{}
+     :body
+     '(if (or (= (string-length name) 0)
+              (> (string-length name) 128)
+              (= (has-forbidden name) 1))
+        ""
+        (string-concat "{:name \""
+                       (string-concat name "\"}")))}]})
+
+(deftest secret-request-edn-canonical-lowering
+  "T8.3 secret request EDN: empty/long/quote reject; ok builds {:name …}."
+  (is (= :secret-request-edn (core/assert-supported! secret-request-edn-kir)))
+  (let [world (wit/emit secret-request-edn-kir)
+        core-bytes (core/emit secret-request-edn-kir :wasm32-wasi-kotoba-v1)
+        packaged (artifact/package core-bytes secret-request-edn-kir world)
+        path (Files/createTempFile "kc-secret-request-edn-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes (:bytes packaged)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (= :secret-request-edn (:canonical-lowering packaged)))
+      (let [ok (shell/sh "wasmtime" "run" "--invoke"
+                         "secret-request-edn(\"API_TOKEN\")"
+                         (str path))
+            empty (shell/sh "wasmtime" "run" "--invoke"
+                            "secret-request-edn(\"\")"
+                            (str path))
+            dq (shell/sh "wasmtime" "run" "--invoke"
+                         "secret-request-edn(\"a\\\"b\")"
+                         (str path))
+            long (shell/sh "wasmtime" "run" "--invoke"
+                           (str "secret-request-edn(\""
+                                (apply str (repeat 129 "x"))
+                                "\")")
+                           (str path))]
+        (is (zero? (:exit ok)) (:err ok))
+        (is (= "{:name \"API_TOKEN\"}"
+               (read-string (str/trim (:out ok)))))
+        (is (zero? (:exit empty)) (:err empty))
+        (is (= "" (read-string (str/trim (:out empty)))))
+        (is (zero? (:exit dq)) (:err dq))
+        (is (= "" (read-string (str/trim (:out dq)))))
+        (is (zero? (:exit long)) (:err long))
+        (is (= "" (read-string (str/trim (:out long))))))
+      (finally (Files/deleteIfExists path)))))
+
 (def headers-edn-append-kir
   "T8.3 multi-header append + uniqueness skeleton (WAT owns scan/splice)."
   {:format :kotoba.kir/v4

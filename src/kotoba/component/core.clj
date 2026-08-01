@@ -276,6 +276,31 @@
                   (form-tree-walk body #(= % 'string-substring))
                   (form-tree-walk body #(= % "")))))))
 
+(defn- secret-request-edn-function?
+  "T8.3 fixed-depth secret get-request EDN (ADR 0236 Component twin): string → string.
+
+  Builds `{:name \"…\"}` when name is non-empty, len ≤128, and passes dual
+  quote/backslash scan; otherwise empty. WAT owns scan + length + concat.
+  Export name must contain secret and request_edn / request-edn."
+  [{:keys [name params param-types result body]}]
+  (and (= 1 (count params))
+       (= [:string] param-types)
+       (= :string result)
+       (seq? body)
+       (let [nm (clojure.core/name name)
+             s (first params)]
+         (and (re-find #"(?i)secret" nm)
+              (re-find #"(?i)request[_-]?edn" nm)
+              (form-tree-walk body #(= % s))
+              (form-tree-walk body #(= % 128))
+              (or (form-tree-walk body #(= % ""))
+                  (form-tree-walk body #(and (string? %) (empty? %))))
+              (or (form-tree-walk body #(= % 'string-concat))
+                  (form-tree-walk body #(= % 'string-length))
+                  (form-tree-walk body #(= % 'string-byte-length)))
+              (or (form-tree-walk body #(and (string? %) (str/includes? % "{:name")))
+                  (form-tree-walk body #(= % "{:name \"")))))))
+
 (defn- http-header-edn-function?
   "Reject-path EDN header map (T8.3 composition on edn_quoted): string×string → string.
 
@@ -533,6 +558,7 @@
     (http-request-edn-function? function) :http-request-edn
     (http-result-ok-edn-function? function) :http-result-ok-edn
     (http-result-err-edn-function? function) :http-result-err-edn
+    (secret-request-edn-function? function) :secret-request-edn
     (http-header-edn-function? function) :http-header-edn
     (edn-quoted-function? function) :edn-quoted
     :else nil))
@@ -3954,6 +3980,11 @@
       ;; Before single-export specializations so ≥3 matching exports take this path.
       (and (http-edn-reject-package? exports (:functions kir))
            (empty? (:effects kir))) :http-edn-reject-package
+      ;; Secret get-request fixed-depth EDN (before generic string-expression /
+      ;; header-edn so secret_request_edn is not misfit to header or pure concat).
+      (and (= 1 (count exports))
+           (secret-request-edn-function? (first exports))
+           (empty? (:effects kir))) :secret-request-edn
       ;; Reject-path header map composition on edn_quoted (before pure concat
       ;; so header_edn skeletons that look like string-expression take this path).
       (and (= 1 (count exports))
@@ -6837,6 +6868,96 @@
      "    local.get $out i32.const 1 i32.add local.get $ptr local.get $len memory.copy\n"
      "    local.get $out local.get $len i32.add i32.const 1 i32.add\n"
      "    i32.const " quote-ptr " i32.const 1 memory.copy\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    local.get $out i32.store\n"
+     "    local.get $ret local.get $total i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn- secret-request-edn-wat
+  "Canonical `string -> string` fixed-depth secret get-request EDN.
+
+  Empty name, length >128, or quote/backslash → empty string. Else
+  `{:name \"…\"}`. No kotoba:typed (WAT owns scan + bounds)."
+  [function]
+  (let [export (wit-name (:name function))
+        pages wasm/component-memory-pages
+        capacity wasm/component-arena-capacity
+        max-bytes value/string-value-byte-limit
+        name-limit 128
+        ;; pref = "{:name \"" (8 bytes), suf = "\"}" (2 bytes)
+        pref-ptr 8
+        pref-len 8
+        suf-ptr 16
+        suf-len 2
+        arena-base 24
+        fixed-overhead (+ pref-len suf-len)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (data (i32.const " pref-ptr ") \"{:name \\\"\")\n"
+     "  (data (i32.const " suf-ptr ") \"\\\"}\")\n"
+     "  (func $realloc (export \"cm32p2_realloc\")\n"
+     "    (param $old-ptr i32) (param $old-size i32)\n"
+     "    (param $align i32) (param $new-size i32) (result i32)\n"
+     "    (local $ptr i32) (local $end i32) (local $copy-size i32)\n"
+     "    local.get $new-size i32.eqz if i32.const 0 return end\n"
+     "    local.get $align i32.eqz if unreachable end\n"
+     "    local.get $align i32.const 8 i32.gt_u if unreachable end\n"
+     "    local.get $align local.get $align i32.const 1 i32.sub i32.and if unreachable end\n"
+     "    global.get $next local.get $align i32.const 1 i32.sub i32.add\n"
+     "    i32.const 0 local.get $align i32.sub i32.and local.tee $ptr\n"
+     "    local.get $new-size i32.add local.tee $end local.get $ptr i32.lt_u\n"
+     "    if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $end global.set $next\n"
+     "    local.get $old-ptr i32.eqz if else\n"
+     "      local.get $old-size local.get $new-size i32.lt_u\n"
+     "      if (result i32) local.get $old-size else local.get $new-size end\n"
+     "      local.set $copy-size\n"
+     "      local.get $ptr local.get $old-ptr local.get $copy-size memory.copy\n"
+     "    end local.get $ptr)\n"
+     "  (func $has-forbidden (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $i i32) (local $c i32)\n"
+     "    i32.const 0 local.set $i\n"
+     "    (block $done\n"
+     "      (loop $scan\n"
+     "        local.get $i local.get $len i32.ge_u if br $done end\n"
+     "        local.get $ptr local.get $i i32.add i32.load8_u local.set $c\n"
+     "        local.get $c i32.const 34 i32.eq if i32.const 1 return end\n"
+     "        local.get $c i32.const 92 i32.eq if i32.const 1 return end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $scan))\n"
+     "    i32.const 0)\n"
+     "  (func $empty-string (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
+     "    i32.const 0 i32.store\n"
+     "    local.get $ret i32.const 0 i32.store offset=4\n"
+     "    local.get $ret)\n"
+     "  (func (export \"cm32p2||" export "\")"
+     " (param $ptr i32) (param $len i32) (result i32)\n"
+     "    (local $end i32) (local $out i32) (local $ret i32) (local $total i32)\n"
+     "    local.get $len i32.eqz if call $empty-string return end\n"
+     "    local.get $len i32.const " name-limit " i32.gt_u if call $empty-string return end\n"
+     "    local.get $len i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    local.get $ptr i32.const 8 i32.lt_u if unreachable end\n"
+     "    local.get $ptr local.get $len i32.add local.tee $end\n"
+     "    local.get $ptr i32.lt_u if unreachable end\n"
+     "    local.get $end i32.const " capacity " i32.gt_u if unreachable end\n"
+     "    local.get $ptr local.get $len call $has-forbidden\n"
+     "    if call $empty-string return end\n"
+     "    local.get $len i32.const " fixed-overhead " i32.add local.set $total\n"
+     "    local.get $total i32.const " max-bytes " i32.gt_u if unreachable end\n"
+     "    i32.const 0 i32.const 0 i32.const 1 local.get $total call $realloc local.set $out\n"
+     "    local.get $out i32.const " pref-ptr " i32.const " pref-len " memory.copy\n"
+     "    local.get $out i32.const " pref-len " i32.add local.get $ptr local.get $len memory.copy\n"
+     "    local.get $out local.get $len i32.add i32.const " pref-len " i32.add\n"
+     "    i32.const " suf-ptr " i32.const " suf-len " memory.copy\n"
      "    i32.const 0 i32.const 0 i32.const 4 i32.const 8 call $realloc local.tee $ret\n"
      "    local.get $out i32.store\n"
      "    local.get $ret local.get $total i32.store offset=4\n"
@@ -13193,6 +13314,9 @@
     :edn-quoted
     (wasm-tools/parse-wat
      (edn-quoted-wat (first (exported-functions kir))))
+    :secret-request-edn
+    (wasm-tools/parse-wat
+     (secret-request-edn-wat (first (exported-functions kir))))
     :http-header-edn
     (wasm-tools/parse-wat
      (http-header-edn-wat (first (exported-functions kir))))
