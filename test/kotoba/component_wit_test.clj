@@ -90,3 +90,48 @@
                                :params ['item-id 'item_id]
                                :param-types [:i64 :i64]
                                :result :i64 :body 'item-id}]}))))
+
+(deftest internal-recursive-schemas-omitted-from-wit-when-exports-are-scalar
+  "W4 record-kv residual: guest may use recursive :edn/node ADTs internally
+  while exporting only :string / :i64 kit codecs. Those schemas must not be
+  forced onto the WIT surface (no representation) and must not block emit."
+  (let [edn-kv [:record :edn/kv [[:k :string] [:v :string]]]
+        edn-node [:variant :edn/node
+                  [[:atom :string]
+                   [:entry [:ref :edn/kv]]
+                   [:pair [:vector [[:ref :edn/node] [:ref :edn/node]]]]]]
+        value {:format :kotoba.kir/v4
+               :exports ['request-edn 'main]
+               :schemas {:edn/kv edn-kv :edn/node edn-node}
+               :functions [{:name 'request-edn
+                            :params ['url]
+                            :param-types [:string]
+                            :result :string
+                            :body 'url}
+                           {:name 'main :params [] :param-types []
+                            :result :i64 :body -2506}]}
+        out (wit/emit value)
+        source (:source out)]
+    (is (= ['main 'request-edn] (:exports out))) ; emit sorts export names
+    (is (re-find #"export request-edn: func\(url: string\) -> string;" source))
+    (is (re-find #"export main: func\(\) -> s64;" source))
+    ;; Internal recursive ADTs must not appear in WIT types.
+    (is (not (re-find #"edn-node|edn-kv|interface types" source)))
+    (is (nil? (re-find #"recursive" source)))))
+
+(deftest surface-recursive-schemas-still-rejected
+  "Recursive ADTs on the Canonical export surface remain reject-v1."
+  (let [edn-node [:variant :edn/node
+                  [[:atom :string]
+                   [:pair [:vector [[:ref :edn/node] [:ref :edn/node]]]]]]
+        value {:format :kotoba.kir/v4
+               :exports ['echo]
+               :schemas {:edn/node edn-node}
+               :functions [{:name 'echo
+                            :params ['n]
+                            :param-types [[:ref :edn/node]]
+                            :result [:ref :edn/node]
+                            :body 'n}]}]
+    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+                          #"recursive schema has no WIT representation"
+                          (wit/emit value)))))

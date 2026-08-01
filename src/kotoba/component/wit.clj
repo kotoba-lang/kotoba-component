@@ -93,13 +93,44 @@
     (coll? descriptor) (reduce into #{} (map referenced-schema-names descriptor))
     :else #{}))
 
+(defn- schema-payload
+  "Record/variant payloads only — excludes the nominal identity slot so a
+  bare record does not look self-referential."
+  [descriptor]
+  (if (and (vector? descriptor)
+           (contains? #{:record :variant} (first descriptor))
+           (= 3 (count descriptor)))
+    (nth descriptor 2)
+    descriptor))
+
+(defn- wit-surface-schemas
+  "Schemas reachable from WIT-facing descriptors (export params/results and
+  capability request/result types). Guest-internal recursive ADTs used only
+  to build `:string` EDN (W4 record-kv) never appear here."
+  [schemas root-descriptors]
+  (loop [acc {}
+         todo (set (mapcat referenced-schema-names root-descriptors))]
+    (if-let [n (first todo)]
+      (if (contains? acc n)
+        (recur acc (disj todo n))
+        (if-let [descriptor (get schemas n)]
+          (recur (assoc acc n descriptor)
+                 (into (disj todo n)
+                       (referenced-schema-names (schema-payload descriptor))))
+          (recur acc (disj todo n))))
+      acc)))
+
 (defn- reject-recursive-schemas!
   "`:recursive-schema :reject-v1` in the Component baseline: a schema whose
   type graph reaches itself has no WIT representation, because a WIT record is
   sized and cannot contain itself.
 
-  This was not enforced. `type-text` renders `[:ref :ns/name]` as the bare type
-  name, so a self-referential schema emitted
+  Applied only to **WIT-surface** schemas (export/import types). Guest-internal
+  recursive ADTs that never cross the Canonical ABI (string-encoded EDN
+  packages, W4 record-kv) are omitted from WIT and are not rejected here.
+
+  This was not enforced historically. `type-text` renders `[:ref :ns/name]` as
+  the bare type name, so a self-referential schema emitted
 
     record t-n {
       v: s64,
@@ -119,13 +150,8 @@
   ;; `referenced-schema-names` includes a record's own nominal identity -- it
   ;; feeds the `use types.{…}` line, where that is correct -- so using it
   ;; directly makes every record look self-referential.
-  (let [payload (fn [descriptor]
-                  (if (and (vector? descriptor)
-                           (contains? #{:record :variant} (first descriptor)))
-                    (nth descriptor 2)
-                    descriptor))
-        edges (into {} (map (fn [[name descriptor]]
-                              [name (referenced-schema-names (payload descriptor))]))
+  (let [edges (into {} (map (fn [[name descriptor]]
+                              [name (referenced-schema-names (schema-payload descriptor))]))
                     schemas)
         reaches (fn reaches [start]
                   (loop [seen #{} todo [start]]
@@ -144,7 +170,6 @@
                   {:schema name
                    :cycle (vec (sort-by str (conj (filter #(contains? (reaches %) name) from)
                                                   name)))}))))))
-
 (defn- type-uses [descriptors]
   (->> descriptors (mapcat referenced-schema-names) distinct (sort-by str) vec))
 
@@ -230,7 +255,6 @@
         canonical-names (map wit-name schema-names)]
     (when-not (= (count canonical-names) (count (distinct canonical-names)))
       (reject "schema names collide after WIT canonicalization" {}))
-    (reject-recursive-schemas! schemas)
     (let [by-id (capability-index)
           capabilities
           (mapv (fn [{:keys [id request-type result-type]}]
@@ -256,6 +280,11 @@
             (reject "parameter names collide after WIT canonicalization"
                     {:export (:name function) :parameters (:params function)}))
           export-types (mapcat (fn [f] (conj (vec (:param-types f)) (:result f))) exports)
+          capability-types (mapcat (juxt :request-type :result-type) capabilities)
+          ;; WIT surface only: internal recursive ADTs (W4 record-kv) stay guest-private.
+          surface-schemas (wit-surface-schemas schemas
+                                               (concat export-types capability-types))
+          _ (reject-recursive-schemas! surface-schemas)
           _ (doseq [descriptor (mapcat #(tree-seq coll? seq %) export-types)
                     :when (and (vector? descriptor) (= :record (first descriptor)))]
               (let [identity (second descriptor)]
@@ -263,9 +292,9 @@
                   (reject "inline record differs from sealed schema identity"
                           {:descriptor descriptor :schema (get schemas identity)}))))
           text (str "package kotoba:application@1.0.0;\n\n"
-                    (when (seq schemas)
+                    (when (seq surface-schemas)
                       (str "interface types {\n"
-                           (apply str (map schema-text (sort-by (comp str key) schemas)))
+                           (apply str (map schema-text (sort-by (comp str key) surface-schemas)))
                            "}\n\n"))
                     (apply str (map (if (= capability-mode :linear-resource)
                                       linear-resource-interface-text
