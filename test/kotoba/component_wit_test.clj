@@ -135,3 +135,23 @@
     (is (thrown-with-msg? clojure.lang.ExceptionInfo
                           #"recursive schema has no WIT representation"
                           (wit/emit value)))))
+
+(deftest ops-kit-wire-ids-19-23-are-registered-for-wit
+  "ADR 0120: ops kit capabilities are inventory rows so typed-cap-call emits WIT."
+  (let [by-id (into {} (map (juxt :id :name) (:capabilities wit/contract)))]
+    (is (= :fs/transact (get by-id 19)))
+    (is (= :process/spawn (get by-id 20)))
+    (is (= :secret/get (get by-id 21)))
+    (is (= :git/run (get by-id 22)))
+    (is (= :entropy/draw (get by-id 23)))
+    (is (= 23 (count (:capabilities wit/contract)))))
+  (let [ops-kir {:format :kotoba.kir/v4
+                 :exports ['run]
+                 :schemas {}
+                 :functions [{:name 'run :params ['req] :param-types [:string]
+                              :result :string
+                              :body '(typed-cap-call 20 :string :string req)}]}
+        package (wit/emit ops-kir)]
+    (is (= [:process/spawn] (:imports package)))
+    (is (re-find #"interface process" (:source package)))
+    (is (re-find #"spawn: func\(request: string\) -> string" (:source package)))))

@@ -115,7 +115,19 @@
   {:name :http/accept :id 17 :interface "http-ingress" :function "accept"
    :kit :http-ingress :provider-wasi []}
   {:name :http/reply :id 18 :interface "http-ingress" :function "reply"
-   :kit :http-ingress :provider-wasi []}]
+   :kit :http-ingress :provider-wasi []}
+  ;; T8.3 ops kits (provider ids 19–23; kotoba-lang capability-catalog).
+  ;; Host-injected authority: empty provider-wasi (not ambient WASI).
+  {:name :fs/transact :id 19 :interface "scoped-fs" :function "transact"
+   :kit :scoped-fs :provider-wasi []}
+  {:name :process/spawn :id 20 :interface "process" :function "spawn"
+   :kit :process :provider-wasi []}
+  {:name :secret/get :id 21 :interface "secret" :function "get"
+   :kit :secret :provider-wasi []}
+  {:name :git/run :id 22 :interface "git" :function "run"
+   :kit :git :provider-wasi []}
+  {:name :entropy/draw :id 23 :interface "entropy" :function "draw"
+   :kit :entropy :provider-wasi []}]
  :provider-authority
  {:rule :kit-declared-only
   :no-inferred-wasi true
