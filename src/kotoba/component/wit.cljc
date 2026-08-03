@@ -1,22 +1,45 @@
 (ns kotoba.component.wit
-  "Deterministic WIT package/world generation from checked KIR."
+  "Deterministic WIT package/world generation from checked KIR.
+
+  Portable (.cljc). Of 344 lines, exactly two were JVM-bound — loading the
+  pinned contract, and SHA-256 — and both now have a ClojureScript branch. The
+  other 340 lines are the part that actually matters here: WIT identifier
+  canonicalization and the Kotoba-type to WIT-type mapping. Those are where two
+  implementations could silently disagree and emit different worlds from the
+  same KIR, which is what CI6 exists to rule out. Keeping this namespace
+  JVM-only made that comparison impossible rather than merely unmeasured.
+
+  The ClojureScript branch targets Node (nbb): it reads the contract from the
+  filesystem relative to the working directory and uses node:crypto, so it is
+  a compiler-side tool namespace, not browser code."
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]
             [clojure.string :as str]
-            [kotoba.abi.contract :as abi])
-  (:import [java.nio.charset StandardCharsets]
-           [java.security MessageDigest]))
+            [kotoba.abi.contract :as abi]
+            #?(:clj [clojure.java.io :as io])
+            #?@(:cljs [["fs" :as fs]
+                       ["node:crypto" :as crypto]]))
+  #?(:clj (:import [java.nio.charset StandardCharsets]
+                   [java.security MessageDigest])))
+
+(def contract-resource "kotoba/lang/component-model-v1.edn")
 
 (def contract
-  (edn/read-string (slurp (io/resource "kotoba/lang/component-model-v1.edn"))))
+  (edn/read-string
+   #?(:clj (slurp (io/resource contract-resource))
+      ;; No classpath resources on Node. Read the same file from the
+      ;; repository's resources/ root, so both platforms load identical bytes.
+      :cljs (fs/readFileSync (str "resources/" contract-resource) "utf8"))))
 
 (defn- reject [message data]
   (throw (ex-info message (assoc data :phase :component-wit))))
 
 (defn- text-sha256 [text]
-  (let [bytes (.digest (MessageDigest/getInstance "SHA-256")
-                       (.getBytes ^String text StandardCharsets/UTF_8))]
-    (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bytes))))
+  #?(:clj
+     (let [bytes (.digest (MessageDigest/getInstance "SHA-256")
+                          (.getBytes ^String text StandardCharsets/UTF_8))]
+       (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bytes)))
+     :cljs
+     (-> (crypto/createHash "sha256") (.update text "utf8") (.digest "hex"))))
 
 (defn- wit-name [value]
   (let [source (cond (keyword? value) (subs (str value) 1)
@@ -258,7 +281,14 @@
   (when-not (contains? #{:kotoba.kir/v3 :kotoba.kir/v4} (:format kir))
     (reject "WIT generation requires checked KIR" {:format (:format kir)}))
   (if typed-capability-v3?
-    (let [source (abi/typed-capability-wit-v3)
+    ;; The v3 profile serves the authoritative WIT bytes out of a classpath
+    ;; resource in the pinned ABI dependency, and that accessor is :clj-only
+    ;; there. So this one profile stays JVM-bound; the default lowering below
+    ;; — the part that turns checked KIR into a world — is portable and is
+    ;; what the cross-implementation vectors compare.
+    (let [source #?(:clj (abi/typed-capability-wit-v3)
+                    :cljs (reject "typed-capability-v3 WIT is JVM-only: its authoritative source is a classpath resource in kotoba-lang/abi"
+                                  {:profile :typed-capability-v3}))
           profile (get-in contract [:profiles :typed-capability-v3])]
       (when-not (= {:target abi/component-target-v2
                     :world abi/typed-capability-world-v3}
