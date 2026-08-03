@@ -223,6 +223,33 @@
                             (:params function) (:param-types function)))
        ") -> " (type-text (:result function)) ";\n"))
 
+(def host-binding-contract
+  "Identifies the shape of the `:host-binding` receipt field below."
+  :kotoba.component.host-binding/v1)
+
+(def required-host-guard
+  "The only host entry point admissible for a component's effectful import.
+
+  The weaker guards on the host ladder (`guard-call`, `guard-ability-call`)
+  remain public because non-component hosts legitimately use them, so what
+  keeps them out of a component's import path cannot be their absence. It has
+  to be a statement the host can check — which is what this declares."
+  :guard-component-ability-call)
+
+(defn- host-binding
+  "CI5: declare, per effectful import, the host entry point that must bind it.
+
+  Without this the host binder can only *assume* which guard an import
+  requires. An assumption cannot be violated, so it also cannot be detected:
+  a host that bound a component import through `guard-ability-call` — skipping
+  component admission, and for a non-capability request skipping the effect
+  gate too — would produce a working program and no diagnostic. Declaring the
+  requirement turns that silent weakening into a checkable mismatch."
+  [import-names]
+  {:contract host-binding-contract
+   :required-guard required-host-guard
+   :imports (into (sorted-map) (map (fn [name] [name required-host-guard])) import-names)})
+
 (defn emit
   "Return a deterministic WIT v1 package and receipt for checked KIR."
   ([kir] (emit kir {}))
@@ -248,6 +275,8 @@
        :sha256 (text-sha256 source)
        :imports (mapv abi/capability-import-name
                       (sort (map :id (capability-contracts kir))))
+       :host-binding (host-binding (mapv abi/capability-import-name
+                                         (sort (map :id (capability-contracts kir)))))
        :capability-mode :linear-resource
        :capability-transport (:capability-transport profile)})
     (let [schemas (or (:schemas kir) {})
@@ -311,5 +340,6 @@
        :source text
        :sha256 (text-sha256 text)
        :imports (mapv :name capabilities)
+       :host-binding (host-binding (mapv :name capabilities))
        :capability-mode capability-mode
        :exports (mapv :name exports)})))))
