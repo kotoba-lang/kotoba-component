@@ -36,7 +36,9 @@
             gate"
     (let [r (doctor/evaluate :wasm-tools "wasm-tools 1.245.1")]
       (is (false? (:ok? r)))
-      (is (= :version-mismatch (:reason r)))))
+      ;; Reported as :newer-than-pin rather than the generic mismatch — see
+      ;; a-newer-version-is-a-distinct-failure for why the two are separated.
+      (is (= :newer-than-pin (:reason r)))))
   (let [pinned (get-in doctor/pins [:wasm-tools :version])]
     (is (:ok? (doctor/evaluate :wasm-tools (str "wasm-tools " pinned))))))
 
@@ -66,3 +68,36 @@
     (let [text (doctor/report [] [{:pin :wac :contract "0.10.1"
                                    :enforced-by "x/y" :enforced "0.9.0"}])]
       (is (re-find #"CONTRACT DRIFT" text)))))
+
+(deftest a-newer-version-is-a-distinct-failure
+  (testing "the case that prompted the policy: the machine had 1.245.1 against
+            a 1.243.0 pin, and the instinctive fix — advance the pin — is the
+            wrong one. Older and newer must not report the same reason, because
+            they call for different actions."
+    (let [newer (doctor/evaluate :wasm-tools "wasm-tools 1.245.1")
+          older (doctor/evaluate :wasm-tools "wasm-tools 1.200.0")]
+      (is (false? (:ok? newer)))
+      (is (= :newer-than-pin (:reason newer)))
+      (is (false? (:ok? older)))
+      (is (= :version-mismatch (:reason older))))))
+
+(deftest the-report-explains-why-newer-still-fails
+  (testing "a preflight that just says FAIL against a newer version invites
+            the reader to bump the pin"
+    (let [text (doctor/report [(doctor/evaluate :wasm-tools "wasm-tools 1.245.1")] [])]
+      (is (re-find #"NEWER than the pinned" text))
+      (is (re-find #"reproduce" text))
+      (is (re-find #"bump-policy" text)))))
+
+(deftest the-bump-policy-records-a-decision-not-just-a-rule
+  (testing "a rule with no recorded decisions gets re-litigated every time
+            someone notices the version gap"
+    (is (= :bump-only-on-a-reproduced-defect (:rule doctor/bump-policy)))
+    (let [wasm-tools (get-in doctor/bump-policy [:decisions :wasm-tools])]
+      (is (= :hold (:verdict wasm-tools)))
+      (is (= (get-in doctor/pins [:wasm-tools :version]) (:pin wasm-tools))
+          "the recorded decision must be about the pin actually in force")
+      (is (seq (:reason wasm-tools)))
+      (is (seq (:against wasm-tools))))
+    (testing "wasmtime is a floor, not an exact pin, and says so"
+      (is (= :minimum-only (get-in doctor/bump-policy [:decisions :wasmtime :verdict]))))))
