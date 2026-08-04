@@ -51,6 +51,49 @@
      :wasmtime   {:major (:minimum-wasmtime-major wasi)
                   :match :minimum-major}}))
 
+(def bump-policy
+  "When a pinned toolchain version may move.
+
+  This rule already existed, but only as prose inside one variable's docstring
+  (`kotoba.component.composition/wac-version`), where it governed a single pin
+  and was invisible to anyone looking at the other two. It is stated here
+  because the situation it exists for is common and its answer is
+  counter-intuitive: an installed version NEWER than the pin is still a
+  failure, and the instinctive fix -- advance the pin -- is the wrong one.
+
+  A pin moves only when a newer release directly and verifiably closes a defect
+  this codebase reproduced. Not because upstream moved, not to reduce a version
+  gap, and not as a routine refresh. These pins exist so artifact bytes are
+  reproducible; advancing one without a reason means re-establishing that
+  property for no gain, and every release also carries removals that can
+  silently change or break emission."
+  {:rule :bump-only-on-a-reproduced-defect
+   :source "kotoba.component.composition/wac-version (ADR 0056)"
+   :decisions
+   {:wasm-tools
+    {:pin "1.243.0"
+     :reviewed "2026-08-04"
+     :against "1.245.1"
+     :verdict :hold
+     :reason
+     (str "Reviewed 1.244.0 through 1.245.1 for a defect this codebase hits. "
+          "None found. The releases are mostly additive or unrelated "
+          "(no_std support, spec-test updates, stack-switching), and the "
+          "entries that would touch this codebase are removals and output "
+          "changes rather than fixes: float32/float64 removed, variant "
+          "`refines` removed, backpressure.set removed, `map` escaped when "
+          "printing WIT, and component exports rewrapped to call "
+          "__wasm_init_task. This codebase already emits f32/f64 rather than "
+          "float32/float64 and names no interface `map`, so it is not "
+          "currently affected -- but that is a reason to move deliberately, "
+          "not a reason to move.")}
+    :wac {:pin "0.10.1"
+          :verdict :hold
+          :reason "Bumped from 0.9.0 for a reproduced defect (capability-crossing variant encoding); see composition/wac-version."}
+    :wasmtime {:pin ">= 43"
+               :verdict :minimum-only
+               :reason "A floor rather than an exact pin: wasmtime executes artifacts, it does not produce bytes that must reproduce."}}})
+
 (def install-hint
   {:wasm-tools "cargo install wasm-tools --version %s --locked"
    :wac        "cargo install wac-cli --version %s --locked"
@@ -78,8 +121,18 @@
       (nil? output)  {:tool tool :ok? false :reason :absent}
       (nil? actual)  {:tool tool :ok? false :reason :unparseable :actual output}
       (= :exact match)
-      {:tool tool :ok? (= version actual) :reason (when-not (= version actual) :version-mismatch)
-       :expected version :actual actual}
+      (let [ok? (= version actual)]
+        (cond-> {:tool tool :ok? ok? :expected version :actual actual}
+          (not ok?)
+          (assoc :reason
+                 ;; Distinguished because the fix differs. Older is just an
+                 ;; upgrade; NEWER is the case where the instinct is to
+                 ;; advance the pin, which bump-policy says not to do without
+                 ;; a reproduced defect.
+                 (if (pos? (compare (mapv parse-long (str/split actual #"\."))
+                                    (mapv parse-long (str/split version #"\."))))
+                   :newer-than-pin
+                   :version-mismatch))))
       :else
       (let [m (kotoba.component.doctor/major actual)]
         {:tool tool :ok? (and m (>= m major))
@@ -134,8 +187,16 @@
                      nil (str actual)
                      :absent "not installed"
                      :unparseable (str "unparseable --version output: " actual)
+                     :newer-than-pin (format "%s is NEWER than the pinned %s"
+                                             actual expected)
                      (format "%s (expected %s)" actual expected))))
          results)
+    (when (some #(= :newer-than-pin (:reason %)) results)
+      ["\nA newer version is still a failure. These pins exist so artifact bytes"
+       "reproduce, and the policy is to move one only when a newer release"
+       "verifiably closes a defect this codebase reproduced — see"
+       "kotoba.component.doctor/bump-policy. Install the pinned version rather"
+       "than advancing the pin."])
     (when-let [bad (seq (remove :ok? results))]
       (cons "\ninstall:"
             (map (fn [{:keys [tool]}]
