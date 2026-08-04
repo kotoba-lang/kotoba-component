@@ -2,7 +2,7 @@
  :deps {org.clojure/clojure {:mvn/version "1.12.0"}
         io.github.kotoba-lang/abi
         {:git/url "https://github.com/kotoba-lang/abi.git"
-         :git/sha "6b2e5185ff98aa9cfec3f371a019e75b4c089aae"}
+         :git/sha "4172242a524c8ab88e4b7036e30ae492b46fc484"}
         io.github.kotoba-lang/kotoba-kir
         {:git/url "https://github.com/kotoba-lang/kotoba-kir.git"
          :git/sha "e2cabbc6773ae24f407f61aa0a50844f0fabc377"}
