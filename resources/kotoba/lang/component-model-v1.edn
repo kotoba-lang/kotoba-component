@@ -85,8 +85,14 @@
    :kit :identity :provider-wasi []}
   {:name :hash/sha256 :id 3 :interface "hash" :function "sha256"
    :kit :hash :provider-wasi []}
+  ;; `outgoing-handler` is the 0.2.x spelling and does NOT exist in 0.3.0,
+  ;; which replaced it with `client` (`send`) and `handler` (`handle`).
+  ;; Both are `async func`, and `request.new` takes `stream<u8>` plus
+  ;; `future<result<...>>`, so an HTTP provider cannot be built before the
+  ;; bounded async profile exists -- see `:requires-profile` below.
   {:name :http/post :id 4 :interface "http-post" :function "post"
-   :kit :http :provider-wasi ["wasi:http/outgoing-handler@0.3.0"]}
+   :kit :http :provider-wasi ["wasi:http/client@0.3.0"]
+   :requires-profile :async}
   {:name :log/read :id 5 :interface "log" :function "read"
    :kit :log :provider-wasi []}
   {:name :log/append :id 6 :interface "log" :function "append"
@@ -110,7 +116,8 @@
   {:name :storage/transact :id 12 :interface "storage" :function "transact"
    :kit :storage :provider-wasi []}
   {:name :http/get-stream :id 13 :interface "http-stream" :function "get"
-   :kit :http-stream :provider-wasi ["wasi:http/outgoing-handler@0.3.0"]}
+   :kit :http-stream :provider-wasi ["wasi:http/client@0.3.0"]
+   :requires-profile :async}
   {:name :object/get-stream :id 14 :interface "object-store" :function "get-stream"
    :kit :object-stream :provider-wasi []}
   {:name :object/put-block :id 15 :interface "object-store" :function "put-block"
