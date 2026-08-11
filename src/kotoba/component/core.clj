@@ -11628,6 +11628,134 @@
      "  (data (i32.const " error-message-pointer ") \"" (wat-data error-message-bytes) "\")\n"
      ")\n")))
 
+(def wasi-system-clock-import-module
+  "Standard32 (`cm32p2`) module name for `wasi:clocks/system-clock@0.3.0`.
+
+  0.2.x called this interface `wall-clock`. It does not exist under that name
+  in 0.3.0, so a provider built against the old spelling fails in
+  `wasm-tools component new`, not at run time."
+  "cm32p2|wasi:clocks/system-clock@0.3")
+
+(def wasi-monotonic-clock-import-module
+  "Standard32 (`cm32p2`) module name for `wasi:clocks/monotonic-clock@0.3.0`."
+  "cm32p2|wasi:clocks/monotonic-clock@0.3")
+
+(defn clock-wasi-provider-wat
+  "Provider core module for clock-v1's own literal request/result shape,
+  backed by REAL host time through WASI 0.3 imports rather than the synthetic
+  sources in `clock-provider-wat`.
+
+  Two imports, and only these two:
+
+  - `wasi:clocks/system-clock@0.3.0` `now` -> `instant {seconds:s64,
+    nanoseconds:u32}`. Two flat results exceed MAX_FLAT_RESULTS, so the
+    Canonical ABI returns it indirectly: the core import takes the address of
+    a caller-owned return area. `$scratch` is that area -- 16 bytes reserved
+    below the arena so it can never collide with a `$realloc` result.
+  - `wasi:clocks/monotonic-clock@0.3.0` `now` -> `mark (u64)`, one flat
+    result, returned directly.
+
+  `$obs` stays a provider-local counter. It is deliberately NOT host time:
+  `provider.clock`'s per-instance observation sequence is defined as
+  monotonic per provider instance, and reading it from a clock that can be
+  reset would break that definition on the one field whose whole purpose is
+  ordering.
+
+  Authority: these imports are the two interfaces `component-model-v1.edn`
+  declares for `:clock/now`. The provider gets no filesystem, socket,
+  environment, or random authority, and the application component that
+  composes with it gets no WASI at all -- it still sees only
+  `kotoba:application/clock`. An engine that does not grant the clocks
+  fails to link before instantiation, which is the intended denial path.
+
+  `unix-millis` is `seconds * 1000 + nanoseconds / 1000000`. `seconds` is
+  signed and pre-epoch instants are representable, so the multiply is a
+  wrapping i64 multiply exactly as the host reports it; this module does not
+  invent a clamp the contract does not specify."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (clock-provider-shape request-descriptor result-descriptor schemas)
+    (reject "clock provider requires clock-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|" (:function entry))
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined-types (vec (rest (:flat request-layout)))
+        params (apply str
+                      (cons " (param $disc i32)"
+                            (map-indexed
+                             (fn [index core-type]
+                               (str " (param $p" index " " (core-type-name core-type) ")"))
+                             joined-types)))
+        result-cases (:cases result-layout)
+        wall-layout (:layout (nth result-cases 0))
+        mono-layout (:layout (nth result-cases 1))
+        payload-offset (:payload-offset result-layout)
+        disc-store (variant-disc-store (:discriminant-size result-layout))
+        wall-millis (field-by-name wall-layout :unix-millis)
+        wall-obs (field-by-name wall-layout :observation-sequence)
+        mono-nanos (field-by-name mono-layout :nanos)
+        mono-obs (field-by-name mono-layout :observation-sequence)
+        error-code-bytes (vec (.getBytes "clock/domain" "UTF-8"))
+        error-message-bytes (vec (.getBytes "clock domain not admitted" "UTF-8"))
+        literal-base 8
+        error-code-pointer literal-base
+        error-message-pointer (+ error-code-pointer (count error-code-bytes))
+        ;; 16 bytes: `instant` is {s64 @0, u32 @8}, size 16, alignment 8.
+        scratch-pointer (align-up (+ error-message-pointer (count error-message-bytes)) 8)
+        scratch-size 16
+        arena-base (align-up (+ scratch-pointer scratch-size) 8)
+        result-size (:size result-layout)
+        required-bytes (+ arena-base result-size)
+        pages (max 1 (quot (+ required-bytes 65535) 65536))
+        capacity-bytes (* pages 65536)
+        bool-validate
+        (when (seq joined-types)
+          (str "    local.get $p0 i32.const 1 i32.gt_u if unreachable end\n"))]
+    (str
+     "(module\n"
+     "  (import \"" wasi-system-clock-import-module "\" \"now\""
+     " (func $wasi-system-now (param i32)))\n"
+     "  (import \"" wasi-monotonic-clock-import-module "\" \"now\""
+     " (func $wasi-monotonic-now (result i64)))\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (global $obs (mut i64) (i64.const 0))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32)\n"
+     "    local.get $disc i32.const 2 i32.ge_u if unreachable end\n"
+     bool-validate
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     "    global.get $obs i64.const 1 i64.add global.set $obs\n"
+     "    local.get $disc i32.const 0 i32.eq\n"
+     "    if\n"
+     "      i32.const " scratch-pointer " call $wasi-system-now\n"
+     "      local.get $ret\n"
+     "      i32.const " scratch-pointer " i64.load offset=0"
+     " i64.const 1000 i64.mul\n"
+     "      i32.const " scratch-pointer " i32.load offset=8"
+     " i64.extend_i32_u i64.const 1000000 i64.div_u\n"
+     "      i64.add\n"
+     "      i64.store offset=" (+ payload-offset (:offset wall-millis)) "\n"
+     "      local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "      local.get $ret global.get $obs i64.store offset="
+     (+ payload-offset (:offset wall-obs)) "\n"
+     "    else\n"
+     "      local.get $ret call $wasi-monotonic-now i64.store offset="
+     (+ payload-offset (:offset mono-nanos)) "\n"
+     "      local.get $ret i32.const 1 " disc-store " offset=0\n"
+     "      local.get $ret global.get $obs i64.store offset="
+     (+ payload-offset (:offset mono-obs)) "\n"
+     "    end\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     "  (data (i32.const " error-code-pointer ") \"" (wat-data error-code-bytes) "\")\n"
+     "  (data (i32.const " error-message-pointer ") \"" (wat-data error-message-bytes) "\")\n"
+     ")\n")))
+
 
 (def log-provider-table-capacity
   "Slot count for `log-provider-wat`'s bounded ring buffer. First wasm slice

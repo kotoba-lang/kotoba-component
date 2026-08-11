@@ -1,0 +1,21 @@
+{:kotoba.wasi/format :v1
+ :version "0.3.0"
+ :source {:repository "https://github.com/WebAssembly/WASI"
+          :revision "3ee2a590c766594ae44a54730fc74fc27da5c609"
+          :path "proposals/clocks/wit"
+          :promoted "2026-06-11"}
+ :vendored
+ {:clocks ["types.wit" "monotonic-clock.wit" "system-clock.wit"
+           "timezone.wit" "world.wit"]}
+ :note
+ "Vendored verbatim so provider components build offline against the exact
+  revision `component-model-v1.edn` pins. Do not edit these files: a local
+  edit would make the composed world claim an interface the engine does not
+  implement, and the failure would surface as a linker error at run time
+  rather than as a contract diff.
+
+  `wasi:clocks@0.3.0` has NO `wall-clock` interface. 0.2.x named it
+  `wall-clock`; 0.3.0 renamed it to `system-clock` and changed its return
+  type to `instant { seconds: s64, nanoseconds: u32 }`. The pinned
+  `component-model-v1.edn` carried the 0.2.x spelling until 2026-08-11 --
+  see the `:provider-wasi` entry for `:clock/now`."}
