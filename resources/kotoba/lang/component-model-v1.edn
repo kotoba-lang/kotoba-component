@@ -93,7 +93,12 @@
    :kit :log :provider-wasi []}
   {:name :clock/now :id 7 :interface "clock" :function "now"
    :kit :clock
-   :provider-wasi ["wasi:clocks/wall-clock@0.3.0" "wasi:clocks/monotonic-clock@0.3.0"]}
+   ;; `wall-clock` is the 0.2.x spelling and does NOT exist in 0.3.0, which
+   ;; renamed it to `system-clock` and changed the result to
+   ;; `instant { seconds: s64, nanoseconds: u32 }`. The old spelling sat here
+   ;; unused until a provider actually imported it (2026-08-11) -- a declared
+   ;; import nothing consumed could not be wrong yet.
+   :provider-wasi ["wasi:clocks/system-clock@0.3.0" "wasi:clocks/monotonic-clock@0.3.0"]}
   {:name :state/transact :id 8 :interface "state" :function "transact"
    :kit :state :provider-wasi []}
   {:name :ui/commit :id 9 :interface "ui" :function "commit"

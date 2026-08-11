@@ -1,6 +1,8 @@
 (ns kotoba.component.composition
   "Closed-world composition support for compiler-qualified Component artifacts."
-  (:require [clojure.string :as str]
+  (:require [clojure.java.io :as io]
+            [clojure.set :as set]
+            [clojure.string :as str]
             [kotoba.wasm.canonical-abi :as canonical]
             [kotoba.component.core :as component-core]
             [kotoba.component.wit :as component-wit]
@@ -735,6 +737,244 @@
       (finally
         (doseq [path [component embedded core world]] (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
+
+(def clock-wasi-imports
+  "The WASI 0.3.0 interfaces `component-model-v1.edn` declares for
+  `:clock/now`, in the spelling a WIT world uses.
+
+  This vector is the ONLY authority a clock provider has. It is checked twice
+  and from both directions: `clock-wasi-provider-wit` writes exactly these
+  import lines, and `assert-declared-wasi-imports!` rejects a composed world
+  that carries any import outside this set. Neither check alone is enough --
+  the first says what we asked for, the second says what we got."
+  ["wasi:clocks/system-clock@0.3.0"
+   "wasi:clocks/monotonic-clock@0.3.0"])
+
+(def ^:private wasi-vendor-root
+  "Vendored WASI WIT, pinned by `resources/wasi/0.3.0/provenance.edn`."
+  "wasi/0.3.0")
+
+(defn- clock-wasi-provider-wit
+  "`asymmetric-variant-wit`'s world text with the declared WASI imports added.
+
+  The package/interface/type text is reused verbatim rather than
+  re-derived: a provider that describes its capability differently from the
+  synthetic provider is a provider that cannot be swapped for it, and the
+  whole point of this artifact is that the application component cannot tell
+  the two apart."
+  [entry request-descriptor result-descriptor schemas]
+  (let [base (asymmetric-variant-wit entry request-descriptor result-descriptor schemas)
+        interface (:interface entry)
+        world-header (str "world " interface "-provider {\n")]
+    (when-not (str/includes? base world-header)
+      (reject "provider WIT does not carry the expected world header"
+              {:interface interface}))
+    (str/replace base world-header
+                 (str world-header
+                      (apply str (map #(str "  import " % ";\n") clock-wasi-imports))))))
+
+(defn- copy-vendored-wasi-deps!
+  "Materialize the vendored WASI package into `<dir>/deps/<package>` so
+  `wasm-tools component embed` resolves the imports offline.
+
+  Resolution is by directory, not by file, so every `.wit` of the package
+  has to land -- `world.wit` references `timezone`, and a partial copy fails
+  to parse the package rather than silently dropping an interface."
+  [dir package files]
+  (let [deps (.resolve dir (str "deps/" package))]
+    (Files/createDirectories deps (make-array FileAttribute 0))
+    (doseq [file files]
+      (let [resource (str wasi-vendor-root "/" package "/" file)
+            source (io/resource resource)]
+        (when-not source
+          (reject "vendored WASI WIT is missing from resources" {:resource resource}))
+        (Files/writeString (.resolve deps ^String file) (slurp source)
+                           (make-array java.nio.file.OpenOption 0))))))
+
+(defn package-clock-wasi-provider
+  "Build a clock-v1 provider whose time comes from WASI 0.3, not from the
+  synthetic sources in `package-clock-provider`.
+
+  Same capability, same WIT types, same export name: this artifact is
+  substitutable for the synthetic one in `compose-*`. What differs is where
+  the numbers come from and, visibly, that the provider's own world declares
+  two imports the synthetic one does not have.
+
+  `wasm-tools component embed` is given a WIT *directory* (not a single
+  file) because the imports have to resolve against the vendored
+  `wasi:clocks@0.3.0` package."
+  [capability-name request-descriptor result-descriptor schemas]
+  (let [entry (capability capability-name)
+        wit (clock-wasi-provider-wit entry request-descriptor result-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-clock-wasi-provider-"
+                                       (make-array FileAttribute 0))
+        wit-dir (.resolve dir "wit")
+        world (.resolve wit-dir "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/createDirectories wit-dir (make-array FileAttribute 0))
+      (copy-vendored-wasi-deps!
+       wit-dir "clocks"
+       ["types.wit" "monotonic-clock.wit" "system-clock.wit"
+        "timezone.wit" "world.wit"])
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat
+                         (component-core/clock-wasi-provider-wat
+                          entry request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str wit-dir) (str core)
+                                "--world" (str (:interface entry) "-provider")
+                                "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1 :capability capability-name
+       :descriptor request-descriptor :result-descriptor result-descriptor
+       :schemas schemas :wasi-imports clock-wasi-imports
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core]] (Files/deleteIfExists path))
+        ;; The WIT input is a tree (`wit/deps/<package>/*.wit`), so the
+        ;; single-file cleanup every other packager uses leaves the temp
+        ;; directory behind. Delete depth-first.
+        (->> (iterator-seq (.iterator (Files/walk dir (make-array java.nio.file.FileVisitOption 0))))
+             (sort-by #(- (count (str %))))
+             (run! #(Files/deleteIfExists ^java.nio.file.Path %)))))))
+
+(defn composed-world-wit
+  "`wasm-tools component wit` output for a component artifact.
+
+  Read back out of the bytes rather than tracked alongside them: what a
+  composition *intended* to leave open and what it actually left open are
+  different facts, and only the second one is the security property."
+  [bytes]
+  (let [path (Files/createTempFile "kotoba-composed-wit-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (Files/write path ^bytes bytes (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command! ["wasm-tools" "component" "wit" (str path)])
+      (finally (Files/deleteIfExists path)))))
+
+(defn world-imports
+  "Instance imports declared by the top-level world.
+
+  Stops at the first nested `package ... {`: everything after that is the
+  printed definition of the packages the world refers to, and picking up
+  `import` lines from there would count a definition as a grant."
+  [text]
+  (->> (str/split-lines text)
+       (take-while #(not (re-matches #"package [^\s{]+ \{" (str/trim %))))
+       (keep (fn [line]
+               (when-let [[_ id] (re-matches #"import ([^;{]+);" (str/trim line))]
+                 (str/trim id))))
+       vec))
+
+(defn composed-world-imports
+  "Convenience: every instance import the artifact's world still carries."
+  [bytes]
+  (world-imports (composed-world-wit bytes)))
+
+(defn- interface-functions
+  "Map of `\"<pkg>:<ns>/<iface>@<ver>\"` -> whether that interface declares at
+  least one function, read out of `wasm-tools component wit` output.
+
+  An interface with no functions cannot convey authority: it is a set of type
+  definitions, and a world importing it gains no way to make anything happen.
+  This matters because WIT hoists a shared `use`d types interface into the
+  world's import list, so the raw import list of every provider built here
+  contains `kotoba:application/types` alongside the real ones. Excluding it
+  by name would be an exemption; excluding it because it has no functions is
+  the actual rule, and it keeps working if a types interface ever grows one."
+  [text]
+  (loop [[line & more] (str/split-lines text)
+         package nil
+         iface nil
+         ;; Nesting inside the interface body. A `record`/`variant` block
+         ;; closes with a bare `}` too, so terminating on the first one would
+         ;; cut the body off before reaching any function declaration -- which
+         ;; reports every interface as authority-free.
+         depth 0
+         body []
+         acc {}]
+    (if (nil? line)
+      acc
+      (let [trimmed (str/trim line)]
+        (cond
+          (and (nil? iface) (re-matches #"package ([^\s{]+) \{" trimmed))
+          (recur more (second (re-matches #"package ([^\s{]+) \{" trimmed))
+                 nil 0 [] acc)
+
+          (and package (nil? iface) (re-matches #"interface ([^\s{]+) \{" trimmed))
+          (recur more package
+                 (second (re-matches #"interface ([^\s{]+) \{" trimmed)) 1 [] acc)
+
+          iface
+          (let [depth (+ depth
+                         (count (filter #{\{} trimmed))
+                         (- (count (filter #{\}} trimmed))))]
+            (if (zero? depth)
+              (let [[pkg version] (str/split package #"@" 2)
+                    id (str pkg "/" iface (when version (str "@" version)))]
+                (recur more package nil 0 []
+                       (assoc acc id (boolean (some #(str/includes? % "func(") body)))))
+              (recur more package iface depth (conj body trimmed) acc)))
+
+          :else (recur more package iface depth body acc))))))
+
+(defn assert-declared-wasi-imports!
+  "Reject a composed component whose authority-bearing imports are not exactly
+  the declared set.
+
+  ADR 0036 requires that 'the composed world must expose no undeclared
+  import'. Until now nothing executed that sentence: every provider was
+  self-contained, so there was never a remaining import to check, and an
+  unchecked rule reads the same as a satisfied one.
+
+  Both directions are errors. An extra import is authority nobody asked for.
+  A missing one means the artifact under test is not the artifact that was
+  reviewed -- which is the direction that silently passes if you only check
+  for extras."
+  [bytes declared]
+  (let [text (composed-world-wit bytes)
+        has-functions? (interface-functions text)
+        actual (->> (world-imports text)
+                    ;; Unknown interfaces are treated as authority-bearing:
+                    ;; failing to find an interface body must not read as
+                    ;; "harmless".
+                    (filter #(get has-functions? % true))
+                    set)
+        declared (set declared)]
+    (when (seq (set/difference actual declared))
+      (reject "composed world carries an undeclared import"
+              {:undeclared (vec (sort (set/difference actual declared)))
+               :declared (vec (sort declared))}))
+    (when (seq (set/difference declared actual))
+      (reject "composed world is missing a declared import"
+              {:missing (vec (sort (set/difference declared actual)))
+               :actual (vec (sort actual))}))
+    (vec (sort actual))))
+
+(declare compose-closed)
+
+(defn compose-with-declared-wasi
+  "Compose an application with providers that hold WASI authority.
+
+  `compose-closed` is the right function when the result must import
+  nothing. It is the wrong one here: a provider backed by a host clock
+  leaves its own WASI imports open by design, and calling the result
+  `closed` would be a false claim about the artifact that gets shipped.
+
+  So this returns a different format, and pays for the difference by
+  checking it: the composed world's remaining imports must equal `declared`
+  exactly. The application's own capability imports must be gone -- those
+  are what composition was for."
+  [application providers declared]
+  (let [composed (compose-closed application providers)
+        imports (assert-declared-wasi-imports! (:bytes composed) declared)]
+    (-> composed
+        (assoc :format :wasm-component-wasi-composed/v1
+               :wasi-imports imports))))
 
 (defn- log-record-wit-type
   "WIT spelling for one field type in a log-v1 record, including nested
