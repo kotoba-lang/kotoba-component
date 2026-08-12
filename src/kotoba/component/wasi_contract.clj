@@ -22,7 +22,7 @@
   and fails at package time."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]))
+            [kotoba.component.wit-text :as wit-text]))
 
 (defn- reject [message data]
   (throw (ex-info message (assoc data :phase :wasi-contract))))
@@ -47,9 +47,7 @@
                   (let [resource (io/resource (str dir "/" file))]
                     (when-not resource
                       (reject "vendored WASI WIT is missing" {:file (str dir "/" file)}))
-                    (->> (str/split-lines (slurp resource))
-                         (keep #(second (re-matches #"\s*interface ([a-z0-9-]+) \{"
-                                                    %)))))))
+                    (wit-text/interface-names (slurp resource)))))
         files))
 
 (defn parse-interface-id

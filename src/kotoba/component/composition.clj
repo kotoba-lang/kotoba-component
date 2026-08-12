@@ -6,6 +6,7 @@
             [kotoba.wasm.canonical-abi :as canonical]
             [kotoba.component.core :as component-core]
             [kotoba.component.wit :as component-wit]
+            [kotoba.component.wit-text :as wit-text]
             [kotoba.wasm.tools :as wasm-tools])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
@@ -706,38 +707,6 @@
          (doseq [path [component embedded core world]] (Files/deleteIfExists path))
          (Files/deleteIfExists dir))))))
 
-(defn package-clock-provider
-  "Build a REAL (non-wiring-only) provider artifact for clock-v1's own
-  literal request/result shape, backed by
-  `kotoba.component.core/clock-provider-wat`. Reuses
-  `asymmetric-variant-wit` for the WIT text (same package/world/interface
-  shape as ADR 0058/0059/0060). Synthetic wall/monotonic sources and a
-  real observation-sequence live inside the core module; this is wasm
-  qualification for the ABI + sequence semantics, not production host-time
-  (see ADR 0073 for the CLJ/CLJS transport path)."
-  [capability-name request-descriptor result-descriptor schemas]
-  (let [entry (capability capability-name)
-        wit (asymmetric-variant-wit entry request-descriptor result-descriptor schemas)
-        dir (Files/createTempDirectory "kotoba-clock-provider-" (make-array FileAttribute 0))
-        world (.resolve dir "provider.wit") core (.resolve dir "provider.wasm")
-        embedded (.resolve dir "embedded.wasm") component (.resolve dir "provider.component.wasm")]
-    (try
-      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
-      (Files/write core (wasm-tools/parse-wat
-                         (component-core/clock-provider-wat
-                          entry request-descriptor result-descriptor schemas))
-                   (make-array java.nio.file.OpenOption 0))
-      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
-                                "--encoding" "utf8" "-o" (str embedded)])
-      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
-                                "--reject-legacy-names" "-o" (str component)])
-      {:format :wasm-component-provider/v1 :capability capability-name
-       :descriptor request-descriptor :result-descriptor result-descriptor
-       :schemas schemas :bytes (Files/readAllBytes component)}
-      (finally
-        (doseq [path [component embedded core world]] (Files/deleteIfExists path))
-        (Files/deleteIfExists dir)))))
-
 (def clock-wasi-imports
   "The WASI 0.3.0 interfaces `component-model-v1.edn` declares for
   `:clock/now`, in the spelling a WIT world uses.
@@ -791,6 +760,74 @@
         (Files/writeString (.resolve deps ^String file) (slurp source)
                            (make-array java.nio.file.OpenOption 0))))))
 
+(defn- package-clock-provider-component
+  "Build a clock-v1 provider component from WIT text and a core module.
+
+  The two clock providers differ in exactly two ways -- where time comes
+  from, and whether the world has WASI imports to resolve -- and everything
+  else about turning them into a component is identical. Holding that
+  identical part once is what keeps the artifacts substitutable: a change to
+  how providers are packaged cannot reach one of them and miss the other.
+
+  `wasi-deps` decides the shape of the WIT input. With no imports to
+  resolve, `wasm-tools component embed` takes the single file and infers the
+  only world; with vendored packages it takes a directory and the world has
+  to be named. Both produce the same kind of artifact, so the branch is
+  about resolution, not about the result."
+  [{:keys [prefix capability-name entry wit wat wasi-deps extra
+           request-descriptor result-descriptor schemas]}]
+  (let [dir (Files/createTempDirectory prefix (make-array FileAttribute 0))
+        wit-dir (.resolve dir "wit")
+        world (.resolve (if wasi-deps wit-dir dir) "provider.wit")
+        core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "provider.component.wasm")]
+    (try
+      (when wasi-deps
+        (Files/createDirectories wit-dir (make-array FileAttribute 0))
+        (doseq [[package files] wasi-deps]
+          (copy-vendored-wasi-deps! wit-dir package files)))
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat wat) (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       (cond-> ["wasm-tools" "component" "embed"
+                (str (if wasi-deps wit-dir world)) (str core)]
+         wasi-deps (conj "--world" (str (:interface entry) "-provider"))
+         :always (conj "--encoding" "utf8" "-o" (str embedded))))
+      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                "--reject-legacy-names" "-o" (str component)])
+      (merge {:format :wasm-component-provider/v1 :capability capability-name
+              :descriptor request-descriptor :result-descriptor result-descriptor
+              :schemas schemas :bytes (Files/readAllBytes component)}
+             extra)
+      (finally
+        ;; The WIT input may be a tree (`wit/deps/<package>/*.wit`), so the
+        ;; single-file cleanup every other packager uses would leave the temp
+        ;; directory behind. Delete depth-first.
+        (->> (iterator-seq (.iterator (Files/walk dir (make-array java.nio.file.FileVisitOption 0))))
+             (sort-by #(- (count (str %))))
+             (run! #(Files/deleteIfExists ^java.nio.file.Path %)))))))
+
+(defn package-clock-provider
+  "Build a REAL (non-wiring-only) provider artifact for clock-v1's own
+  literal request/result shape, backed by
+  `kotoba.component.core/clock-provider-wat`. Reuses
+  `asymmetric-variant-wit` for the WIT text (same package/world/interface
+  shape as ADR 0058/0059/0060). Synthetic wall/monotonic sources and a
+  real observation-sequence live inside the core module; this is wasm
+  qualification for the ABI + sequence semantics, not production host-time
+  (see ADR 0073 for the CLJ/CLJS transport path)."
+  [capability-name request-descriptor result-descriptor schemas]
+  (let [entry (capability capability-name)]
+    (package-clock-provider-component
+     {:prefix "kotoba-clock-provider-"
+      :capability-name capability-name :entry entry
+      :request-descriptor request-descriptor
+      :result-descriptor result-descriptor :schemas schemas
+      :wit (asymmetric-variant-wit entry request-descriptor result-descriptor schemas)
+      :wat (component-core/clock-provider-wat
+            entry request-descriptor result-descriptor schemas)})))
+
 (defn package-clock-wasi-provider
   "Build a clock-v1 provider whose time comes from WASI 0.3, not from the
   synthetic sources in `package-clock-provider`.
@@ -798,49 +835,20 @@
   Same capability, same WIT types, same export name: this artifact is
   substitutable for the synthetic one in `compose-*`. What differs is where
   the numbers come from and, visibly, that the provider's own world declares
-  two imports the synthetic one does not have.
-
-  `wasm-tools component embed` is given a WIT *directory* (not a single
-  file) because the imports have to resolve against the vendored
-  `wasi:clocks@0.3.0` package."
+  two imports the synthetic one does not have."
   [capability-name request-descriptor result-descriptor schemas]
-  (let [entry (capability capability-name)
-        wit (clock-wasi-provider-wit entry request-descriptor result-descriptor schemas)
-        dir (Files/createTempDirectory "kotoba-clock-wasi-provider-"
-                                       (make-array FileAttribute 0))
-        wit-dir (.resolve dir "wit")
-        world (.resolve wit-dir "provider.wit")
-        core (.resolve dir "provider.wasm")
-        embedded (.resolve dir "embedded.wasm")
-        component (.resolve dir "provider.component.wasm")]
-    (try
-      (Files/createDirectories wit-dir (make-array FileAttribute 0))
-      (copy-vendored-wasi-deps!
-       wit-dir "clocks"
-       ["types.wit" "monotonic-clock.wit" "system-clock.wit"
-        "timezone.wit" "world.wit"])
-      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
-      (Files/write core (wasm-tools/parse-wat
-                         (component-core/clock-wasi-provider-wat
-                          entry request-descriptor result-descriptor schemas))
-                   (make-array java.nio.file.OpenOption 0))
-      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str wit-dir) (str core)
-                                "--world" (str (:interface entry) "-provider")
-                                "--encoding" "utf8" "-o" (str embedded)])
-      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
-                                "--reject-legacy-names" "-o" (str component)])
-      {:format :wasm-component-provider/v1 :capability capability-name
-       :descriptor request-descriptor :result-descriptor result-descriptor
-       :schemas schemas :wasi-imports clock-wasi-imports
-       :bytes (Files/readAllBytes component)}
-      (finally
-        (doseq [path [component embedded core]] (Files/deleteIfExists path))
-        ;; The WIT input is a tree (`wit/deps/<package>/*.wit`), so the
-        ;; single-file cleanup every other packager uses leaves the temp
-        ;; directory behind. Delete depth-first.
-        (->> (iterator-seq (.iterator (Files/walk dir (make-array java.nio.file.FileVisitOption 0))))
-             (sort-by #(- (count (str %))))
-             (run! #(Files/deleteIfExists ^java.nio.file.Path %)))))))
+  (let [entry (capability capability-name)]
+    (package-clock-provider-component
+     {:prefix "kotoba-clock-wasi-provider-"
+      :capability-name capability-name :entry entry
+      :request-descriptor request-descriptor
+      :result-descriptor result-descriptor :schemas schemas
+      :wit (clock-wasi-provider-wit entry request-descriptor result-descriptor schemas)
+      :wat (component-core/clock-wasi-provider-wat
+            entry request-descriptor result-descriptor schemas)
+      :wasi-deps {"clocks" ["types.wit" "monotonic-clock.wit" "system-clock.wit"
+                            "timezone.wit" "world.wit"]}
+      :extra {:wasi-imports clock-wasi-imports}})))
 
 (defn composed-world-wit
   "`wasm-tools component wit` output for a component artifact.
@@ -856,71 +864,10 @@
       (wasm-tools/run-command! ["wasm-tools" "component" "wit" (str path)])
       (finally (Files/deleteIfExists path)))))
 
-(defn world-imports
-  "Instance imports declared by the top-level world.
-
-  Stops at the first nested `package ... {`: everything after that is the
-  printed definition of the packages the world refers to, and picking up
-  `import` lines from there would count a definition as a grant."
-  [text]
-  (->> (str/split-lines text)
-       (take-while #(not (re-matches #"package [^\s{]+ \{" (str/trim %))))
-       (keep (fn [line]
-               (when-let [[_ id] (re-matches #"import ([^;{]+);" (str/trim line))]
-                 (str/trim id))))
-       vec))
-
 (defn composed-world-imports
   "Convenience: every instance import the artifact's world still carries."
   [bytes]
-  (world-imports (composed-world-wit bytes)))
-
-(defn- interface-functions
-  "Map of `\"<pkg>:<ns>/<iface>@<ver>\"` -> whether that interface declares at
-  least one function, read out of `wasm-tools component wit` output.
-
-  An interface with no functions cannot convey authority: it is a set of type
-  definitions, and a world importing it gains no way to make anything happen.
-  This matters because WIT hoists a shared `use`d types interface into the
-  world's import list, so the raw import list of every provider built here
-  contains `kotoba:application/types` alongside the real ones. Excluding it
-  by name would be an exemption; excluding it because it has no functions is
-  the actual rule, and it keeps working if a types interface ever grows one."
-  [text]
-  (loop [[line & more] (str/split-lines text)
-         package nil
-         iface nil
-         ;; Nesting inside the interface body. A `record`/`variant` block
-         ;; closes with a bare `}` too, so terminating on the first one would
-         ;; cut the body off before reaching any function declaration -- which
-         ;; reports every interface as authority-free.
-         depth 0
-         body []
-         acc {}]
-    (if (nil? line)
-      acc
-      (let [trimmed (str/trim line)]
-        (cond
-          (and (nil? iface) (re-matches #"package ([^\s{]+) \{" trimmed))
-          (recur more (second (re-matches #"package ([^\s{]+) \{" trimmed))
-                 nil 0 [] acc)
-
-          (and package (nil? iface) (re-matches #"interface ([^\s{]+) \{" trimmed))
-          (recur more package
-                 (second (re-matches #"interface ([^\s{]+) \{" trimmed)) 1 [] acc)
-
-          iface
-          (let [depth (+ depth
-                         (count (filter #{\{} trimmed))
-                         (- (count (filter #{\}} trimmed))))]
-            (if (zero? depth)
-              (let [[pkg version] (str/split package #"@" 2)
-                    id (str pkg "/" iface (when version (str "@" version)))]
-                (recur more package nil 0 []
-                       (assoc acc id (boolean (some #(str/includes? % "func(") body)))))
-              (recur more package iface depth (conj body trimmed) acc)))
-
-          :else (recur more package iface depth body acc))))))
+  (wit-text/world-imports (composed-world-wit bytes)))
 
 (defn assert-declared-wasi-imports!
   "Reject a composed component whose authority-bearing imports are not exactly
@@ -937,8 +884,8 @@
   for extras."
   [bytes declared]
   (let [text (composed-world-wit bytes)
-        has-functions? (interface-functions text)
-        actual (->> (world-imports text)
+        has-functions? (wit-text/interface-functions text)
+        actual (->> (wit-text/world-imports text)
                     ;; Unknown interfaces are treated as authority-bearing:
                     ;; failing to find an interface body must not read as
                     ;; "harmless".
