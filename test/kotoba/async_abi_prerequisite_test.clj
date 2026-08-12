@@ -185,3 +185,81 @@
           (is (not (zero? exit)))
           (is (str/includes? err "unknown handle index")
               (str "unexpected failure: " err)))))))
+
+;; ---------------------------------------------------------------------------
+;; The blocker: standard32 has no intrinsic surface
+
+(def ^:private intrinsic-wit
+  (str "package kotoba:probe9;\n\n"
+       "interface bar {\n  foo: func(x: future<u32>) -> u32;\n}\n\n"
+       "world module {\n  import bar;\n}\n"))
+
+(defn- intrinsic-module-wat
+  "A core module importing `foo`, optionally also its `future.new` intrinsic.
+
+   `mangling` is the module-name style: standard32 prefixes `cm32p2|`, legacy
+   does not. The intrinsic is the ONLY variable between the two builds a test
+   compares -- everything else is held identical so a rejection cannot be
+   blamed on the surrounding module."
+  [mangling intrinsic?]
+  (let [prefix (if (= :standard32 mangling) "cm32p2|" "")
+        mem (if (= :standard32 mangling) "cm32p2_memory" "memory")
+        realloc (if (= :standard32 mangling) "cm32p2_realloc" "cabi_realloc")]
+    (str "(module\n"
+         "  (func (import \"" prefix "kotoba:probe9/bar\" \"foo\")"
+         " (param i32) (result i32))\n"
+         (when intrinsic?
+           (str "  (func (import \"" prefix "kotoba:probe9/bar\""
+                " \"[future-new-0]foo\") (result i64))\n"))
+         "  (memory (export \"" mem "\") 1)\n"
+         "  (func (export \"" realloc "\")"
+         " (param i32 i32 i32 i32) (result i32) i32.const 0)\n"
+         ")\n")))
+
+(defn- try-build
+  "Returns `[ok? stderr]` for embed+new of one module under one name style."
+  [dir label wat reject-legacy?]
+  (let [world-file (.resolve dir (str label ".wit"))
+        core (.resolve dir (str label ".core.wasm"))
+        embedded (.resolve dir (str label ".embedded.wasm"))
+        component (.resolve dir (str label ".component.wasm"))]
+    (Files/writeString world-file intrinsic-wit (make-array java.nio.file.OpenOption 0))
+    (Files/write core (wasm-tools/parse-wat wat) (make-array java.nio.file.OpenOption 0))
+    (let [embed (shell/sh "wasm-tools" "component" "embed" (str world-file) (str core)
+                          "--world" "module" "--encoding" "utf8" "-o" (str embedded))]
+      (if-not (zero? (:exit embed))
+        [false (:err embed)]
+        (let [new- (apply shell/sh
+                          (cond-> ["wasm-tools" "component" "new" (str embedded)]
+                            reject-legacy? (conj "--reject-legacy-names")
+                            :always (conj "-o" (str component))))]
+          [(zero? (:exit new-)) (:err new-)])))))
+
+(deftest standard32-has-no-future-stream-intrinsic-surface
+  "The reason bounded async is blocked, reduced to one variable.
+
+   `wit-component` implements the `[future-*]`/`[stream-*]` intrinsics for
+   the LEGACY name mangling only: `impl NameMangling for Standard` returns
+   `None` for every one of them (validation.rs, v1.243.0). So this is not a
+   spelling that has to be guessed -- under `--reject-legacy-names`, which
+   every component this repo builds uses, there is no way for a guest to
+   create a future or a stream.
+
+   When this test starts failing, upstream has added the surface and the
+   blocker has lifted. That is the point of pinning it."
+  (with-temp-dir
+    (fn [dir]
+      ;; Identical module, minus the intrinsic: standard32 is fine with it.
+      (let [[ok? err] (try-build dir "std-plain"
+                                 (intrinsic-module-wat :standard32 false) true)]
+        (is ok? (str "standard32 rejected a module with no intrinsic: " err)))
+      ;; Add only the intrinsic: standard32 now rejects, and says which one.
+      (let [[ok? err] (try-build dir "std-intrinsic"
+                                 (intrinsic-module-wat :standard32 true) true)]
+        (is (not ok?) "standard32 accepted a future intrinsic -- upstream may have added the surface")
+        (is (str/includes? err "[future-new-0]foo") (str "unexpected rejection: " err)))
+      ;; The same intrinsic, under legacy names, builds. So the artifact is
+      ;; well-formed; it is the mangling that lacks the surface.
+      (let [[ok? err] (try-build dir "legacy-intrinsic"
+                                 (intrinsic-module-wat :legacy true) false)]
+        (is ok? (str "legacy rejected the intrinsic too: " err))))))
