@@ -13,6 +13,7 @@
             [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
+            [kotoba.component.wit-text :as wit-text]
             [kotoba.wasm.tools :as wasm-tools])
   (:import [java.nio.file Files]
            [java.nio.file.attribute FileAttribute]))
@@ -225,7 +226,7 @@
         provider (composition/package-clock-wasi-provider
                   :clock/now descriptor result-descriptor schemas)
         wit (composition/composed-world-wit (:bytes provider))
-        imports (composition/world-imports wit)]
+        imports (wit-text/world-imports wit)]
     ;; Checked on the provider artifact directly: it is the only participant
     ;; that is supposed to hold WASI authority at all.
     (is (= (set composition/clock-wasi-imports)
@@ -235,9 +236,9 @@
     ;; It carries no functions, so it grants nothing -- and that is what the
     ;; allowlist is asked to notice, rather than the name.
     (is (contains? (set imports) "kotoba:application/types@1.0.0"))
-    (is (false? (get (#'composition/interface-functions wit)
+    (is (false? (get (wit-text/interface-functions wit)
                      "kotoba:application/types@1.0.0")))
-    (is (true? (get (#'composition/interface-functions wit)
+    (is (true? (get (wit-text/interface-functions wit)
                     "wasi:clocks/system-clock@0.3.0")))
     (is (= (vec (sort composition/clock-wasi-imports))
            (composition/assert-declared-wasi-imports!
