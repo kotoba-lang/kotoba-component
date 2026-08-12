@@ -18,8 +18,17 @@
    2. `future<T>` and `stream<T>` are handles in a per-instance table. A
       guest cannot fabricate one; a fabricated index traps.
    3. Fact 2 fails at RUN time, not at build time. The artifact builds and
-      validates. This is the dangerous shape, and the reason the async work
-      belongs in the compiler rather than in hand-written WAT."
+      validates. That is the dangerous shape: an artifact that looks
+      finished.
+
+   What fact 2 does NOT say: that a core module can never create one.
+   `wit-component` accepts `[future-new-N]<func>` and the rest of the
+   `[future-*]`/`[stream-*]` family as core imports
+   (`crates/wit-component/src/validation.rs`, v1.243.0, lines 918-940 for the
+   signatures and 2236-2323 for the names). A guest that imports those can
+   create futures. What is measured here is only that a guest which does NOT
+   import them cannot invent a handle -- which is the mistake worth catching,
+   because it is the one that still builds."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]
@@ -170,9 +179,9 @@
           (is (zero? (:exit validate)))
           ;; And it cannot run, because `future<T>` is an index into a
           ;; per-instance handle table that only the canonical built-ins can
-          ;; populate. Producing one is not something a hand-written core
-          ;; module can do, which is why bounded async belongs in the
-          ;; compiler.
+          ;; populate. This module imports none of them, so it has no handle
+          ;; to return -- see the namespace docstring for the intrinsics a
+          ;; module that wanted one would have to import.
           (is (not (zero? exit)))
           (is (str/includes? err "unknown handle index")
               (str "unexpected failure: " err)))))))
