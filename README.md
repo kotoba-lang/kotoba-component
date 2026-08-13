@@ -1,8 +1,13 @@
 # kotoba-component
 
-Wasm Component production — lifts core modules through the Canonical ABI.
+Amu's Component **仕立て** — lifts core modules through the Canonical ABI.
 
-**Tier**: `T2`  **Role**: `backend`
+This is compile-time composition, not kototama's runtime link. It does not
+parse `.kotoba` source, execute components, or decide grants.
+[`amu`](https://github.com/kotoba-lang/amu) weaves; this is one finishing
+pass of that weave. See root ADR-2608139980.
+
+**Tier**: `T2`  **Role**: `backend` of amu
 
 Split out of the overloaded core repos by ADR-2607266000 so that each
 responsibility has exactly one owner and the dependency direction is
