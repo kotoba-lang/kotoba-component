@@ -1318,39 +1318,42 @@
            "}\n"))))
 
 (defn package-storage-provider
-  "Build a synthetic provider for storage-v1 (always-missing; no ambient backend)."
-  [request-descriptor result-descriptor schemas]
-  (let [entry (capability :storage/transact)
-        wit (storage-wit entry request-descriptor result-descriptor schemas)
-        dir (Files/createTempDirectory "kotoba-storage-provider-"
-                                       (make-array FileAttribute 0))
-        world (.resolve dir "provider.wit")
-        core (.resolve dir "provider.wasm")
-        embedded (.resolve dir "embedded.wasm")
-        component (.resolve dir "provider.component.wasm")]
-    (try
-      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
-      (Files/write core
-                   (wasm-tools/parse-wat
-                    (component-core/storage-provider-wat
-                     entry request-descriptor result-descriptor schemas))
-                   (make-array java.nio.file.OpenOption 0))
-      (wasm-tools/run-command!
-       ["wasm-tools" "component" "embed" (str world) (str core)
-        "--encoding" "utf8" "-o" (str embedded)])
-      (wasm-tools/run-command!
-       ["wasm-tools" "component" "new" (str embedded)
-        "--reject-legacy-names" "-o" (str component)])
-      {:format :wasm-component-provider/v1
-       :capability :storage/transact
-       :descriptor request-descriptor
-       :result-descriptor result-descriptor
-       :schemas schemas
-       :bytes (Files/readAllBytes component)}
-      (finally
-        (doseq [path [component embedded core world]]
-          (Files/deleteIfExists path))
-        (Files/deleteIfExists dir)))))
+  "Build a storage-v1 provider (in-component KV; empty store is still missing)."
+  ([request-descriptor result-descriptor schemas]
+   (package-storage-provider request-descriptor result-descriptor schemas
+                             component-core/storage-provider-table-capacity))
+  ([request-descriptor result-descriptor schemas capacity]
+   (let [entry (capability :storage/transact)
+         wit (storage-wit entry request-descriptor result-descriptor schemas)
+         dir (Files/createTempDirectory "kotoba-storage-provider-"
+                                        (make-array FileAttribute 0))
+         world (.resolve dir "provider.wit")
+         core (.resolve dir "provider.wasm")
+         embedded (.resolve dir "embedded.wasm")
+         component (.resolve dir "provider.component.wasm")]
+     (try
+       (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+       (Files/write core
+                    (wasm-tools/parse-wat
+                     (component-core/storage-provider-wat
+                      entry request-descriptor result-descriptor schemas capacity))
+                    (make-array java.nio.file.OpenOption 0))
+       (wasm-tools/run-command!
+        ["wasm-tools" "component" "embed" (str world) (str core)
+         "--encoding" "utf8" "-o" (str embedded)])
+       (wasm-tools/run-command!
+        ["wasm-tools" "component" "new" (str embedded)
+         "--reject-legacy-names" "-o" (str component)])
+       {:format :wasm-component-provider/v1
+        :capability :storage/transact
+        :descriptor request-descriptor
+        :result-descriptor result-descriptor
+        :schemas schemas
+        :bytes (Files/readAllBytes component)}
+       (finally
+         (doseq [path [component embedded core world]]
+           (Files/deleteIfExists path))
+         (Files/deleteIfExists dir))))))
 
 
 (defn- llm-wit
@@ -1923,7 +1926,8 @@
     :else (log-record-wit-type ft schemas)))
 
 (defn- http-ingress-wit
-  "WIT for http-ingress dual-export: accept (option) + reply (bool)."
+  "WIT for http-ingress dual-export: accept (option) + reply (bool),
+  plus host inject of an incoming-request into the one-slot queue."
   [accept-entry reply-entry accept-req accept-res reply-req schemas]
   (let [accept-name (second accept-req)
         reply-name (second reply-req)
@@ -1958,13 +1962,18 @@
          "  " (:function reply-entry) ": func(request: " (wit-name reply-name)
          ") -> bool;\n"
          "}\n\n"
+         "interface http-ingress-host {\n"
+         "  use types.{" (wit-name incoming) "};\n"
+         "  inject: func(request: " (wit-name incoming) ");\n"
+         "}\n\n"
          "world " interface "-provider {\n"
          "  export " interface ";\n"
+         "  export http-ingress-host;\n"
          "}\n")))
 
 (defn package-http-ingress-provider
-  "Build a synthetic dual-export provider for http-ingress-v1
-  (accept always-none; reply bounds + true; no ambient listen)."
+  "Build a dual-export provider for http-ingress-v1
+  (accept pops a host-inject slot, none when empty; reply bounds + true)."
   [accept-req accept-res reply-req reply-res schemas]
   (let [accept-entry (capability :http/accept)
         reply-entry (capability :http/reply)
@@ -1992,7 +2001,7 @@
         "--reject-legacy-names" "-o" (str component)])
       {:format :wasm-component-provider/v1
        :capability :http/accept
-       :capabilities [:http/accept :http/reply]
+       :capabilities [:http/accept :http/reply :http-ingress-host/inject]
        :descriptor accept-req
        :result-descriptor accept-res
        :schemas schemas

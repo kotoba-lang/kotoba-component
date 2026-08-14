@@ -12312,50 +12312,269 @@
             (= [:found :missing :written :deleted :conflict :error]
                (mapv first (nth res 2))))))))
 
-(defn storage-provider-wat
-  "Synthetic provider for storage-v1. Range-checks the request discriminant
-  and always returns `:missing` (no ambient backend). Packaging/ABI
-  qualification only — production transport remains ADR 0071. :wasm-aot
-  stays pending."
-  [entry request-descriptor result-descriptor schemas]
-  (when-not (storage-provider-shape request-descriptor result-descriptor schemas)
-    (reject "storage provider requires storage-v1's own literal request/result shape"
-            {:request request-descriptor :result result-descriptor}))
-  (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|"
-                    (:function entry))
-        request-layout (canonical/layout request-descriptor schemas)
-        result-layout (canonical/layout result-descriptor schemas)
-        joined-types (vec (rest (:flat request-layout)))
-        params (apply str
-                      (cons " (param $disc i32)"
-                            (map-indexed
-                             (fn [i t]
-                               (str " (param $p" i " " (core-type-name t) ")"))
-                             joined-types)))
-        disc-store (variant-disc-store (:discriminant-size result-layout))
-        payload-offset (:payload-offset result-layout)
-        result-size (:size result-layout)
-        arena-base 8
-        pages 1
-        capacity-bytes (* pages 65536)]
+(def storage-provider-table-capacity
+  "Same 256-slot bound as the state provider. Kit durability is host KV
+  (ADR 0071); this table is the wasm-aot source of truth, not a filesystem."
+  256)
+
+(defn- storage-i32-from-joined
+  "Joined flatten may promote put's value length to i64 (join with delete's
+  option<i64> payload). Wrap back to i32 for memory.copy / length stores."
+  [joined-types index]
+  (if (= (nth joined-types index) :i64)
+    (str "local.get $p" index " i32.wrap_i64")
+    (str "local.get $p" index)))
+
+(defn- storage-option-i64-store
+  [offset opt-layout present? value-expr]
+  (let [disc-store (variant-disc-store (:discriminant-size opt-layout))
+        payload (:payload-offset opt-layout)]
     (str
-     "(module\n"
-     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
-     "  (global $next (mut i32) (i32.const " arena-base "))\n"
-     (bounded-bump-realloc-wat capacity-bytes)
-     "  (func (export \"" export "\")" params " (result i32)\n"
-     "    (local $ret i32)\n"
-     "    local.get $disc i32.const 3 i32.ge_u if unreachable end\n"
-     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
-     " i32.const " result-size " call $realloc local.set $ret\n"
-     ;; missing = case 1, payload false
-     "    local.get $ret i32.const 1 " disc-store " offset=0\n"
-     "    local.get $ret i32.const 0 i32.store8 offset=" payload-offset "\n"
-     "    local.get $ret)\n"
-     "  (func (export \"" export "_post\") (param i32)\n"
-     "    i32.const " arena-base " global.set $next)\n"
-     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
-     ")\n")))
+     "          local.get $ret i32.const " (if present? 1 0) " " disc-store
+     " offset=" offset "\n"
+     (when present?
+       (str "          local.get $ret " value-expr " i64.store offset="
+            (+ offset payload) "\n")))))
+
+(defn- storage-conflict-body
+  [{:keys [disc-store payload-offset conflict-key-field conflict-version-field
+           conflict-opt-layout]} present? version-expr]
+  (str
+   "          local.get $ret i32.const 4 " disc-store " offset=0\n"
+   (state-string-field-store (+ payload-offset (:offset conflict-key-field))
+                             "local.get $p0"
+                             "local.get $p1")
+   (storage-option-i64-store (+ payload-offset (:offset conflict-version-field))
+                             conflict-opt-layout
+                             present?
+                             version-expr)))
+
+(defn- storage-put-body
+  "Unconditional put (expected none) inserts/updates. Expected some compares
+  the per-slot version and writes `:conflict` on mismatch or absent key.
+  First successful write of a key is version 1 (per-key, unlike state's
+  global counter). Error discriminant is 5 (`:error`), not state's 4.
+  `$full` is 0=write, 1=capacity error, 2=already wrote conflict."
+  [{:keys [disc-store payload-offset key-field value-field version-field
+           table-base slot-size occupied-offset key-len-offset key-bytes-offset
+           value-len-offset value-bytes-offset version-offset
+           error-code-pointer error-code-length error-message-pointer
+           error-message-length code-field message-field retryable-field
+           value-len-expr]
+    :as ctx}]
+  (str
+   "        local.get $p4\n"
+   "        if\n"
+   "          local.get $match i32.const -1 i32.eq\n"
+   "          if\n"
+   (storage-conflict-body ctx false "i64.const 0")
+   "            i32.const 2 local.set $full\n"
+   "          else\n"
+   "            local.get $match i32.const " slot-size " i32.mul i32.const " table-base
+   " i32.add local.set $slot-addr\n"
+   "            local.get $slot-addr i64.load offset=" version-offset "\n"
+   "            local.get $p5 i64.ne\n"
+   "            if\n"
+   (storage-conflict-body ctx true
+                          (str "local.get $slot-addr i64.load offset=" version-offset))
+   "              i32.const 2 local.set $full\n"
+   "            else\n"
+   "              local.get $match local.set $slot\n"
+   "              i32.const 0 local.set $full\n"
+   "            end\n"
+   "          end\n"
+   "        else\n"
+   "          local.get $match i32.const -1 i32.ne\n"
+   "          if\n"
+   "            local.get $match local.set $slot\n"
+   "            i32.const 0 local.set $full\n"
+   "          else\n"
+   "            local.get $free i32.const -1 i32.eq\n"
+   "            if i32.const 1 local.set $full\n"
+   "            else local.get $free local.set $slot i32.const 0 local.set $full end\n"
+   "          end\n"
+   "        end\n"
+   "        local.get $full i32.const 1 i32.eq\n"
+   "        if\n"
+   "          local.get $ret i32.const 5 " disc-store " offset=0\n"
+   (state-string-field-store (+ payload-offset (:offset code-field))
+                             (str "i32.const " error-code-pointer)
+                             (str "i32.const " error-code-length))
+   (state-string-field-store (+ payload-offset (:offset message-field))
+                             (str "i32.const " error-message-pointer)
+                             (str "i32.const " error-message-length))
+   "          local.get $ret i32.const 0 i32.store8 offset="
+   (+ payload-offset (:offset retryable-field)) "\n"
+   "        else\n"
+   "          local.get $full i32.eqz\n"
+   "          if\n"
+   "            local.get $slot i32.const " slot-size " i32.mul i32.const " table-base
+   " i32.add local.set $slot-addr\n"
+   "            local.get $slot-addr i32.const 1 i32.store offset=" occupied-offset "\n"
+   "            local.get $slot-addr i32.const " key-bytes-offset " i32.add"
+   " local.get $p0 local.get $p1 memory.copy\n"
+   "            local.get $slot-addr local.get $p1 i32.store offset=" key-len-offset "\n"
+   "            " value-len-expr " local.set $vlen\n"
+   "            local.get $slot-addr i32.const " value-bytes-offset " i32.add"
+   " local.get $p2 local.get $vlen memory.copy\n"
+   "            local.get $slot-addr local.get $vlen i32.store offset=" value-len-offset "\n"
+   "            local.get $match i32.const -1 i32.eq\n"
+   "            if (result i64) i64.const 1\n"
+   "            else local.get $slot-addr i64.load offset=" version-offset
+   " i64.const 1 i64.add end\n"
+   "            local.set $newver\n"
+   "            local.get $slot-addr local.get $newver i64.store offset=" version-offset "\n"
+   "            local.get $ret i32.const 2 " disc-store " offset=0\n"
+   (state-string-field-store (+ payload-offset (:offset key-field))
+                             (str "local.get $slot-addr i32.const " key-bytes-offset " i32.add")
+                             "local.get $p1")
+   (state-string-field-store (+ payload-offset (:offset value-field))
+                             (str "local.get $slot-addr i32.const " value-bytes-offset " i32.add")
+                             "local.get $vlen")
+   "            local.get $ret local.get $newver i64.store offset="
+   (+ payload-offset (:offset version-field)) "\n"
+   "          end\n"
+   "        end\n"))
+
+(defn- storage-delete-body
+  "Unconditional delete (expected none) matches state: deleted true/false.
+  Expected some: conflict none if absent, conflict current if version
+  mismatches, else deleted true."
+  [{:keys [disc-store payload-offset table-base slot-size occupied-offset
+           version-offset]
+    :as ctx}]
+  (str
+   "      local.get $p2\n"
+   "      if\n"
+   "        local.get $match i32.const -1 i32.eq\n"
+   "        if\n"
+   (storage-conflict-body ctx false "i64.const 0")
+   "        else\n"
+   "          local.get $match i32.const " slot-size " i32.mul i32.const " table-base
+   " i32.add local.set $slot-addr\n"
+   "          local.get $slot-addr i64.load offset=" version-offset "\n"
+   "          local.get $p3 i64.ne\n"
+   "          if\n"
+   (storage-conflict-body ctx true
+                          (str "local.get $slot-addr i64.load offset=" version-offset))
+   "          else\n"
+   "            local.get $slot-addr i32.const 0 i32.store offset=" occupied-offset "\n"
+   "            local.get $ret i32.const 3 " disc-store " offset=0\n"
+   "            local.get $ret i32.const 1 i32.store8 offset=" payload-offset "\n"
+   "          end\n"
+   "        end\n"
+   "      else\n"
+   "        local.get $match i32.const -1 i32.ne\n"
+   "        if\n"
+   "          local.get $match i32.const " slot-size " i32.mul i32.const " table-base
+   " i32.add local.set $slot-addr\n"
+   "          local.get $slot-addr i32.const 0 i32.store offset=" occupied-offset "\n"
+   "          local.get $ret i32.const 3 " disc-store " offset=0\n"
+   "          local.get $ret i32.const 1 i32.store8 offset=" payload-offset "\n"
+   "        else\n"
+   "          local.get $ret i32.const 3 " disc-store " offset=0\n"
+   "          local.get $ret i32.const 0 i32.store8 offset=" payload-offset "\n"
+   "        end\n"
+   "      end\n"))
+
+(defn storage-provider-wat
+  "In-component bounded KV for storage-v1. Empty store still returns
+  `:missing` (existing get-sequence drivers stay green). put/get/delete
+  persist across calls in one instance; expected-version yields `:conflict`.
+  Not a durable filesystem and not ADR 0071's HTTP endpoint — same honesty
+  bar as state-v1's wasm-aot table."
+  ([entry request-descriptor result-descriptor schemas]
+   (storage-provider-wat entry request-descriptor result-descriptor schemas
+                         storage-provider-table-capacity))
+  ([entry request-descriptor result-descriptor schemas capacity]
+   (when-not (storage-provider-shape request-descriptor result-descriptor schemas)
+     (reject "storage provider requires storage-v1's own literal request/result shape"
+             {:request request-descriptor :result result-descriptor}))
+   (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|"
+                     (:function entry))
+         request-layout (canonical/layout request-descriptor schemas)
+         result-layout (canonical/layout result-descriptor schemas)
+         joined-types (vec (rest (:flat request-layout)))
+         params (apply str
+                       (cons " (param $disc i32)"
+                             (map-indexed
+                              (fn [i t]
+                                (str " (param $p" i " " (core-type-name t) ")"))
+                              joined-types)))
+         slot (state-slot-layout capacity)
+         {:keys [table-base table-size]} slot
+         literal-base (align-up (+ table-base table-size) 8)
+         error-code-bytes (vec (.getBytes "storage/capacity" "UTF-8"))
+         error-message-bytes (vec (.getBytes "storage entry limit reached" "UTF-8"))
+         error-code-pointer literal-base
+         error-message-pointer (+ error-code-pointer (count error-code-bytes))
+         arena-base (align-up (+ error-message-pointer (count error-message-bytes)) 8)
+         request-headroom-bytes (string-headroom-bytes request-layout)
+         result-size (:size result-layout)
+         required-bytes (+ arena-base request-headroom-bytes result-size)
+         pages (max 1 (quot (+ required-bytes 65535) 65536))
+         capacity-bytes (* pages 65536)
+         result-cases (:cases result-layout)
+         found-layout (:layout (nth result-cases 0))
+         conflict-layout (:layout (nth result-cases 4))
+         error-layout (:layout (nth result-cases 5))
+         payload-offset (:payload-offset result-layout)
+         disc-store (variant-disc-store (:discriminant-size result-layout))
+         conflict-version-field (field-by-name conflict-layout :current-version)
+         ctx (merge slot
+                    {:disc-store disc-store
+                     :payload-offset payload-offset
+                     :key-field (field-by-name found-layout :key)
+                     :value-field (field-by-name found-layout :value)
+                     :version-field (field-by-name found-layout :version)
+                     :conflict-key-field (field-by-name conflict-layout :key)
+                     :conflict-version-field conflict-version-field
+                     :conflict-opt-layout (:layout conflict-version-field)
+                     :code-field (field-by-name error-layout :code)
+                     :message-field (field-by-name error-layout :message)
+                     :retryable-field (field-by-name error-layout :retryable)
+                     :error-code-pointer error-code-pointer
+                     :error-code-length (count error-code-bytes)
+                     :error-message-pointer error-message-pointer
+                     :error-message-length (count error-message-bytes)
+                     :value-len-expr (storage-i32-from-joined joined-types 3)})
+         scan (state-scan-wat slot)]
+     (str
+      "(module\n"
+      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+      "  (global $next (mut i32) (i32.const " arena-base "))\n"
+      (bounded-bump-realloc-wat capacity-bytes)
+      bytes-equal-wat
+      "  (func (export \"" export "\")" params " (result i32)\n"
+      "    (local $ret i32) (local $match i32) (local $free i32)"
+      " (local $slot i32) (local $slot-addr i32) (local $full i32)"
+      " (local $vlen i32) (local $newver i64)\n"
+      "    local.get $disc i32.const 3 i32.ge_u if unreachable end\n"
+      "    local.get $p1 i32.const " value/keyword-value-byte-limit
+      " i32.gt_u if unreachable end\n"
+      scan
+      "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+      " i32.const " result-size " call $realloc local.set $ret\n"
+      "    i32.const 0 local.set $full\n"
+      "    i32.const -1 local.set $slot\n"
+      "    local.get $disc i32.const 0 i32.eq\n"
+      "    if\n"
+      (state-get-body ctx)
+      "    else\n"
+      "      local.get $disc i32.const 1 i32.eq\n"
+      "      if\n"
+      (storage-put-body ctx)
+      "      else\n"
+      (storage-delete-body ctx)
+      "      end\n"
+      "    end\n"
+      "    local.get $ret)\n"
+      "  (func (export \"" export "_post\") (param i32)\n"
+      "    i32.const " arena-base " global.set $next)\n"
+      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+      "  (data (i32.const " error-code-pointer ") \"" (wat-data error-code-bytes) "\")\n"
+      "  (data (i32.const " error-message-pointer ") \"" (wat-data error-message-bytes) "\")\n"
+      ")\n"))))
 
 (defn- llm-provider-shape
   "True when request/result match llm-v1 generate: record with
@@ -13031,10 +13250,13 @@
                 (= (:body rf) :string))))))))
 
 (defn http-ingress-provider-wat
-  "Synthetic dual-export provider for http-ingress-v1 accept + reply.
-  accept: slot must be 0; always returns option none (no ambient queue).
-  reply: status in [100,599], header count ≤ 32, body bound; always true.
-  Packaging/ABI only — dual-runtime host inject is ADR 0097. :wasm-aot pending."
+  "Dual-export provider for http-ingress-v1 accept + reply, plus host inject.
+
+  accept: slot must be 0; pops a one-slot host queue (option none when
+  empty). The host fills that slot through exported `http-ingress-host.inject`
+  — not an ambient listen. Existing empty-queue drivers stay valid: the slot
+  starts empty. First slice stores empty headers only (non-empty traps).
+  reply: status in [100,599], header count ≤ 32, body bound; always true."
   [accept-entry reply-entry accept-req accept-res reply-req reply-res schemas]
   (when-not (http-ingress-provider-shape accept-req accept-res reply-req reply-res schemas)
     (reject "http ingress provider requires http-ingress-v1 shapes"
@@ -13045,28 +13267,83 @@
                            "@1|" (:function accept-entry))
         reply-export (str "cm32p2|kotoba:application/" (:interface reply-entry)
                           "@1|" (:function reply-entry))
+        inject-export "cm32p2|kotoba:application/http-ingress-host@1|inject"
         accept-res-layout (canonical/layout accept-res schemas)
+        incoming-layout (canonical/layout [:ref :kotoba.http/incoming-request] schemas)
+        payload-offset (:payload-offset accept-res-layout)
+        method-off (:offset (field-by-name incoming-layout :method))
+        path-off (:offset (field-by-name incoming-layout :path))
+        headers-off (:offset (field-by-name incoming-layout :headers))
+        body-off (:offset (field-by-name incoming-layout :body))
         disc-store (variant-disc-store (:discriminant-size accept-res-layout))
         accept-size (:size accept-res-layout)
         max-headers 32
+        max-method value/keyword-value-byte-limit
+        max-path 4096
         max-body value/string-value-byte-limit
-        arena-base 8
-        pages 1
+        method-base 8
+        path-base (+ method-base max-method)
+        body-base (+ path-base max-path)
+        arena-base (align-up (+ body-base max-body) 8)
+        required-bytes (+ arena-base max-body accept-size 65536)
+        pages (max 2 (quot (+ required-bytes 65535) 65536))
         capacity-bytes (* pages 65536)]
     ;; accept flat: p0 slot i64
+    ;; inject flat: method/path/headers/body each ptr+len
     ;; reply flat: p0 status i64, p1/p2 headers, p3/p4 body
     (str
      "(module\n"
      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
      "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     "  (global $has (mut i32) (i32.const 0))\n"
+     "  (global $mlen (mut i32) (i32.const 0))\n"
+     "  (global $plen (mut i32) (i32.const 0))\n"
+     "  (global $blen (mut i32) (i32.const 0))\n"
      (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" inject-export "\")"
+     " (param $mptr i32) (param $mlen i32)"
+     " (param $pptr i32) (param $plen i32)"
+     " (param $hptr i32) (param $hlen i32)"
+     " (param $bptr i32) (param $blen i32)\n"
+     "    local.get $mlen i32.const " max-method " i32.gt_u if unreachable end\n"
+     "    local.get $plen i32.const " max-path " i32.gt_u if unreachable end\n"
+     "    local.get $hlen i32.const 0 i32.ne if unreachable end\n"
+     "    local.get $blen i32.const " max-body " i32.gt_u if unreachable end\n"
+     "    i32.const " method-base " local.get $mptr local.get $mlen memory.copy\n"
+     "    i32.const " path-base " local.get $pptr local.get $plen memory.copy\n"
+     "    i32.const " body-base " local.get $bptr local.get $blen memory.copy\n"
+     "    local.get $mlen global.set $mlen\n"
+     "    local.get $plen global.set $plen\n"
+     "    local.get $blen global.set $blen\n"
+     "    i32.const 1 global.set $has)\n"
+     "  (func (export \"" inject-export "_post\"))\n"
      "  (func (export \"" accept-export "\") (param $p0 i64) (result i32)\n"
      "    (local $ret i32)\n"
      "    local.get $p0 i64.const 0 i64.ne if unreachable end\n"
      "    i32.const 0 i32.const 0 i32.const " (:alignment accept-res-layout)
      " i32.const " accept-size " call $realloc local.set $ret\n"
-     ;; option none
-     "    local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "    global.get $has i32.eqz if\n"
+     "      local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "      local.get $ret return\n"
+     "    end\n"
+     "    local.get $ret i32.const 1 " disc-store " offset=0\n"
+     "    local.get $ret i32.const " method-base " i32.store offset="
+     (+ payload-offset method-off) "\n"
+     "    local.get $ret global.get $mlen i32.store offset="
+     (+ payload-offset method-off 4) "\n"
+     "    local.get $ret i32.const " path-base " i32.store offset="
+     (+ payload-offset path-off) "\n"
+     "    local.get $ret global.get $plen i32.store offset="
+     (+ payload-offset path-off 4) "\n"
+     "    local.get $ret i32.const 0 i32.store offset="
+     (+ payload-offset headers-off) "\n"
+     "    local.get $ret i32.const 0 i32.store offset="
+     (+ payload-offset headers-off 4) "\n"
+     "    local.get $ret i32.const " body-base " i32.store offset="
+     (+ payload-offset body-off) "\n"
+     "    local.get $ret global.get $blen i32.store offset="
+     (+ payload-offset body-off 4) "\n"
+     "    i32.const 0 global.set $has\n"
      "    local.get $ret)\n"
      "  (func (export \"" accept-export "_post\") (param i32)\n"
      "    i32.const " arena-base " global.set $next)\n"
