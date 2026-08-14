@@ -1127,6 +1127,137 @@
         (doseq [path [component embedded core world]] (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
 
+(defn- http-host-forwarder-wit
+  "http-wit world plus a sync `http-host` import of the same kit types."
+  [entry request-descriptor result-descriptor schemas]
+  (let [base (http-wit entry request-descriptor result-descriptor schemas)
+        interface (:interface entry)
+        req-name (wit-name (second request-descriptor))
+        res-name (wit-name (second result-descriptor))
+        world-header (str "world " interface "-provider {\n  export " interface ";\n}\n")]
+    (when-not (str/includes? base world-header)
+      (reject "http provider WIT does not carry the expected world footer"
+              {:interface interface}))
+    (str/replace base world-header
+                 (str "interface http-host {\n"
+                      "  use types.{" req-name ", " res-name "};\n"
+                      "  post: func(request: " req-name ") -> " res-name ";\n"
+                      "}\n\n"
+                      "world " interface "-provider {\n"
+                      "  import http-host;\n"
+                      "  export " interface ";\n"
+                      "}\n"))))
+
+(defn- http-echo-stub-wit
+  [request-descriptor result-descriptor schemas]
+  (let [entry (capability :http/post)
+        base (http-wit entry request-descriptor result-descriptor schemas)
+        req-name (wit-name (second request-descriptor))
+        res-name (wit-name (second result-descriptor))
+        interface (:interface entry)
+        iface (str "interface " interface " {\n"
+                   "  use types.{" req-name ", " res-name "};\n"
+                   "  " (:function entry) ": func(request: " req-name
+                   ") -> " res-name ";\n"
+                   "}\n\n"
+                   "world " interface "-provider {\n  export " interface ";\n}\n")
+        stub (str "interface http-host {\n"
+                  "  use types.{" req-name ", " res-name "};\n"
+                  "  post: func(request: " req-name ") -> " res-name ";\n"
+                  "}\n\n"
+                  "world http-host-provider {\n  export http-host;\n}\n")]
+    (when-not (str/includes? base iface)
+      (reject "http provider WIT does not carry the expected interface block" {}))
+    (str/replace base iface stub)))
+
+(defn package-http-host-provider
+  "http-v1 post that imports `http-host.post` after kit bounds. Leaves the
+  host import open — compose with `package-http-echo-stub` or a production
+  host. Analogous to `package-clock-wasi-provider`."
+  [request-descriptor result-descriptor schemas]
+  (let [entry (capability :http/post)
+        wit (http-host-forwarder-wit entry request-descriptor result-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-http-host-provider-" (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit") core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm") component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat
+                         (component-core/http-host-provider-wat
+                          entry request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
+                                "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1 :capability :http/post
+       :capabilities [:http/post]
+       :descriptor request-descriptor :result-descriptor result-descriptor
+       :schemas schemas
+       :host-imports ["kotoba:application/http-host@1.0.0"]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]] (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(defn package-http-echo-stub
+  "Test/production-substitutable host: echoes the POST body as the response."
+  [request-descriptor result-descriptor schemas]
+  (let [wit (http-echo-stub-wit request-descriptor result-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-http-echo-stub-" (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit") core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm") component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat
+                         (component-core/http-echo-stub-wat
+                          request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
+                                "--world" "http-host-provider"
+                                "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1 :capability :http-host/post
+       :capabilities [:http-host/post]
+       :descriptor request-descriptor :result-descriptor result-descriptor
+       :schemas schemas :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]] (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(defn plug-host-stub
+  "`wac plug` a host-importing provider with a stub that exports that host.
+  Result is a self-contained provider the application can compose-closed."
+  [provider stub]
+  (when-not (= :wasm-component-provider/v1 (:format provider) (:format stub))
+    (reject "plug-host-stub requires two provider artifacts"
+            {:provider (:format provider) :stub (:format stub)}))
+  (assert-wac-version!)
+  (let [dir (Files/createTempDirectory "kotoba-plug-host-" (make-array FileAttribute 0))
+        socket (.resolve dir "socket.wasm")
+        plug (.resolve dir "plug.wasm")
+        output (.resolve dir "plugged.wasm")]
+    (try
+      (Files/write socket ^bytes (:bytes provider) (make-array java.nio.file.OpenOption 0))
+      (Files/write plug ^bytes (:bytes stub) (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wac" "plug" (str socket) "--plug" (str plug) "-o" (str output)])
+      (wasm-tools/run-command! ["wasm-tools" "validate" (str output)])
+      (-> provider
+          (assoc :bytes (Files/readAllBytes output))
+          (dissoc :host-imports))
+      (finally
+        (doseq [path [output socket plug]] (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(defn package-http-echo-provider
+  "Closed http-v1 provider: kit bounds + host echo stub (body round-trip)."
+  [request-descriptor result-descriptor schemas]
+  (plug-host-stub
+   (package-http-host-provider request-descriptor result-descriptor schemas)
+   (package-http-echo-stub request-descriptor result-descriptor schemas)))
+
 
 (defn- ui-wit
   "WIT for ui-v1: commit record->record and next-event record->option."
@@ -1465,6 +1596,112 @@
         (doseq [path [component embedded core world]]
           (Files/deleteIfExists path))
         (Files/deleteIfExists dir)))))
+
+(defn- llm-host-forwarder-wit
+  "llm-wit world plus a sync `llm-host` import of the same kit types."
+  [entry request-descriptor result-descriptor schemas]
+  (let [base (llm-wit entry request-descriptor result-descriptor schemas)
+        interface (:interface entry)
+        req-name (wit-name (second request-descriptor))
+        res-name (wit-name (second result-descriptor))
+        world-header (str "world " interface "-provider {\n  export " interface ";\n}\n")]
+    (when-not (str/includes? base world-header)
+      (reject "llm provider WIT does not carry the expected world footer"
+              {:interface interface}))
+    (str/replace base world-header
+                 (str "interface llm-host {\n"
+                      "  use types.{" req-name ", " res-name "};\n"
+                      "  generate: func(request: " req-name ") -> " res-name ";\n"
+                      "}\n\n"
+                      "world " interface "-provider {\n"
+                      "  import llm-host;\n"
+                      "  export " interface ";\n"
+                      "}\n"))))
+
+(defn- llm-echo-stub-wit
+  [request-descriptor result-descriptor schemas]
+  (let [entry (capability :llm/generate)
+        base (llm-wit entry request-descriptor result-descriptor schemas)
+        req-name (wit-name (second request-descriptor))
+        res-name (wit-name (second result-descriptor))
+        interface (:interface entry)
+        iface (str "interface " interface " {\n"
+                   "  use types.{" req-name ", " res-name "};\n"
+                   "  " (:function entry) ": func(request: " req-name
+                   ") -> " res-name ";\n"
+                   "}\n\n"
+                   "world " interface "-provider {\n  export " interface ";\n}\n")
+        stub (str "interface llm-host {\n"
+                  "  use types.{" req-name ", " res-name "};\n"
+                  "  generate: func(request: " req-name ") -> " res-name ";\n"
+                  "}\n\n"
+                  "world llm-host-provider {\n  export llm-host;\n}\n")]
+    (when-not (str/includes? base iface)
+      (reject "llm provider WIT does not carry the expected interface block" {}))
+    (str/replace base iface stub)))
+
+(defn package-llm-host-provider
+  "llm-v1 generate that imports `llm-host.generate` after kit bounds. Leaves
+  the host import open — compose with `package-llm-echo-stub` or a production
+  host that holds credentials and the model allowlist."
+  [request-descriptor result-descriptor schemas]
+  (let [entry (capability :llm/generate)
+        wit (llm-host-forwarder-wit entry request-descriptor result-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-llm-host-provider-" (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit") core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm") component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat
+                         (component-core/llm-host-provider-wat
+                          entry request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
+                                "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1 :capability :llm/generate
+       :capabilities [:llm/generate]
+       :descriptor request-descriptor :result-descriptor result-descriptor
+       :schemas schemas
+       :host-imports ["kotoba:application/llm-host@1.0.0"]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]] (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(defn package-llm-echo-stub
+  "Test/production-substitutable host: completion text is the prompt."
+  [request-descriptor result-descriptor schemas]
+  (let [wit (llm-echo-stub-wit request-descriptor result-descriptor schemas)
+        dir (Files/createTempDirectory "kotoba-llm-echo-stub-" (make-array FileAttribute 0))
+        world (.resolve dir "provider.wit") core (.resolve dir "provider.wasm")
+        embedded (.resolve dir "embedded.wasm") component (.resolve dir "provider.component.wasm")]
+    (try
+      (Files/writeString world wit (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat
+                         (component-core/llm-echo-stub-wat
+                          request-descriptor result-descriptor schemas))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command! ["wasm-tools" "component" "embed" (str world) (str core)
+                                "--world" "llm-host-provider"
+                                "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command! ["wasm-tools" "component" "new" (str embedded)
+                                "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component-provider/v1 :capability :llm-host/generate
+       :capabilities [:llm-host/generate]
+       :descriptor request-descriptor :result-descriptor result-descriptor
+       :schemas schemas :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]] (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(defn package-llm-echo-provider
+  "Closed llm-v1 provider: kit bounds + host echo stub (prompt round-trip)."
+  [request-descriptor result-descriptor schemas]
+  (plug-host-stub
+   (package-llm-host-provider request-descriptor result-descriptor schemas)
+   (package-llm-echo-stub request-descriptor result-descriptor schemas)))
 
 
 (defn- object-write-wit-type

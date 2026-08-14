@@ -12168,7 +12168,145 @@
      "  (data (i32.const " body-pointer ") \"" (wat-data body-bytes) "\")\n"
      ")\n")))
 
+(def http-host-import-module
+  "Standard32 module name for the sync kit-shaped HTTP host.
 
+  WASI `wasi:http/client@0.3.0` is `async func` plus `stream`/`future`
+  (`:requires-profile :async`). standard32 has no future/stream intrinsic
+  surface, so wasm-aot cannot import that interface. The kit itself is
+  `:synchronous-reference`; this host is the matching sync boundary."
+  "cm32p2|kotoba:application/http-host@1")
+
+(defn- http-request-bounds-wat
+  "Shared URL/header/body/timeout traps for synthetic and host-forwarding
+  http-v1 providers. `$p0..$p6` are the Canonical flat post request."
+  []
+  (let [https-bytes (vec (.getBytes "https://" "UTF-8"))
+        max-timeout 30000
+        max-headers 32
+        max-url 4096
+        max-body value/string-value-byte-limit]
+    (str
+     "    local.get $p6 i64.const 1 i64.lt_s if unreachable end\n"
+     "    local.get $p6 i64.const " max-timeout " i64.gt_s if unreachable end\n"
+     "    local.get $p3 i32.const " max-headers " i32.gt_u if unreachable end\n"
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-url " i32.gt_u if unreachable end\n"
+     "    local.get $p5 i32.const " max-body " i32.gt_u if unreachable end\n"
+     "    local.get $p1 i32.const 8 i32.lt_u if unreachable end\n"
+     (apply str
+            (map-indexed
+             (fn [i byte]
+               (str "    local.get $p0 i32.load8_u offset=" i "\n"
+                    "    i32.const " byte " i32.ne if unreachable end\n"))
+             https-bytes))
+     "    i32.const 0 local.set $i\n"
+     "    block $url-done\n"
+     "      loop $url-scan\n"
+     "        local.get $i local.get $p1 i32.ge_u br_if $url-done\n"
+     "        local.get $p0 local.get $i i32.add i32.load8_u local.set $b\n"
+     "        local.get $b i32.const 35 i32.eq if unreachable end\n"
+     "        local.get $i i32.const 1 i32.add local.set $i\n"
+     "        br $url-scan\n"
+     "      end\n"
+     "    end\n")))
+
+(defn http-host-provider-wat
+  "http-v1 post that validates the kit request then forwards to imported
+  `http-host.post`. No ambient network. The host is what production
+  substitutes (real HTTP + allowlist) and what tests stub (body echo)."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (http-provider-shape request-descriptor result-descriptor schemas)
+    (reject "http provider requires http-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|"
+                    (:function entry))
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined (vec (:flat request-layout))
+        params (apply str
+                      (map-indexed
+                       (fn [i t]
+                         (str " (param $p" i " " (core-type-name t) ")"))
+                       joined))
+        result-size (:size result-layout)
+        arena-base 8
+        pages 2
+        capacity-bytes (* pages 65536)]
+    (str
+     "(module\n"
+     "  (import \"" http-host-import-module "\" \"post\""
+     " (func $host-post (param i32 i32 i32 i32 i32 i32 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32) (local $i i32) (local $b i32)\n"
+     (http-request-bounds-wat)
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     "    local.get $p0 local.get $p1 local.get $p2 local.get $p3\n"
+     "    local.get $p4 local.get $p5 local.get $p6 local.get $ret\n"
+     "    call $host-post\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn http-echo-stub-wat
+  "Host stub for http-host.post: status 200, empty headers, body is the
+  request body. Discriminates fixed `\"ok\"` because the payload bytes
+  come from the caller."
+  [request-descriptor result-descriptor schemas]
+  (when-not (http-provider-shape request-descriptor result-descriptor schemas)
+    (reject "http echo stub requires http-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str http-host-import-module "|post")
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined (vec (:flat request-layout))
+        params (apply str
+                      (map-indexed
+                       (fn [i t]
+                         (str " (param $p" i " " (core-type-name t) ")"))
+                       joined))
+        result-cases (:cases result-layout)
+        ok-layout (:layout (nth result-cases 0))
+        payload-offset (:payload-offset result-layout)
+        disc-store (variant-disc-store (:discriminant-size result-layout))
+        ok-status (field-by-name ok-layout :status)
+        ok-headers (field-by-name ok-layout :headers)
+        ok-body (field-by-name ok-layout :body)
+        result-size (:size result-layout)
+        arena-base 8
+        pages 2
+        capacity-bytes (* pages 65536)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     "    local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "    local.get $ret i64.const 200 i64.store offset="
+     (+ payload-offset (:offset ok-status)) "\n"
+     "    local.get $ret i32.const 0 i32.store offset="
+     (+ payload-offset (:offset ok-headers)) "\n"
+     "    local.get $ret i32.const 0 i32.store offset="
+     (+ payload-offset (:offset ok-headers) 4) "\n"
+     "    local.get $ret local.get $p4 i32.store offset="
+     (+ payload-offset (:offset ok-body)) "\n"
+     "    local.get $ret local.get $p5 i32.store offset="
+     (+ payload-offset (:offset ok-body) 4) "\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
 
 (defn- ui-provider-shape
   "True when commit/event request+result match ui-v1 shapes."
@@ -12700,6 +12838,130 @@
      "    i32.const " arena-base " global.set $next)\n"
      "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      "  (data (i32.const " text-pointer ") \"" (wat-data text-bytes) "\")\n"
+     "  (data (i32.const " finish-pointer ") \"" (wat-data finish-bytes) "\")\n"
+     ")\n")))
+
+(def llm-host-import-module
+  "Standard32 module name for the sync kit-shaped LLM host.
+
+  There is no WASI LLM. Credentials and model allowlist stay host-only.
+  wasm-aot forwards the kit generate request across this import."
+  "cm32p2|kotoba:application/llm-host@1")
+
+(defn- llm-request-bounds-wat
+  []
+  (let [max-output-tokens 4096
+        max-temperature-milli 2000
+        max-model value/keyword-value-byte-limit
+        max-input 65536]
+    (str
+     "    local.get $p1 i32.eqz if unreachable end\n"
+     "    local.get $p1 i32.const " max-model " i32.gt_u if unreachable end\n"
+     "    local.get $p3 i32.const " max-input " i32.gt_u if unreachable end\n"
+     "    local.get $p5 i32.const " max-input " i32.gt_u if unreachable end\n"
+     "    local.get $p6 i64.const 1 i64.lt_s if unreachable end\n"
+     "    local.get $p6 i64.const " max-output-tokens " i64.gt_s if unreachable end\n"
+     "    local.get $p7 i64.const 0 i64.lt_s if unreachable end\n"
+     "    local.get $p7 i64.const " max-temperature-milli " i64.gt_s if unreachable end\n")))
+
+(defn llm-host-provider-wat
+  "llm-v1 generate that validates then forwards to imported `llm-host.generate`."
+  [entry request-descriptor result-descriptor schemas]
+  (when-not (llm-provider-shape request-descriptor result-descriptor schemas)
+    (reject "llm provider requires llm-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str "cm32p2|kotoba:application/" (:interface entry) "@1|"
+                    (:function entry))
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined (vec (:flat request-layout))
+        params (apply str
+                      (map-indexed
+                       (fn [i t]
+                         (str " (param $p" i " " (core-type-name t) ")"))
+                       joined))
+        result-size (:size result-layout)
+        arena-base 8
+        pages 2
+        capacity-bytes (* pages 65536)]
+    (str
+     "(module\n"
+     "  (import \"" llm-host-import-module "\" \"generate\""
+     " (func $host-generate (param i32 i32 i32 i32 i32 i32 i64 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32)\n"
+     (llm-request-bounds-wat)
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     "    local.get $p0 local.get $p1 local.get $p2 local.get $p3\n"
+     "    local.get $p4 local.get $p5 local.get $p6 local.get $p7 local.get $ret\n"
+     "    call $host-generate\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
+     ")\n")))
+
+(defn llm-echo-stub-wat
+  "Host stub: completion text is the prompt, finish-reason stop, usage
+  counts the prompt length. Discriminates fixed `\"ok\"`."
+  [request-descriptor result-descriptor schemas]
+  (when-not (llm-provider-shape request-descriptor result-descriptor schemas)
+    (reject "llm echo stub requires llm-v1's own literal request/result shape"
+            {:request request-descriptor :result result-descriptor}))
+  (let [export (str llm-host-import-module "|generate")
+        request-layout (canonical/layout request-descriptor schemas)
+        result-layout (canonical/layout result-descriptor schemas)
+        joined (vec (:flat request-layout))
+        params (apply str
+                      (map-indexed
+                       (fn [i t]
+                         (str " (param $p" i " " (core-type-name t) ")"))
+                       joined))
+        result-cases (:cases result-layout)
+        ok-layout (:layout (nth result-cases 0))
+        payload-offset (:payload-offset result-layout)
+        disc-store (variant-disc-store (:discriminant-size result-layout))
+        ok-text (field-by-name ok-layout :text)
+        ok-finish (field-by-name ok-layout :finish-reason)
+        ok-usage (field-by-name ok-layout :usage)
+        usage-in (field-by-name (:layout ok-usage) :input-tokens)
+        usage-out (field-by-name (:layout ok-usage) :output-tokens)
+        finish-bytes (vec (.getBytes "stop" "UTF-8"))
+        finish-pointer 8
+        arena-base (align-up (+ finish-pointer (count finish-bytes)) 8)
+        result-size (:size result-layout)
+        pages 2
+        capacity-bytes (* pages 65536)]
+    (str
+     "(module\n"
+     "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
+     "  (global $next (mut i32) (i32.const " arena-base "))\n"
+     (bounded-bump-realloc-wat capacity-bytes)
+     "  (func (export \"" export "\")" params " (result i32)\n"
+     "    (local $ret i32)\n"
+     "    i32.const 0 i32.const 0 i32.const " (:alignment result-layout)
+     " i32.const " result-size " call $realloc local.set $ret\n"
+     "    local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "    local.get $ret local.get $p4 i32.store offset="
+     (+ payload-offset (:offset ok-text)) "\n"
+     "    local.get $ret local.get $p5 i32.store offset="
+     (+ payload-offset (:offset ok-text) 4) "\n"
+     "    local.get $ret i32.const " finish-pointer " i32.store offset="
+     (+ payload-offset (:offset ok-finish)) "\n"
+     "    local.get $ret i32.const " (count finish-bytes) " i32.store offset="
+     (+ payload-offset (:offset ok-finish) 4) "\n"
+     "    local.get $ret local.get $p5 i64.extend_i32_u i64.store offset="
+     (+ payload-offset (:offset ok-usage) (:offset usage-in)) "\n"
+     "    local.get $ret local.get $p5 i64.extend_i32_u i64.store offset="
+     (+ payload-offset (:offset ok-usage) (:offset usage-out)) "\n"
+     "    local.get $ret)\n"
+     "  (func (export \"" export "_post\") (param i32)\n"
+     "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"cm32p2_initialize\") i32.const " arena-base " global.set $next)\n"
      "  (data (i32.const " finish-pointer ") \"" (wat-data finish-bytes) "\")\n"
      ")\n")))
 
