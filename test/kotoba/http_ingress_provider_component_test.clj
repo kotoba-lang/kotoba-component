@@ -15,6 +15,10 @@
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
     (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
 
+(defn- wat-data
+  [bytes]
+  (apply str (map #(format "\\%02x" (bit-and (int %) 0xff)) bytes)))
+
 (defn- ref-ify
   [descriptor]
   (let [schemas (atom {})]
@@ -78,7 +82,7 @@
                   (:schemas d))]
     (is (= :wasm-component-provider/v1 (:format provider)))
     (is (= :http/accept (:capability provider)))
-    (is (= [:http/accept :http/reply] (:capabilities provider)))
+    (is (= [:http/accept :http/reply :http-ingress-host/inject] (:capabilities provider)))
     (is (= [0 97 115 109 13 0 1 0]
            (mapv #(bit-and (int %) 0xff) (take 8 (:bytes provider)))))
     (let [dir (java.nio.file.Files/createTempDirectory
@@ -103,6 +107,7 @@
              (:schemas d))]
     (is (re-find #"cm32p2\|kotoba:application/http-ingress@1\|accept" wat))
     (is (re-find #"cm32p2\|kotoba:application/http-ingress@1\|reply" wat))
+    (is (re-find #"cm32p2\|kotoba:application/http-ingress-host@1\|inject" wat))
     (is (re-find #"i64.const 100" wat))
     (is (re-find #"i64.const 599" wat))
     (is (re-find #"i32.const 1\)" wat)))) ;; reply always true
@@ -137,7 +142,7 @@
    "}\n"))
 
 (defn- http-accept-sequence-driver-wat
-  "Two accept(slot=0) calls; synthetic provider always returns option none
+  "Two accept(slot=0) calls; empty host queue returns option none
   (disc=0). Return (1-d1)+(1-d2) = 2 when both none.
   Canonical ABI: option result uses retptr as last param (slot i64, retptr)."
   []
@@ -464,5 +469,117 @@
       (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
         (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
         (is (= "2" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(defn- http-inject-accept-driver-wit
+  []
+  (str
+   "package kotoba:application@1.0.0;\n\n"
+   "interface types {\n"
+   "  record kotoba-http-accept-request { slot: s64, }\n"
+   "  record kotoba-http-header { name: string, value: string, }\n"
+   "  record kotoba-http-incoming-request {\n"
+   "    method: string, path: string,\n"
+   "    headers: list<kotoba-http-header>, body: string,\n"
+   "  }\n"
+   "}\n\n"
+   "interface http-ingress {\n"
+   "  use types.{kotoba-http-accept-request, kotoba-http-incoming-request};\n"
+   "  accept: func(request: kotoba-http-accept-request) -> option<kotoba-http-incoming-request>;\n"
+   "}\n\n"
+   "interface http-ingress-host {\n"
+   "  use types.{kotoba-http-incoming-request};\n"
+   "  inject: func(request: kotoba-http-incoming-request);\n"
+   "}\n\n"
+   "world driver {\n"
+   "  import http-ingress;\n"
+   "  import http-ingress-host;\n"
+   "  export run: func() -> s64;\n"
+   "}\n"))
+
+(defn- http-inject-accept-driver-wat
+  "inject GET /x (empty headers/body) then accept; return path length when
+  some, 0 when none. Canonical option<incoming>: disc at 0, path len at 16."
+  []
+  (let [ingress "cm32p2|kotoba:application/http-ingress@1"
+        host "cm32p2|kotoba:application/http-ingress-host@1"
+        method-bytes (vec (.getBytes "GET" "UTF-8"))
+        path-bytes (vec (.getBytes "/x" "UTF-8"))
+        mptr 8
+        pptr (+ mptr (count method-bytes))
+        accept-ret 64]
+    (str
+     "(module\n"
+     "  (import \"" ingress "\" \"accept\" (func $accept (param i64 i32)))\n"
+     "  (import \"" host "\" \"inject\""
+     " (func $inject (param i32 i32 i32 i32 i32 i32 i32 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"cm32p2||run\") (result i64)\n"
+     "    (local $disc i32)\n"
+     "    i32.const " mptr " i32.const " (count method-bytes) "\n"
+     "    i32.const " pptr " i32.const " (count path-bytes) "\n"
+     "    i32.const 0 i32.const 0\n"
+     "    i32.const 0 i32.const 0\n"
+     "    call $inject\n"
+     "    i64.const 0 i32.const " accept-ret " call $accept\n"
+     "    i32.const " accept-ret " i32.load8_u offset=0 local.set $disc\n"
+     "    local.get $disc i32.eqz if (result i64) i64.const 0\n"
+     "    else i32.const " accept-ret " i32.load offset=16 i64.extend_i32_u end)\n"
+     "  (func (export \"cm32p2||run_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " mptr ") \"" (wat-data method-bytes) "\")\n"
+     "  (data (i32.const " pptr ") \"" (wat-data path-bytes) "\")\n"
+     ")\n")))
+
+(defn- package-http-inject-accept-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-http-inject-accept-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (http-inject-accept-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (http-inject-accept-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:http/accept :http-ingress-host/inject]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest http-host-inject-then-accept-returns-the-injected-path-length
+  (let [d (http-ingress-descriptors)
+        provider (composition/package-http-ingress-provider
+                  (:accept-req d) (:accept-res d)
+                  (:reply-req d) (:reply-res d)
+                  (:schemas d))
+        driver (package-http-inject-accept-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-http-inject-accept-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "2" (str/trim (:out run)))
+            "host inject GET /x must be the accept payload path length, not none"))
       (finally
         (Files/deleteIfExists path)))))

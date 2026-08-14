@@ -240,3 +240,151 @@
         (is (= "2" (str/trim (:out run)))))
       (finally
         (Files/deleteIfExists path)))))
+
+(deftest http-host-provider-wat-imports-sync-host-not-wasi-http
+  (let [d (http-v1-descriptors)
+        wat (component-core/http-host-provider-wat
+             {:interface "http-post" :function "post"}
+             (:request d) (:result d) (:schemas d))]
+    (is (re-find #"cm32p2\|kotoba:application/http-post@1\|post" wat))
+    (is (re-find #"cm32p2\|kotoba:application/http-host@1" wat))
+    (is (not (re-find #"wasi:http" wat)))
+    (is (not (re-find #"outgoing-handler" wat)))))
+
+(deftest http-host-provider-packages-and-leaves-host-import
+  (let [d (http-v1-descriptors)
+        provider (composition/package-http-host-provider
+                  (:request d) (:result d) (:schemas d))
+        imports (set (composition/composed-world-imports (:bytes provider)))]
+    (is (= :wasm-component-provider/v1 (:format provider)))
+    (is (= :http/post (:capability provider)))
+    (is (contains? imports "kotoba:application/http-host@1.0.0"))
+    (is (contains? imports "kotoba:application/types@1.0.0"))))
+
+(defn- http-echo-body-driver-wit
+  []
+  (http-post-sequence-driver-wit))
+
+(defn- http-echo-body-driver-wat
+  "Two posts with bodies hello/xy; return sum of ok body lengths.
+  Discriminates fixed `\"ok\"` (2+2=4) and the status-sum driver (2).
+  Body length sits at retptr+28 (disc, status i64, headers list, body ptr/len)."
+  []
+  (let [mod "cm32p2|kotoba:application/http-post@1"
+        export-run "cm32p2||run"
+        url-bytes (vec (.getBytes "https://x" "UTF-8"))
+        b1 (vec (.getBytes "hello" "UTF-8"))
+        b2 (vec (.getBytes "xy" "UTF-8"))
+        url-ptr 8
+        b1-ptr 24
+        b2-ptr 32
+        r1-base 64
+        r2-base 160
+        body-len-offset 28
+        push-post
+        (fn [ret-base body-ptr body-len]
+          (str
+           "    i32.const " url-ptr "\n"
+           "    i32.const " (count url-bytes) "\n"
+           "    i32.const 0\n"
+           "    i32.const 0\n"
+           "    i32.const " body-ptr "\n"
+           "    i32.const " body-len "\n"
+           "    i64.const 1000\n"
+           "    i32.const " ret-base "\n"
+           "    call $post\n"))]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"post\""
+     " (func $post (param i32 i32 i32 i32 i32 i32 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $l1 i32) (local $l2 i32)\n"
+     (push-post r1-base b1-ptr (count b1))
+     "    i32.const " r1-base " i32.load offset=" body-len-offset " local.set $l1\n"
+     (push-post r2-base b2-ptr (count b2))
+     "    i32.const " r2-base " i32.load offset=" body-len-offset " local.set $l2\n"
+     "    local.get $l1 local.get $l2 i32.add i64.extend_i32_u)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " url-ptr ") \"" (wat-data url-bytes) "\")\n"
+     "  (data (i32.const " b1-ptr ") \"" (wat-data b1) "\")\n"
+     "  (data (i32.const " b2-ptr ") \"" (wat-data b2) "\")\n"
+     ")\n")))
+
+(defn- package-http-echo-body-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-http-echo-body-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (http-echo-body-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (http-echo-body-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:http/post]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest http-echo-provider-returns-request-body-length-sum
+  "wasm-aot evidence (ADR 0263): echo stub round-trips the POST body.
+   hello(5)+xy(2)=7. Fixed `\"ok\"` cannot produce 7."
+  (let [d (http-v1-descriptors)
+        provider (composition/package-http-echo-provider
+                  (:request d) (:result d) (:schemas d))
+        driver (package-http-echo-body-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-http-echo-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [imports (set (composition/composed-world-imports (:bytes closed)))]
+        (is (not (contains? imports "kotoba:application/http-host@1.0.0")))
+        (is (not (contains? imports "kotoba:application/http-post@1.0.0"))))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "7" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest wasmtime-denies-http-host-when-stub-is-withheld
+  "Without the echo stub, wasmtime cannot link `http-host`. That is the
+   deny path analogous to withholding WASI clocks."
+  (let [d (http-v1-descriptors)
+        provider (composition/package-http-host-provider
+                  (:request d) (:result d) (:schemas d))
+        driver (package-http-echo-body-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-http-host-deny-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (let [imports (set (composition/composed-world-imports (:bytes closed)))]
+        (is (contains? imports "kotoba:application/http-host@1.0.0")))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (let [denied (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (not (zero? (:exit denied)))
+            "withholding http-host must not still produce a body length")
+        (is (re-find #"(?i)http-host" (str (:err denied) (:out denied)))))
+      (finally
+        (Files/deleteIfExists path)))))

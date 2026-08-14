@@ -244,3 +244,145 @@
         (is (= "4" (str/trim (:out run)))))
       (finally
         (Files/deleteIfExists path)))))
+
+(deftest llm-host-provider-wat-imports-sync-host
+  (let [d (llm-v1-descriptors)
+        wat (component-core/llm-host-provider-wat
+             {:interface "llm" :function "generate"}
+             (:request d) (:result d) (:schemas d))]
+    (is (re-find #"cm32p2\|kotoba:application/llm@1\|generate" wat))
+    (is (re-find #"cm32p2\|kotoba:application/llm-host@1" wat))))
+
+(deftest llm-host-provider-packages-and-leaves-host-import
+  (let [d (llm-v1-descriptors)
+        provider (composition/package-llm-host-provider
+                  (:request d) (:result d) (:schemas d))
+        imports (set (composition/composed-world-imports (:bytes provider)))]
+    (is (= :wasm-component-provider/v1 (:format provider)))
+    (is (= :llm/generate (:capability provider)))
+    (is (contains? imports "kotoba:application/llm-host@1.0.0"))))
+
+(defn- llm-echo-prompt-driver-wit
+  []
+  (llm-generate-sequence-driver-wit))
+
+(defn- llm-echo-prompt-driver-wat
+  "Two generates with prompts hello/xy; return sum of completion text lengths.
+  Discriminates fixed `\"ok\"` (2+2=4). Text length sits at retptr+12."
+  []
+  (let [mod "cm32p2|kotoba:application/llm@1"
+        export-run "cm32p2||run"
+        model-bytes (vec (.getBytes "m" "UTF-8"))
+        p1 (vec (.getBytes "hello" "UTF-8"))
+        p2 (vec (.getBytes "xy" "UTF-8"))
+        model-ptr 8
+        p1-ptr 16
+        p2-ptr 24
+        r1-base 64
+        r2-base 160
+        text-len-offset 12
+        push-gen
+        (fn [ret-base prompt-ptr prompt-len]
+          (str
+           "    i32.const " model-ptr "\n"
+           "    i32.const " (count model-bytes) "\n"
+           "    i32.const 0\n"
+           "    i32.const 0\n"
+           "    i32.const " prompt-ptr "\n"
+           "    i32.const " prompt-len "\n"
+           "    i64.const 64\n"
+           "    i64.const 0\n"
+           "    i32.const " ret-base "\n"
+           "    call $generate\n"))]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"generate\""
+     " (func $generate (param i32 i32 i32 i32 i32 i32 i64 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 256 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $l1 i32) (local $l2 i32)\n"
+     (push-gen r1-base p1-ptr (count p1))
+     "    i32.const " r1-base " i32.load offset=" text-len-offset " local.set $l1\n"
+     (push-gen r2-base p2-ptr (count p2))
+     "    i32.const " r2-base " i32.load offset=" text-len-offset " local.set $l2\n"
+     "    local.get $l1 local.get $l2 i32.add i64.extend_i32_u)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " model-ptr ") \"" (wat-data model-bytes) "\")\n"
+     "  (data (i32.const " p1-ptr ") \"" (wat-data p1) "\")\n"
+     "  (data (i32.const " p2-ptr ") \"" (wat-data p2) "\")\n"
+     ")\n")))
+
+(defn- package-llm-echo-prompt-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-llm-echo-prompt-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (llm-echo-prompt-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (llm-echo-prompt-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:llm/generate]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest llm-echo-provider-returns-prompt-length-sum
+  "wasm-aot evidence (ADR 0264): echo stub round-trips the prompt as text.
+   hello(5)+xy(2)=7. Fixed `\"ok\"` cannot produce 7."
+  (let [d (llm-v1-descriptors)
+        provider (composition/package-llm-echo-provider
+                  (:request d) (:result d) (:schemas d))
+        driver (package-llm-echo-prompt-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-llm-echo-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (is (string? (wasm-tools/run-command! ["wasm-tools" "validate" (str path)])))
+      (let [imports (set (composition/composed-world-imports (:bytes closed)))]
+        (is (not (contains? imports "kotoba:application/llm-host@1.0.0"))))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "7" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(deftest wasmtime-denies-llm-host-when-stub-is-withheld
+  (let [d (llm-v1-descriptors)
+        provider (composition/package-llm-host-provider
+                  (:request d) (:result d) (:schemas d))
+        driver (package-llm-echo-prompt-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-llm-host-deny-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (let [imports (set (composition/composed-world-imports (:bytes closed)))]
+        (is (contains? imports "kotoba:application/llm-host@1.0.0")))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (let [denied (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (not (zero? (:exit denied)))
+            "withholding llm-host must not still produce a prompt length")
+        (is (re-find #"(?i)llm-host" (str (:err denied) (:out denied)))))
+      (finally
+        (Files/deleteIfExists path)))))
