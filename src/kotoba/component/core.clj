@@ -12193,9 +12193,12 @@
                 (and (vector? event-res) (= :ref (first event-res)))))))))
 
 (defn ui-provider-wat
-  "Synthetic dual-export provider for ui-v1 commit + next-event.
-  Maintains a revision counter; commit checks base-revision match and
-  node count <= 32; next-event always returns option none. No DOM."
+  "Dual-export provider for ui-v1 commit + next-event, plus host enqueue.
+
+  Commit keeps a revision counter and checks base-revision / node count.
+  next-event pops a one-slot host queue (option none when empty). The host
+  fills that slot through exported `ui-host.enqueue` — not ambient DOM.
+  Existing commit-only / empty-queue drivers stay valid: the slot starts empty."
   [commit-entry event-entry commit-req commit-res event-req event-res schemas]
   (when-not (ui-provider-shape commit-req commit-res event-req event-res schemas)
     (reject "ui provider requires ui-v1's own literal request/result shapes"
@@ -12204,17 +12207,36 @@
                            "@1|" (:function commit-entry))
         event-export (str "cm32p2|kotoba:application/" (:interface event-entry)
                           "@1|" (:function event-entry))
+        enqueue-export "cm32p2|kotoba:application/ui-host@1|enqueue"
         event-res-layout (canonical/layout event-res schemas)
+        event-layout (canonical/layout [:ref :kotoba.ui/event] schemas)
+        payload-offset (:payload-offset event-res-layout)
+        rev-off (:offset (field-by-name event-layout :revision))
+        target-off (:offset (field-by-name event-layout :target))
+        kind-off (:offset (field-by-name event-layout :kind))
+        value-off (:offset (field-by-name event-layout :value))
         max-nodes 32
+        max-kw value/keyword-value-byte-limit
+        max-text value/string-value-byte-limit
         arena-base 8
-        pages 1
+        pages 2
         capacity-bytes (* pages 65536)
-        event-size (:size event-res-layout)]
+        store-base 65536
+        target-base store-base
+        kind-base (+ target-base max-kw)
+        value-base (+ kind-base max-kw)
+        event-size (:size event-res-layout)
+        disc-store (variant-disc-store (:discriminant-size event-res-layout))]
     (str
      "(module\n"
      "  (memory (export \"cm32p2_memory\") " pages " " pages ")\n"
      "  (global $next (mut i32) (i32.const " arena-base "))\n"
      "  (global $rev (mut i64) (i64.const 0))\n"
+     "  (global $has (mut i32) (i32.const 0))\n"
+     "  (global $ev-rev (mut i64) (i64.const 0))\n"
+     "  (global $tlen (mut i32) (i32.const 0))\n"
+     "  (global $klen (mut i32) (i32.const 0))\n"
+     "  (global $vlen (mut i32) (i32.const 0))\n"
      (bounded-bump-realloc-wat capacity-bytes)
      "  (func (export \"" commit-export "\") (param $p0 i64) (param $p1 i32) (param $p2 i32) (result i32)\n"
      "    (local $ret i32)\n"
@@ -12227,11 +12249,46 @@
      "    local.get $ret)\n"
      "  (func (export \"" commit-export "_post\") (param i32)\n"
      "    i32.const " arena-base " global.set $next)\n"
+     "  (func (export \"" enqueue-export "\")"
+     " (param $rev i64) (param $tptr i32) (param $tlen i32)"
+     " (param $kptr i32) (param $klen i32)"
+     " (param $vptr i32) (param $vlen i32)\n"
+     "    local.get $tlen i32.const " max-kw " i32.gt_u if unreachable end\n"
+     "    local.get $klen i32.const " max-kw " i32.gt_u if unreachable end\n"
+     "    local.get $vlen i32.const " max-text " i32.gt_u if unreachable end\n"
+     "    i32.const " target-base " local.get $tptr local.get $tlen memory.copy\n"
+     "    i32.const " kind-base " local.get $kptr local.get $klen memory.copy\n"
+     "    i32.const " value-base " local.get $vptr local.get $vlen memory.copy\n"
+     "    local.get $rev global.set $ev-rev\n"
+     "    local.get $tlen global.set $tlen\n"
+     "    local.get $klen global.set $klen\n"
+     "    local.get $vlen global.set $vlen\n"
+     "    i32.const 1 global.set $has)\n"
+     "  (func (export \"" enqueue-export "_post\"))\n"
      "  (func (export \"" event-export "\") (param $p0 i64) (result i32)\n"
      "    (local $ret i32)\n"
      "    i32.const 0 i32.const 0 i32.const " (:alignment event-res-layout)
      " i32.const " event-size " call $realloc local.set $ret\n"
-     "    local.get $ret i32.const 0 i32.store8 offset=0\n"
+     "    global.get $has i32.eqz if\n"
+     "      local.get $ret i32.const 0 " disc-store " offset=0\n"
+     "      local.get $ret return\n"
+     "    end\n"
+     "    local.get $ret i32.const 1 " disc-store " offset=0\n"
+     "    local.get $ret global.get $ev-rev i64.store offset="
+     (+ payload-offset rev-off) "\n"
+     "    local.get $ret i32.const " target-base " i32.store offset="
+     (+ payload-offset target-off) "\n"
+     "    local.get $ret global.get $tlen i32.store offset="
+     (+ payload-offset target-off 4) "\n"
+     "    local.get $ret i32.const " kind-base " i32.store offset="
+     (+ payload-offset kind-off) "\n"
+     "    local.get $ret global.get $klen i32.store offset="
+     (+ payload-offset kind-off 4) "\n"
+     "    local.get $ret i32.const " value-base " i32.store offset="
+     (+ payload-offset value-off) "\n"
+     "    local.get $ret global.get $vlen i32.store offset="
+     (+ payload-offset value-off 4) "\n"
+     "    i32.const 0 global.set $has\n"
      "    local.get $ret)\n"
      "  (func (export \"" event-export "_post\") (param i32)\n"
      "    i32.const " arena-base " global.set $next)\n"

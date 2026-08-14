@@ -1178,8 +1178,13 @@
          "  " (:function event-entry) ": func(request: " (wit-name event-req-n)
          ") -> option<" (wit-name event-n) ">;\n"
          "}\n\n"
+         "interface ui-host {\n"
+         "  use types.{" (wit-name event-n) "};\n"
+         "  enqueue: func(event: " (wit-name event-n) ");\n"
+         "}\n\n"
          "world " interface "-provider {\n"
          "  export " interface ";\n"
+         "  export ui-host;\n"
          "}\n")))
 
 (defn package-ui-provider
@@ -1211,7 +1216,7 @@
         "--reject-legacy-names" "-o" (str component)])
       {:format :wasm-component-provider/v1
        :capability :ui/commit
-       :capabilities [:ui/commit :ui/next-event]
+       :capabilities [:ui/commit :ui/next-event :ui-host/enqueue]
        :descriptor commit-req
        :result-descriptor commit-res
        :schemas schemas
