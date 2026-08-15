@@ -139,7 +139,9 @@
   {:name :git/run :id 22 :interface "git" :function "run"
    :kit :git :provider-wasi []}
   {:name :entropy/draw :id 23 :interface "entropy" :function "draw"
-   :kit :entropy :provider-wasi []}]
+   :kit :entropy :provider-wasi []}
+  {:name :dataspace/transact :id 24 :interface "dataspace" :function "transact"
+   :kit :dataspace :provider-wasi []}]
  :provider-authority
  {:rule :kit-declared-only
   :no-inferred-wasi true

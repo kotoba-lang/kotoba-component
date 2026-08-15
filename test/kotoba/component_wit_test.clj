@@ -144,7 +144,8 @@
     (is (= :secret/get (get by-id 21)))
     (is (= :git/run (get by-id 22)))
     (is (= :entropy/draw (get by-id 23)))
-    (is (= 23 (count (:capabilities wit/contract)))))
+    (is (= :dataspace/transact (get by-id 24)))
+    (is (= 24 (count (:capabilities wit/contract)))))
   (let [ops-kir {:format :kotoba.kir/v4
                  :exports ['run]
                  :schemas {}
