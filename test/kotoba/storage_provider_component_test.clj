@@ -80,7 +80,7 @@
 (deftest storage-provider-packages-and-validates
   (let [d (storage-v1-descriptors)
         provider (composition/package-storage-provider
-                  (:request d) (:result d) (:schemas d))]
+                  (:request d) (:result d) (:schemas d) 4)]
     (is (= :wasm-component-provider/v1 (:format provider)))
     (is (= :storage/transact (:capability provider)))
     (is (= [0 97 115 109 13 0 1 0]
@@ -101,7 +101,7 @@
   (let [d (storage-v1-descriptors)
         wat (component-core/storage-provider-wat
              {:interface "storage" :function "transact"}
-             (:request d) (:result d) (:schemas d))]
+             (:request d) (:result d) (:schemas d) 4)]
     (is (re-find #"cm32p2\|kotoba:application/storage@1\|transact" wat))
     (is (re-find #"i32.const 1" wat)) ;; missing case disc
     (is (re-find #"i32.const 3 i32.ge_u" wat))))
@@ -238,7 +238,7 @@
    that performs two get transacts; Wasmtime returns missing-disc sum 2."
   (let [d (storage-v1-descriptors)
         provider (composition/package-storage-provider
-                  (:request d) (:result d) (:schemas d))
+                  (:request d) (:result d) (:schemas d) 4)
         driver (package-storage-get-sequence-driver)
         closed (composition/compose-closed driver [provider])
         path (Files/createTempFile "kotoba-storage-get-sequence-" ".wasm"
@@ -252,5 +252,125 @@
       (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
         (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
         (is (= "2" (str/trim (:out run)))))
+      (finally
+        (Files/deleteIfExists path)))))
+
+(defn- storage-kv-vector-driver-wat
+  "Six transacts: get-missing, put, get-found v1, put-conflict, delete, get-missing.
+  Return bitmask 63 when all six discriminate. Canonical found version at offset 24."
+  []
+  (let [mod "cm32p2|kotoba:application/storage@1"
+        export-run "cm32p2||run"
+        key-bytes (vec (.getBytes "k" "UTF-8"))
+        val-bytes (vec (.getBytes "v" "UTF-8"))
+        key-ptr 8
+        val-ptr 16
+        rets [64 128 192 256 320 384]
+        transact-get
+        (fn [ret]
+          (str
+           "    i32.const 0\n"
+           "    i32.const " key-ptr " i32.const " (count key-bytes) "\n"
+           "    i32.const 0 i64.const 0 i32.const 0 i64.const 0\n"
+           "    i32.const " ret " call $transact\n"))
+        transact-put
+        (fn [ret expected-disc expected-val]
+          (str
+           "    i32.const 1\n"
+           "    i32.const " key-ptr " i32.const " (count key-bytes) "\n"
+           "    i32.const " val-ptr " i64.const " (count val-bytes) "\n"
+           "    i32.const " expected-disc " i64.const " expected-val "\n"
+           "    i32.const " ret " call $transact\n"))
+        transact-delete
+        (fn [ret]
+          (str
+           "    i32.const 2\n"
+           "    i32.const " key-ptr " i32.const " (count key-bytes) "\n"
+           "    i32.const 0 i64.const 0 i32.const 0 i64.const 0\n"
+           "    i32.const " ret " call $transact\n"))]
+    (str
+     "(module\n"
+     "  (import \"" mod "\" \"transact\""
+     " (func $transact (param i32 i32 i32 i32 i64 i32 i64 i32)))\n"
+     "  (memory (export \"cm32p2_memory\") 1 1)\n"
+     "  (func (export \"cm32p2_realloc\")\n"
+     "    (param $old i32) (param $old-size i32) (param $align i32) (param $new-size i32)\n"
+     "    (result i32)\n"
+     "    local.get $old i32.eqz if (result i32) i32.const 512 else local.get $old end)\n"
+     "  (func (export \"" export-run "\") (result i64)\n"
+     "    (local $d0 i32) (local $d1 i32) (local $d2 i32)"
+     " (local $d3 i32) (local $d4 i32) (local $d5 i32)"
+     " (local $ver i64) (local $mask i32)\n"
+     (transact-get (nth rets 0))
+     "    i32.const " (nth rets 0) " i32.load8_u offset=0 local.set $d0\n"
+     (transact-put (nth rets 1) 0 0)
+     "    i32.const " (nth rets 1) " i32.load8_u offset=0 local.set $d1\n"
+     (transact-get (nth rets 2))
+     "    i32.const " (nth rets 2) " i32.load8_u offset=0 local.set $d2\n"
+     "    i32.const " (nth rets 2) " i64.load offset=24 local.set $ver\n"
+     (transact-put (nth rets 3) 1 99)
+     "    i32.const " (nth rets 3) " i32.load8_u offset=0 local.set $d3\n"
+     (transact-delete (nth rets 4))
+     "    i32.const " (nth rets 4) " i32.load8_u offset=0 local.set $d4\n"
+     (transact-get (nth rets 5))
+     "    i32.const " (nth rets 5) " i32.load8_u offset=0 local.set $d5\n"
+     "    i32.const 0 local.set $mask\n"
+     "    local.get $d0 i32.const 1 i32.eq if local.get $mask i32.const 1 i32.or local.set $mask end\n"
+     "    local.get $d1 i32.const 2 i32.eq if local.get $mask i32.const 2 i32.or local.set $mask end\n"
+     "    local.get $d2 i32.eqz local.get $ver i64.const 1 i64.eq i32.and\n"
+     "    if local.get $mask i32.const 4 i32.or local.set $mask end\n"
+     "    local.get $d3 i32.const 4 i32.eq if local.get $mask i32.const 8 i32.or local.set $mask end\n"
+     "    local.get $d4 i32.const 3 i32.eq if local.get $mask i32.const 16 i32.or local.set $mask end\n"
+     "    local.get $d5 i32.const 1 i32.eq if local.get $mask i32.const 32 i32.or local.set $mask end\n"
+     "    local.get $mask i64.extend_i32_u)\n"
+     "  (func (export \"" export-run "_post\") (param i64))\n"
+     "  (func (export \"cm32p2_initialize\"))\n"
+     "  (data (i32.const " key-ptr ") \"" (wat-data key-bytes) "\")\n"
+     "  (data (i32.const " val-ptr ") \"" (wat-data val-bytes) "\")\n"
+     ")\n")))
+
+(defn- package-storage-kv-vector-driver
+  []
+  (let [dir (Files/createTempDirectory "kotoba-storage-kv-vector-driver-"
+                                       (make-array FileAttribute 0))
+        world (.resolve dir "driver.wit")
+        core (.resolve dir "driver.wasm")
+        embedded (.resolve dir "embedded.wasm")
+        component (.resolve dir "driver.component.wasm")]
+    (try
+      (Files/writeString world (storage-get-sequence-driver-wit)
+                         (make-array java.nio.file.OpenOption 0))
+      (Files/write core (wasm-tools/parse-wat (storage-kv-vector-driver-wat))
+                   (make-array java.nio.file.OpenOption 0))
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "embed" (str world) (str core)
+        "--encoding" "utf8" "-o" (str embedded)])
+      (wasm-tools/run-command!
+       ["wasm-tools" "component" "new" (str embedded)
+        "--reject-legacy-names" "-o" (str component)])
+      {:format :wasm-component/v1
+       :imports [:storage/transact]
+       :bytes (Files/readAllBytes component)}
+      (finally
+        (doseq [path [component embedded core world]]
+          (Files/deleteIfExists path))
+        (Files/deleteIfExists dir)))))
+
+(deftest storage-kv-vector-put-get-conflict-delete-is-mask-63
+  (let [d (storage-v1-descriptors)
+        provider (composition/package-storage-provider
+                  (:request d) (:result d) (:schemas d) 4)
+        driver (package-storage-kv-vector-driver)
+        closed (composition/compose-closed driver [provider])
+        path (Files/createTempFile "kotoba-storage-kv-vector-" ".wasm"
+                                   (make-array FileAttribute 0))]
+    (try
+      (is (= :wasm-component-closed/v1 (:format closed)))
+      (Files/write path ^bytes (:bytes closed)
+                   (make-array java.nio.file.OpenOption 0))
+      (let [run (shell/sh wasmtime-binary "run" "--invoke" "run()" (str path))]
+        (is (zero? (:exit run)) (str "wasmtime err: " (:err run)))
+        (is (= "63" (str/trim (:out run)))
+            "put/get/conflict/delete must not be always-missing"))
       (finally
         (Files/deleteIfExists path)))))
