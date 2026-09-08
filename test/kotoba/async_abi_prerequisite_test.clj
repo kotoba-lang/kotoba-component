@@ -31,7 +31,7 @@
    because it is the one that still builds."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]]
             [kotoba.wasm.tools :as wasm-tools])
   (:import [java.nio.file Files]

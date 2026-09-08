@@ -1,6 +1,6 @@
 (ns kotoba.component-test
   (:require [clojure.java.shell :as shell]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]]
             [kotoba.component.core :as core]
             [kotoba.component.composition]

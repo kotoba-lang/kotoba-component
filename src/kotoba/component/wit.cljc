@@ -13,7 +13,7 @@
   filesystem relative to the working directory and uses node:crypto, so it is
   a compiler-side tool namespace, not browser code."
   (:require [clojure.edn :as edn]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.abi.contract :as abi]
             #?(:clj [clojure.java.io :as io])
             #?@(:cljs [["fs" :as fs]
@@ -45,7 +45,7 @@
   (let [source (cond (keyword? value) (subs (str value) 1)
                      (symbol? value) (str value)
                      :else (str value))
-        result (-> source str/lower-case
+        result (-> source str/lower
                    (str/replace #"[^a-z0-9-]+" "-")
                    (str/replace #"-+" "-")
                    (str/replace #"(^-|-$)" ""))]

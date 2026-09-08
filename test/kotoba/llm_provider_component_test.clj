@@ -3,7 +3,7 @@
    Multi-step Wasmtime generate sequence (two fixed-ok) added as deepen slice."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]

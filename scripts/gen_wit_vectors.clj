@@ -8,7 +8,7 @@
 ;;   clojure -M -e "(load-file \"scripts/gen_wit_vectors.clj\")"
 
 (require '[kotoba.component.wit :as wit]
-         '[clojure.string :as str])
+         '[kotoba.lang.text :as str])
 
 (defn- fn-form [body]
   {:name 'main :params [] :param-types [] :result :i64 :body body})

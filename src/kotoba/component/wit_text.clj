@@ -12,7 +12,7 @@
   stay separate functions: printed component WIT nests packages inside
   braces, a vendored `.wit` file declares its package with a semicolon and
   puts interfaces at the top level."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def ^:private interface-open #"\s*interface ([a-z0-9-]+) \{")
 
