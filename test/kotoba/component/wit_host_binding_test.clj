@@ -6,7 +6,7 @@
   import through anything weaker than guard-component-ability-call, but until
   this declaration existed it could only assume that requirement rather than
   read it. An assumption cannot be violated and therefore cannot be detected."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.lang.text] [clojure.test :refer [deftest is testing]]
             [kotoba.component.wit :as wit]))
 
 (def ^:private kir
@@ -49,4 +49,4 @@
           b (wit/emit kir)]
       (is (= (:source a) (:source b)))
       (is (= (:sha256 a) (:sha256 b)))
-      (is (not (clojure.string/includes? (:source a) "guard-component-ability-call"))))))
+      (is (not (kotoba.lang.text/includes? (:source a) "guard-component-ability-call"))))))

@@ -3,7 +3,7 @@
    Multi-step Wasmtime: append, append+read, ring oldest-drop, and truncation flag."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]

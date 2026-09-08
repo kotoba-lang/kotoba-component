@@ -34,7 +34,7 @@
   as an ordinary test."
   (:require [clojure.edn :as edn]
             [clojure.java.io :as io]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.component.composition :as composition]
             [kotoba.wasm.tools :as wasm-tools]))
 

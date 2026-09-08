@@ -22,7 +22,7 @@
 
   So this namespace emits a REQUEST -- everything the compiler genuinely knows
   -- and names the two keys a composer must add. Requesting is not granting."
-  (:require [clojure.string :as str])
+  (:require [kotoba.lang.text :as str])
   (:import [java.nio.charset StandardCharsets]
            [java.security MessageDigest]))
 

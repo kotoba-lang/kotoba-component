@@ -1,6 +1,6 @@
 (ns kotoba.component.core
   "Dedicated standard32 core emission for qualified Component Model slices."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.wasm.core :as wasm]
             [kotoba.wasm.canonical-abi :as canonical]
             [kotoba.component.wit :as component-wit]
@@ -4181,7 +4181,7 @@
   Underscores and other non-[a-z0-9-] runes become hyphens so source names
   like `http_url_ok` package as `http-url-ok`."
   (let [source (name symbol)
-        result (-> source str/lower-case
+        result (-> source str/lower
                    (str/replace #"[^a-z0-9-]+" "-")
                    (str/replace #"-+" "-")
                    (str/replace #"(^-|-$)" ""))]

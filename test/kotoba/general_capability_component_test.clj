@@ -11,7 +11,7 @@
   KIR directly -- the same way `component-artifact-test` does."
   (:require [clojure.java.shell :as shell]
             [clojure.test :refer [deftest is testing]]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.component.artifact :as artifact]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]

@@ -3,7 +3,7 @@
    Multi-step Wasmtime post sequence (two fixed-ok posts) added as deepen slice."
   (:require [clojure.java.io :as io]
             [clojure.java.shell :as shell]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is]]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]

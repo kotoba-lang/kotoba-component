@@ -2,7 +2,7 @@
   "Closed-world composition support for compiler-qualified Component artifacts."
   (:require [clojure.java.io :as io]
             [clojure.set :as set]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kotoba.wasm.canonical-abi :as canonical]
             [kotoba.component.core :as component-core]
             [kotoba.component.wit :as component-wit]
@@ -46,7 +46,7 @@
 
 (defn- wit-name [value]
   (-> (if (keyword? value) (subs (str value) 1) (str value))
-      str/lower-case
+      str/lower
       (str/replace #"[^a-z0-9-]+" "-")
       (str/replace #"-+" "-")
       (str/replace #"(^-|-$)" "")))
