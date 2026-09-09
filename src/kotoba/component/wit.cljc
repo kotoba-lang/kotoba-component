@@ -203,13 +203,49 @@
 (defn- capability-index []
   (into {} (map (juxt :id identity) (:capabilities contract))))
 
+(defn- host-id
+  "A capability id as an integer this namespace can order, deduplicate and look
+  up with.
+
+  On ClojureScript an i64 is a BigInt, and a capability id arrives from KIR as
+  one -- `kotoba.compiler.frontend/effect-capability-id` produces it. cljs.core
+  cannot handle a BigInt in any of the three ways this file needs: `sort-by`
+  answers `Cannot compare 6 to 5`, and `distinct` and a map lookup keyed by the
+  id both answer `Cannot create property closure_uid_... on bigint`, because a
+  primitive cannot carry the hash property they attach. Measured 2026-09-09
+  against `lang/wit-vectors.edn`: all four vectors that carry a capability emit
+  cleanly with Number ids and throw with BigInt ids -- one of the two messages
+  each, depending on whether the vector has one capability or several.
+
+  Nothing fed this file a BigInt until now, which is why the cross-
+  implementation verifier passes: `verify_wit_cljs.cljs` reads its vectors with
+  `cljs.reader`, and an integer token in EDN is a Number. The vectors were
+  right about the WIT and silent about the ids.
+
+  The id is narrowed once, here, where it enters from KIR -- so `distinct`,
+  the `sort-by` below, `capability-index`'s lookup and `abi/capability-import-
+  name` all see the same integer. It is a wire id in [0,255], so the
+  conversion is exact; one that is not exactly representable is refused rather
+  than truncated into a different capability. On the JVM this is `identity`,
+  so no emitted byte moves."
+  [id]
+  #?(:clj id
+     :cljs (if (try (identical? js/BigInt (.-constructor id))
+                    (catch :default _ false))
+             (if (<= id (js/BigInt js/Number.MAX_SAFE_INTEGER))
+               (js/Number id)
+               (reject "capability id is not exactly representable as a host integer"
+                       {:id (str id)}))
+             id)))
+
 (defn- capability-contracts [kir]
   (->> (:functions kir)
        (mapcat #(tree-seq coll? seq (:body %)))
        (keep (fn [form]
                (when (and (seq? form) (= 'typed-cap-call (first form)))
                  (let [[_ id request-type result-type] form]
-                   {:id id :request-type request-type :result-type result-type}))))
+                   {:id (host-id id)
+                    :request-type request-type :result-type result-type}))))
        distinct
        (sort-by (juxt :id (comp pr-str :request-type) (comp pr-str :result-type)))
        vec))
