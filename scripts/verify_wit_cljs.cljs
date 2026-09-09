@@ -15,6 +15,7 @@
 ;;   nbb --classpath src scripts/verify_wit_cljs.cljs
 
 (require '[kotoba.component.wit :as wit]
+         '[clojure.walk :as walk]
          '[cljs.reader :as reader]
          '["fs" :as fs])
 
@@ -49,3 +50,52 @@
       (js/process.exit 1))
   (println "ok:" (count (:vectors table))
            "WIT worlds emit identical text and digests under ClojureScript"))
+
+;; ---------------------------------------------------------------------------
+;; The same vectors with the ids a COMPILER carries.
+;;
+;; Everything above reads its ids out of EDN through `cljs.reader`, where an
+;; integer token is a `js/Number`. A capability id does not arrive that way in
+;; a real compile: on ClojureScript an i64 is a BigInt, and
+;; `kotoba.compiler.frontend/effect-capability-id` produces one. cljs.core can
+;; neither `sort-by`, nor `distinct`, nor key a map with a BigInt, so every
+;; vector below threw until 2026-09-09 while the check above reported five
+;; identical worlds. The vectors were right about the WIT and silent about the
+;; ids.
+;;
+;; This asks for EQUALITY rather than for the absence of a throw: a fix that
+;; stopped the exception and changed a digest would pass a try/catch and fail
+;; here.
+
+(defn- to-wire-ids [kir]
+  (walk/postwalk
+   (fn [form]
+     (if (and (seq? form) (= 'typed-cap-call (first form)))
+       (cons (first form) (cons (js/BigInt (second form)) (drop 2 form)))
+       form))
+   kir))
+
+(def wire-failures
+  (vec (for [{:keys [id kir]} (:vectors table)
+             :let [want (wit/emit kir)
+                   got (try (wit/emit (to-wire-ids kir))
+                            (catch :default e {:threw (.-message e)}))]
+             :when (or (:threw got)
+                       (not= (:sha256 want) (:sha256 got))
+                       (not= (:imports want) (:imports got)))]
+         {:id id :threw (:threw got)
+          :expected (:sha256 want) :actual (:sha256 got)})))
+
+(doseq [f wire-failures]
+  (println "FAIL" (:id f) "with BigInt capability ids")
+  (if (:threw f)
+    (println "  threw:" (:threw f))
+    (do (println "   number ids:" (pr-str (:expected f)))
+        (println "   bigint ids:" (pr-str (:actual f))))))
+
+(if (seq wire-failures)
+  (do (println "\n" (count wire-failures)
+               "vector(s) emit a different world for the ids a compiler holds")
+      (js/process.exit 1))
+  (println "ok:" (count (:vectors table))
+           "WIT worlds are identical for Number and BigInt capability ids"))
