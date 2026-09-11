@@ -23,9 +23,10 @@
   So this namespace emits a REQUEST -- everything the compiler genuinely knows
   -- and names the two keys a composer must add. Requesting is not granting."
   {:kotoba/export [cid cid-of-text complete composer-supplied-keys envelope-keys format-tag request request-keys]}
-  (:require [kotoba.lang.text :as str])
-  (:import [java.nio.charset StandardCharsets]
-           [java.security MessageDigest]))
+  (:require [kotoba.lang.text :as str]
+            #?@(:cljs [["node:crypto" :as crypto]]))
+  #?(:clj (:import [java.nio.charset StandardCharsets]
+                   [java.security MessageDigest])))
 
 (def format-tag :kotoba.component-admission-request/v1)
 
@@ -49,40 +50,48 @@
 
 (def ^:private base32-alphabet "abcdefghijklmnopqrstuvwxyz234567")
 
-(defn- base32-lower-nopad [^bytes bytes]
-  (let [out (StringBuilder.)
-        n (alength bytes)
-        emit! (fn [chunk] (.append out (.charAt base32-alphabet (bit-and chunk 0x1f))))]
+(defn- octets
+  "The bytes as a vector of 0..255, whichever host container they arrived in."
+  [bytes]
+  #?(:clj (mapv #(bit-and (int %) 0xff) bytes)
+     :cljs (vec (js/Array.from bytes))))
+
+(defn- base32-lower-nopad [bytes]
+  (let [bytes (octets bytes)
+        n (count bytes)
+        out (volatile! [])
+        emit! (fn [chunk] (vswap! out conj (.charAt base32-alphabet (bit-and chunk 0x1f))))]
     (loop [i 0 acc 0 bits 0]
       (if (< i n)
-        (let [acc (bit-or (bit-shift-left acc 8) (bit-and (aget bytes i) 0xff))
+        (let [acc (bit-or (bit-shift-left acc 8) (nth bytes i))
               [acc bits] (loop [acc acc bits (+ bits 8)]
                            (if (>= bits 5)
                              (do (emit! (unsigned-bit-shift-right acc (- bits 5)))
                                  (recur acc (- bits 5)))
                              [acc bits]))]
-          (recur (inc i) acc bits))
+          ;; keep the accumulator small: only the low `bits` bits are live
+          (recur (inc i) (bit-and acc (dec (bit-shift-left 1 bits))) bits))
         (do (when (pos? bits) (emit! (bit-shift-left acc (- 5 bits))))
-            (.toString out))))))
+            (apply str @out))))))
 
-(defn- sha256-bytes ^bytes [^bytes input]
-  (.digest (MessageDigest/getInstance "SHA-256") input))
+(defn- sha256-bytes [input]
+  #?(:clj (.digest (MessageDigest/getInstance "SHA-256") ^bytes input)
+     :cljs (-> (.createHash crypto "sha256") (.update input) (.digest))))
 
 (defn cid
   "CIDv1 of `input` bytes: multibase 'b' + base32(0x01 0x55 0x12 0x20 digest).
-  0x01 = CID version 1, 0x55 = raw codec, 0x12/0x20 = sha2-256 / 32 bytes."
-  [^bytes input]
-  (let [digest (sha256-bytes input)
-        prefixed (byte-array (+ 4 (alength digest)))]
-    (aset-byte prefixed 0 (unchecked-byte 0x01))
-    (aset-byte prefixed 1 (unchecked-byte 0x55))
-    (aset-byte prefixed 2 (unchecked-byte 0x12))
-    (aset-byte prefixed 3 (unchecked-byte 0x20))
-    (System/arraycopy digest 0 prefixed 4 (alength digest))
-    (str "b" (base32-lower-nopad prefixed))))
+  0x01 = CID version 1, 0x55 = raw codec, 0x12/0x20 = sha2-256 / 32 bytes.
 
-(defn cid-of-text [^String text]
-  (cid (.getBytes text StandardCharsets/UTF_8)))
+  Portable since 2026-09-11 (amu ADR 0348 iteration 5): the digest comes from
+  `MessageDigest` on the JVM and `node:crypto` on Node, and the base32 walk
+  runs over a vector of octets on both. `admission-portable-test` pins three
+  vectors produced by the JVM implementation before the port."
+  [input]
+  (str "b" (base32-lower-nopad (into [0x01 0x55 0x12 0x20] (octets (sha256-bytes input))))))
+
+(defn cid-of-text [text]
+  (cid #?(:clj (.getBytes ^String text StandardCharsets/UTF_8)
+          :cljs (js/Buffer.from text "utf8"))))
 
 ;; --- request ----------------------------------------------------------------
 
