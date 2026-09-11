@@ -5,7 +5,7 @@
 ;; so ClojureScript could not emit a world at all. These vectors are what the
 ;; comparison runs against.
 ;;
-;;   clojure -M -e "(load-file \"scripts/gen_wit_vectors.clj\")"
+;;   clojure -M -e "(load-file \"scripts/gen_wit_vectors.cljk\")"
 
 (require '[kotoba.component.wit :as wit]
          '[kotoba.lang.text :as str])
@@ -63,7 +63,7 @@
       (str ";; Frozen WIT emission vectors (CI6, WIT layer).\n"
            ";;\n"
            ";; kotoba.component.wit is now .cljc, so ClojureScript can emit a world\n"
-           ";; from the same checked KIR. scripts/verify_wit_cljs.cljs recomputes\n"
+           ";; from the same checked KIR. scripts/verify_wit_cljs.cljk recomputes\n"
            ";; every :source and :sha256 below and fails on any difference.\n"
            ";;\n"
            ";; The WIT text is the cross-implementation contract; the digest is a\n"
@@ -72,7 +72,7 @@
            ";; differed would mean the hashing input was not what it claims.\n"
            ";;\n"
            ";; DO NOT hand-edit a digest to make a run pass.\n"
-           ";; Regenerate: clojure -M -e \"(load-file \\\"scripts/gen_wit_vectors.clj\\\")\"\n\n"
+           ";; Regenerate: clojure -M -e \"(load-file \\\"scripts/gen_wit_vectors.cljk\\\")\"\n\n"
            "{:kotoba.component.wit-vectors/version 1\n"
            " :vectors\n"
            " [\n"
