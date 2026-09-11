@@ -10,7 +10,7 @@
 ;; differed would mean the hashing input was not what it claims.
 ;;
 ;; DO NOT hand-edit a digest to make a run pass.
-;; Regenerate: clojure -M -e "(load-file \"scripts/gen_wit_vectors.cljk\")"
+;; Regenerate: kbb -M -e "(load-file \"scripts/gen_wit_vectors.cljk\")"
 
 {:kotoba.component.wit-vectors/version 1
  :vectors
