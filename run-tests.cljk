@@ -8,7 +8,8 @@
 ;; being required is not being run.
 (ns run-tests
   (:require [cljs.test :as t]
-            [kotoba.component.admission-portable-test]))
+            [kotoba.component.admission-portable-test]
+            [kotoba.component.core-portable-test]))
 
 (defmethod t/report [:cljs.test/default :end-run-tests] [m]
   (println (str "\nnbb: " (:test m) " tests, " (:pass m) " passed, "
@@ -19,4 +20,5 @@
   (when (pos? (+ (or (:fail m) 0) (or (:error m) 0)))
     (set! (.-exitCode js/process) 1)))
 
-(t/run-tests 'kotoba.component.admission-portable-test)
+(t/run-tests 'kotoba.component.admission-portable-test
+             'kotoba.component.core-portable-test)

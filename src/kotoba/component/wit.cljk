@@ -18,18 +18,34 @@
             [kotoba.abi.contract :as abi]
             #?(:clj [clojure.java.io :as io])
             #?@(:cljs [["fs" :as fs]
-                       ["node:crypto" :as crypto]]))
+                       ["node:crypto" :as crypto]
+                       ["node:path" :as path]
+                       [nbb.classpath :as classpath]]))
   #?(:clj (:import [java.nio.charset StandardCharsets]
                    [java.security MessageDigest])))
 
 (def contract-resource "kotoba/lang/component-model-v1.edn")
 
+#?(:cljs
+   (defn- resource-path
+     "The contract file as a classpath resource on Node. nbb has no
+     `io/resource`, but it does have a classpath: every `--classpath` entry
+     is probed for the resource's path, the way the JVM probes its own. Until
+     2026-09-11 this read `resources/<resource>` relative to the working
+     directory, which is this repository's root -- and nothing else's. amu
+     requiring this namespace from its own directory got ENOENT."
+     []
+     (let [candidates (concat (map #(path/join % contract-resource)
+                                   (str/split (classpath/get-classpath) #":"))
+                              [(str "resources/" contract-resource)])]
+       (or (first (filter #(fs/existsSync %) candidates))
+           (throw (ex-info "component contract resource is not on the classpath"
+                           {:phase :component-wit :resource contract-resource}))))))
+
 (def contract
   (edn/read-string
    #?(:clj (slurp (io/resource contract-resource))
-      ;; No classpath resources on Node. Read the same file from the
-      ;; repository's resources/ root, so both platforms load identical bytes.
-      :cljs (fs/readFileSync (str "resources/" contract-resource) "utf8"))))
+      :cljs (fs/readFileSync (resource-path) "utf8"))))
 
 (defn- reject [message data]
   (throw (ex-info message (assoc data :phase :component-wit))))
@@ -318,14 +334,13 @@
   (when-not (contains? #{:kotoba.kir/v3 :kotoba.kir/v4} (:format kir))
     (reject "WIT generation requires checked KIR" {:format (:format kir)}))
   (if typed-capability-v3?
-    ;; The v3 profile serves the authoritative WIT bytes out of a classpath
-    ;; resource in the pinned ABI dependency, and that accessor is :clj-only
-    ;; there. So this one profile stays JVM-bound; the default lowering below
-    ;; — the part that turns checked KIR into a world — is portable and is
-    ;; what the cross-implementation vectors compare.
-    (let [source #?(:clj (abi/typed-capability-wit-v3)
-                    :cljs (reject "typed-capability-v3 WIT is JVM-only: its authoritative source is a classpath resource in kotoba-lang/abi"
-                                  {:profile :typed-capability-v3}))
+    ;; The v3 profile serves the authoritative WIT bytes from the pinned ABI
+    ;; dependency. That accessor was `:clj`-only when this branch was written
+    ;; (it read the WIT off the classpath), so this profile refused on Node;
+    ;; kotoba-lang/abi has embedded the bytes since (`kotoba.abi.wit-data`)
+    ;; and serves both hosts. The refusal here outlived its reason until
+    ;; 2026-09-11, when the first Node run of the encoder hit it.
+    (let [source (abi/typed-capability-wit-v3)
           profile (get-in contract [:profiles :typed-capability-v3])]
       (when-not (= {:target abi/component-target-v2
                     :world abi/typed-capability-world-v3}
