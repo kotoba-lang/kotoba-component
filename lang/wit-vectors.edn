@@ -1,7 +1,7 @@
 ;; Frozen WIT emission vectors (CI6, WIT layer).
 ;;
 ;; kotoba.component.wit is now .cljc, so ClojureScript can emit a world
-;; from the same checked KIR. scripts/verify_wit_cljs.cljs recomputes
+;; from the same checked KIR. scripts/verify_wit_cljs.cljk recomputes
 ;; every :source and :sha256 below and fails on any difference.
 ;;
 ;; The WIT text is the cross-implementation contract; the digest is a
@@ -10,7 +10,7 @@
 ;; differed would mean the hashing input was not what it claims.
 ;;
 ;; DO NOT hand-edit a digest to make a run pass.
-;; Regenerate: clojure -M -e "(load-file \"scripts/gen_wit_vectors.clj\")"
+;; Regenerate: clojure -M -e "(load-file \"scripts/gen_wit_vectors.cljk\")"
 
 {:kotoba.component.wit-vectors/version 1
  :vectors

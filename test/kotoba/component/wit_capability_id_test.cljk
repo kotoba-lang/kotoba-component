@@ -8,7 +8,7 @@
   `Cannot create property closure_uid_… on bigint`, because a primitive cannot
   carry the hash property they attach.
 
-  Nothing had fed it one. `scripts/verify_wit_cljs.cljs` reads
+  Nothing had fed it one. `scripts/verify_wit_cljs.cljk` reads
   `lang/wit-vectors.edn` with `cljs.reader`, where an integer token is a
   Number, so the cross-implementation check compared the right WIT with the
   wrong ids and passed. This file is `.cljc` on purpose: the defect is
