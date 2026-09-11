@@ -12,6 +12,7 @@
   The ClojureScript branch targets Node (nbb): it reads the contract from the
   filesystem relative to the working directory and uses node:crypto, so it is
   a compiler-side tool namespace, not browser code."
+  {:kotoba/export [contract contract-resource emit host-binding-contract required-host-guard type-text]}
   (:require [clojure.edn :as edn]
             [kotoba.lang.text :as str]
             [kotoba.abi.contract :as abi]

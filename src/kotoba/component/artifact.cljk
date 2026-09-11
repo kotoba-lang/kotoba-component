@@ -1,5 +1,6 @@
 (ns kotoba.component.artifact
   "Validated Component Model packaging for qualified Canonical ABI slices."
+  {:kotoba/export [assert-qualified-slice! assert-scalar-slice! package target tool-version]}
   (:require [kotoba.component.core :as component-core]
             [kotoba.wasm.tools :as wasm-tools])
   (:import [java.nio.file Files]

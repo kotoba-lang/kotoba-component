@@ -1,5 +1,6 @@
 (ns kotoba.component.composition
   "Closed-world composition support for compiler-qualified Component artifacts."
+  {:kotoba/export [assert-declared-wasi-imports! clock-wasi-imports compose-closed compose-with-declared-wasi composed-world-imports composed-world-wit package-clock-provider package-clock-wasi-provider package-http-echo-provider package-http-echo-stub package-http-get-stream-provider package-http-host-provider package-http-ingress-provider package-http-provider package-llm-echo-provider package-llm-echo-stub package-llm-host-provider package-llm-provider package-log-provider package-object-get-stream-cm-resource-provider package-object-get-stream-linear-table-provider package-object-get-stream-provider package-object-store-put-get-provider package-object-write-provider package-record-identity-provider package-scalar-identity-provider package-state-provider package-storage-provider package-structural-union-identity-provider package-ui-provider package-variant-asymmetric-provider package-variant-identity-provider plug-host-stub wac-version]}
   (:require [clojure.java.io :as io]
             [clojure.set :as set]
             [kotoba.lang.text :as str]
