@@ -12,7 +12,7 @@
 ;;
 ;; Run from the repository root:
 ;;
-;;   nbb --classpath src scripts/verify_wit_cljs.cljk
+;;   kbb --backend sci --classpath src scripts/verify_wit_cljs.cljk
 
 (require '[kotoba.component.wit :as wit]
          '[clojure.walk :as walk]

@@ -155,5 +155,5 @@ as the top-level transforms.
 ## Test
 
 ```bash
-clojure -M:test
+kbb -M:test
 ```

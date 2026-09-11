@@ -5,7 +5,7 @@
 ;; so ClojureScript could not emit a world at all. These vectors are what the
 ;; comparison runs against.
 ;;
-;;   clojure -M -e "(load-file \"scripts/gen_wit_vectors.cljk\")"
+;;   kbb -M -e "(load-file \"scripts/gen_wit_vectors.cljk\")"
 
 (require '[kotoba.component.wit :as wit]
          '[kotoba.lang.text :as str])
@@ -72,7 +72,7 @@
            ";; differed would mean the hashing input was not what it claims.\n"
            ";;\n"
            ";; DO NOT hand-edit a digest to make a run pass.\n"
-           ";; Regenerate: clojure -M -e \"(load-file \\\"scripts/gen_wit_vectors.cljk\\\")\"\n\n"
+           ";; Regenerate: kbb -M -e \"(load-file \\\"scripts/gen_wit_vectors.cljk\\\")\"\n\n"
            "{:kotoba.component.wit-vectors/version 1\n"
            " :vectors\n"
            " [\n"
