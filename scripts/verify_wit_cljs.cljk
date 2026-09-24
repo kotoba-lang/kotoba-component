@@ -15,7 +15,7 @@
 ;;   kbb --backend sci --classpath src scripts/verify_wit_cljs.cljk
 
 (require '[kotoba.component.wit :as wit]
-         '[clojure.walk :as walk]
+         '[kotoba.lang.coll :as walk]
          '[cljs.reader :as reader]
          '["fs" :as fs])
 

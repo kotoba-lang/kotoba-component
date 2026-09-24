@@ -1,7 +1,7 @@
 (ns kotoba.ui-provider-component-test
   "W5 remaining wasm packaging: synthetic ui-v1 dual-export component provider.
    Multi-step Wasmtime: commit sequence and commit+next-event dual-export walk."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- ref-ify-record
   [descriptor]
@@ -384,9 +384,9 @@
 (defn- ui-enqueue-event-driver-wat []
   (let [ui "cm32p2|kotoba:application/ui@1"
         host "cm32p2|kotoba:application/ui-host@1"
-        target-bytes (vec (.getBytes "btn" "UTF-8"))
-        kind-bytes (vec (.getBytes "click" "UTF-8"))
-        value-bytes (vec (.getBytes "x" "UTF-8"))
+        target-bytes (vec (kbytes/utf8-bytes "btn"))
+        kind-bytes (vec (kbytes/utf8-bytes "click"))
+        value-bytes (vec (kbytes/utf8-bytes "x"))
         tptr 8
         kptr (+ tptr (count target-bytes))
         vptr (+ kptr (count kind-bytes))

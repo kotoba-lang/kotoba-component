@@ -1,7 +1,7 @@
 (ns kotoba.storage-provider-component-test
   "W5 remaining kit wasm packaging: synthetic storage-v1 component provider.
    Multi-step Wasmtime get→missing sequence added as deepen slice."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -169,7 +169,7 @@
   []
   (let [mod "cm32p2|kotoba:application/storage@1"
         export-run "cm32p2||run"
-        key-bytes (vec (.getBytes "k" "UTF-8"))
+        key-bytes (vec (kbytes/utf8-bytes "k"))
         key-ptr 8
         r1-base 64
         r2-base 128
@@ -261,8 +261,8 @@
   []
   (let [mod "cm32p2|kotoba:application/storage@1"
         export-run "cm32p2||run"
-        key-bytes (vec (.getBytes "k" "UTF-8"))
-        val-bytes (vec (.getBytes "v" "UTF-8"))
+        key-bytes (vec (kbytes/utf8-bytes "k"))
+        val-bytes (vec (kbytes/utf8-bytes "v"))
         key-ptr 8
         val-ptr 16
         rets [64 128 192 256 320 384]

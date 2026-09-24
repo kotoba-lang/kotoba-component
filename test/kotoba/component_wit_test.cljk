@@ -1,9 +1,7 @@
 (ns kotoba.component-wit-test
-  (:require [kotoba.test :refer [deftest is testing]]
-            [clojure.java.shell :as shell]
-            [kotoba.component.wit :as wit])
-  (:import [java.nio.file Files]
-           [java.nio.file.attribute FileAttribute]))
+  (:require [kotoba.io :as kio] [kotoba.test :refer [deftest is testing]]
+            [kotoba.process :as shell]
+            [kotoba.component.wit :as wit]))
 
 (def kir
   {:format :kotoba.kir/v4
@@ -43,14 +41,13 @@
     (is (not (re-find #"wasi:filesystem|wasi:sockets" (:source a))))))
 
 (deftest emitted-package-is-accepted-by-the-official-wit-toolchain
-  (let [path (Files/createTempFile "kotoba-component-" ".wit"
-                                   (make-array FileAttribute 0))]
+  (let [path (kio/temp-file "kotoba-component-" ".wit")]
     (try
-      (Files/writeString path (:source (wit/emit kir)) (make-array java.nio.file.OpenOption 0))
+      (kio/write-string path (:source (wit/emit kir)))
       (let [result (shell/sh "wasm-tools" "component" "embed" (str path) "--dummy" "-t")]
         (is (zero? (:exit result)) (:err result))
         (is (re-find #"component-type" (:out result))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest sealed-inline-record-exports-use-their-nominal-wit-type
   (let [record-type [:record :app/point [[:x :i64] [:visible :bool]]]

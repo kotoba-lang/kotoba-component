@@ -1,14 +1,12 @@
 (ns kotoba.component-test
-  (:require [clojure.java.shell :as shell]
+  (:require [kotoba.io :as kio] [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
             [kotoba.component.core :as core]
             [kotoba.component.composition]
             [kotoba.component.admission]
             [kotoba.component.artifact :as artifact]
-            [kotoba.component.wit :as wit])
-  (:import [java.nio.file Files]
-           [java.nio.file.attribute FileAttribute]))
+            [kotoba.component.wit :as wit]))
 
 ;; Load gate: the split must not break namespace resolution. Each extracted
 ;; namespace must load standalone from this repo's own dependency closure.
@@ -253,17 +251,13 @@
   (let [world (wit/emit aggregate-match-kir)
         core-bytes (core/emit aggregate-match-kir :wasm32-wasi-kotoba-v1)
         component (artifact/package core-bytes aggregate-match-kir world)
-        component-path (Files/createTempFile
-                        "kotoba-component-aggregate-match-" ".wasm"
-                        (make-array FileAttribute 0))
-        core-path (Files/createTempFile
-                   "kotoba-component-aggregate-match-core-" ".wasm"
-                   (make-array FileAttribute 0))]
+        component-path (kio/temp-file
+                        "kotoba-component-aggregate-match-" ".wasm")
+        core-path (kio/temp-file
+                   "kotoba-component-aggregate-match-core-" ".wasm")]
     (try
-      (Files/write component-path ^bytes (:bytes component)
-                   (make-array java.nio.file.OpenOption 0))
-      (Files/write core-path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes component-path ^bytes (:bytes component))
+      (kio/write-bytes core-path ^bytes core-bytes)
       (is (= :structural-union-match-module (:canonical-lowering component)))
       (doseq [[invoke expected]
               [["choose-point(none, 9)" "9"]
@@ -287,8 +281,8 @@
         (is (= "9" (str/trim (:out inactive))))
         (is (not (zero? (:exit active)))))
       (finally
-        (Files/deleteIfExists component-path)
-        (Files/deleteIfExists core-path)))))
+        (kio/delete-if-exists component-path)
+        (kio/delete-if-exists core-path)))))
 
 (def string-record-match-kir
   {:format :kotoba.kir/v4
@@ -322,17 +316,13 @@
   (let [world (wit/emit string-record-match-kir)
         core-bytes (core/emit string-record-match-kir :wasm32-wasi-kotoba-v1)
         component (artifact/package core-bytes string-record-match-kir world)
-        component-path (Files/createTempFile
-                        "kotoba-component-indirect-string-match-" ".wasm"
-                        (make-array FileAttribute 0))
-        core-path (Files/createTempFile
-                   "kotoba-component-indirect-string-match-core-" ".wasm"
-                   (make-array FileAttribute 0))]
+        component-path (kio/temp-file
+                        "kotoba-component-indirect-string-match-" ".wasm")
+        core-path (kio/temp-file
+                   "kotoba-component-indirect-string-match-core-" ".wasm")]
     (try
-      (Files/write component-path ^bytes (:bytes component)
-                   (make-array java.nio.file.OpenOption 0))
-      (Files/write core-path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes component-path ^bytes (:bytes component))
+      (kio/write-bytes core-path ^bytes core-bytes)
       (is (= :structural-union-match-module (:canonical-lowering component)))
       (doseq [[invoke expected]
               [["label-size(none, 9)" "9"]
@@ -359,8 +349,8 @@
         (is (not (zero? (:exit over-bound))))
         (is (not (zero? (:exit wrapped)))))
       (finally
-        (Files/deleteIfExists component-path)
-        (Files/deleteIfExists core-path))))
+        (kio/delete-if-exists component-path)
+        (kio/delete-if-exists core-path))))
   (let [escaped
         (assoc-in
          string-record-match-kir [:functions 0 :body]
@@ -463,17 +453,13 @@
   (let [world (wit/emit list-record-match-kir)
         core-bytes (core/emit list-record-match-kir :wasm32-wasi-kotoba-v1)
         component (artifact/package core-bytes list-record-match-kir world)
-        component-path (Files/createTempFile
-                        "kotoba-component-indirect-list-match-" ".wasm"
-                        (make-array FileAttribute 0))
-        core-path (Files/createTempFile
-                   "kotoba-component-indirect-list-match-core-" ".wasm"
-                   (make-array FileAttribute 0))]
+        component-path (kio/temp-file
+                        "kotoba-component-indirect-list-match-" ".wasm")
+        core-path (kio/temp-file
+                   "kotoba-component-indirect-list-match-core-" ".wasm")]
     (try
-      (Files/write component-path ^bytes (:bytes component)
-                   (make-array java.nio.file.OpenOption 0))
-      (Files/write core-path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes component-path ^bytes (:bytes component))
+      (kio/write-bytes core-path ^bytes core-bytes)
       (is (= :structural-union-match-module (:canonical-lowering component)))
       (doseq [[invoke expected]
               [["item-count(none, 9)" "9"]
@@ -525,8 +511,8 @@
         (is (not (zero? (:exit equal-index))))
         (is (not (zero? (:exit invalid-list-before-fallback)))))
       (finally
-        (Files/deleteIfExists component-path)
-        (Files/deleteIfExists core-path))))
+        (kio/delete-if-exists component-path)
+        (kio/delete-if-exists core-path))))
   (let [escaped
         (assoc-in
          list-record-match-kir [:functions 0 :body]
@@ -591,18 +577,16 @@
           world (wit/emit kir)
           core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
           component (artifact/package core-bytes kir world)
-          path (Files/createTempFile
-                "kotoba-component-owned-vector-transform-" ".wasm"
-                (make-array FileAttribute 0))]
+          path (kio/temp-file
+                "kotoba-component-owned-vector-transform-" ".wasm")]
       (try
-        (Files/write path ^bytes (:bytes component)
-                     (make-array java.nio.file.OpenOption 0))
+        (kio/write-bytes path ^bytes (:bytes component))
         (let [run (shell/sh "wasmtime" "run" "--invoke" invoke (str path))]
           (is (= :owned-vector-transform (:canonical-lowering component)))
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke))
         (finally
-          (Files/deleteIfExists path)))))
+          (kio/delete-if-exists path)))))
   ;; Direct core calls cannot populate input elements conveniently, but they
   ;; prove bounds are checked before copy/store and that maximum-size append
   ;; cannot exceed the public item ceiling.
@@ -630,26 +614,23 @@
                               :result :vector-i64
                               :body '(vector-conj items item)}]})
           core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
-          path (Files/createTempFile
-                "kotoba-component-owned-vector-transform-core-" ".wasm"
-                (make-array FileAttribute 0))]
+          path (kio/temp-file
+                "kotoba-component-owned-vector-transform-core-" ".wasm")]
       (try
-        (Files/write path ^bytes core-bytes
-                     (make-array java.nio.file.OpenOption 0))
+        (kio/write-bytes path ^bytes core-bytes)
         (let [run (apply shell/sh "wasmtime" "run" "--invoke"
                          (str "cm32p2||" (name function)) (str path) args)]
           (is (not (zero? (:exit run)))))
         (finally
-          (Files/deleteIfExists path)))))
+          (kio/delete-if-exists path)))))
   (let [kir {:format :kotoba.kir/v4 :exports ['append] :schemas {} :effects #{}
              :functions [{:name 'append :params ['items 'item]
                           :param-types [:vector-i64 :i64]
                           :result :vector-i64
                           :body '(vector-conj items item)}]}
         core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
-        path (Files/createTempFile
-              "kotoba-component-owned-vector-repeated-" ".wasm"
-              (make-array FileAttribute 0))
+        path (kio/temp-file
+              "kotoba-component-owned-vector-repeated-" ".wasm")
         script
         (str
          "const fs=require('fs');"
@@ -669,12 +650,11 @@
          "}"
          "}).catch(e=>{console.error(e);process.exit(1)})")]
     (try
-      (Files/write path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes core-bytes)
       (let [run (shell/sh "node" "-e" script (str path))]
         (is (zero? (:exit run)) (:err run)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest aggregate-match-returns-fresh-owned-lists
   (let [payload [:ref :demo/items]
@@ -702,16 +682,12 @@
         core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
         component (artifact/package core-bytes kir world)
         component-path
-        (Files/createTempFile "kotoba-component-owned-option-" ".wasm"
-                              (make-array FileAttribute 0))
+        (kio/temp-file "kotoba-component-owned-option-" ".wasm")
         core-path
-        (Files/createTempFile "kotoba-component-owned-option-core-" ".wasm"
-                              (make-array FileAttribute 0))]
+        (kio/temp-file "kotoba-component-owned-option-core-" ".wasm")]
     (try
-      (Files/write component-path ^bytes (:bytes component)
-                   (make-array java.nio.file.OpenOption 0))
-      (Files/write core-path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes component-path ^bytes (:bytes component))
+      (kio/write-bytes core-path ^bytes core-bytes)
       (is (= :owned-vector-match (:canonical-lowering component)))
       (doseq [[invoke expected]
               [["append-selected(none, [8, 9], 4)" "[8, 9]"]
@@ -756,8 +732,8 @@
             run (shell/sh "node" "-e" script (str core-path))]
         (is (zero? (:exit run)) (:err run)))
       (finally
-        (Files/deleteIfExists component-path)
-        (Files/deleteIfExists core-path))))
+        (kio/delete-if-exists component-path)
+        (kio/delete-if-exists core-path))))
   (let [descriptor [:result :vector-f64 :vector-f64]
         kir {:format :kotoba.kir/v4
              :exports ['adjust] :schemas {} :effects #{}
@@ -776,14 +752,12 @@
                    (f64-from-bits 4616752568008179712)
                    (f64-from-bits 4617878467915022336))
                   index item))}]}
-        path (Files/createTempFile "kotoba-component-owned-result-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kotoba-component-owned-result-" ".wasm")]
     (try
       (let [component (artifact/package
                        (core/emit kir :wasm32-wasi-kotoba-v1)
                        kir (wit/emit kir))]
-        (Files/write path ^bytes (:bytes component)
-                     (make-array java.nio.file.OpenOption 0))
+        (kio/write-bytes path ^bytes (:bytes component))
         (doseq [[invoke expected]
                 [["adjust(ok([1.5, 2.5, 3.5]), 1, 9.5)" "[2.5, 3.5]"]
                  ["adjust(err([1.5, 2.5]), 0, 9.5)" "[9.5, 5.5]"]]]
@@ -791,23 +765,19 @@
             (is (zero? (:exit run)) (:err run))
             (is (= expected (str/trim (:out run))) invoke))))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest multi-function-union-component-is-self-contained
   (let [world (wit/emit multi-match-kir)
         core-bytes (core/emit multi-match-kir :wasm32-wasi-kotoba-v1 {:fuel 2})
         component (artifact/package core-bytes multi-match-kir world)
-        component-path (Files/createTempFile
-                        "kotoba-component-package-multi-" ".wasm"
-                        (make-array FileAttribute 0))
-        core-path (Files/createTempFile
-                   "kotoba-component-core-multi-" ".wasm"
-                   (make-array FileAttribute 0))]
+        component-path (kio/temp-file
+                        "kotoba-component-package-multi-" ".wasm")
+        core-path (kio/temp-file
+                   "kotoba-component-core-multi-" ".wasm")]
     (try
-      (Files/write component-path ^bytes (:bytes component)
-                   (make-array java.nio.file.OpenOption 0))
-      (Files/write core-path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes component-path ^bytes (:bytes component))
+      (kio/write-bytes core-path ^bytes core-bytes)
       (is (= :structural-union-match-module (:canonical-lowering component)))
       (is (= ['choose-option 'choose-result 'negate] (:exports world)))
       (doseq [[invoke expected]
@@ -831,8 +801,8 @@
         (is (not (zero? (:exit active-bool))))
         (is (not (zero? (:exit ordinary-bool)))))
       (finally
-        (Files/deleteIfExists component-path)
-        (Files/deleteIfExists core-path)))))
+        (kio/delete-if-exists component-path)
+        (kio/delete-if-exists core-path)))))
 
 (deftest structural-union-record-payloads-round-trip
   (let [point [:ref :demo/point]
@@ -952,19 +922,15 @@
             world (wit/emit kir)
             core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
             component (artifact/package core-bytes kir world)
-            path (Files/createTempFile
-                  "kotoba-component-union-record-" ".wasm"
-                  (make-array FileAttribute 0))
-            core-path (Files/createTempFile
-                       "kotoba-component-union-record-core-" ".wasm"
-                       (make-array FileAttribute 0))]
+            path (kio/temp-file
+                  "kotoba-component-union-record-" ".wasm")
+            core-path (kio/temp-file
+                       "kotoba-component-union-record-core-" ".wasm")]
         (try
           (is (= :structural-union-identity
                  (:canonical-lowering component)))
-          (Files/write path ^bytes (:bytes component)
-                       (make-array java.nio.file.OpenOption 0))
-          (Files/write core-path ^bytes core-bytes
-                       (make-array java.nio.file.OpenOption 0))
+          (kio/write-bytes path ^bytes (:bytes component))
+          (kio/write-bytes core-path ^bytes core-bytes)
           (doseq [[invoke expected] calls]
             (let [run (shell/sh "wasmtime" "run" "--invoke" invoke (str path))]
               (is (zero? (:exit run)) (:err run))
@@ -989,8 +955,8 @@
                 (is (zero? (:exit run))
                     "an inactive nested joined slot must remain uninterpreted"))))
           (finally
-            (Files/deleteIfExists path)
-            (Files/deleteIfExists core-path)))))
+            (kio/delete-if-exists path)
+            (kio/delete-if-exists core-path)))))
     (doseq [[descriptor schemas]
             [[[:result [:vector :i64] :bool] {}]
              [[:option [:ref :demo/node]]
@@ -1018,9 +984,8 @@
              [{:name 'echo :params ['value] :param-types [descriptor]
                :result descriptor :effects #{} :body 'value}]}
         core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
-        path (Files/createTempFile
-              "kotoba-component-list-record-validation-" ".wasm"
-              (make-array FileAttribute 0))
+        path (kio/temp-file
+              "kotoba-component-list-record-validation-" ".wasm")
         script
         "const fs=require('node:fs');
          WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
@@ -1033,12 +998,11 @@
            if (!trapped) process.exit(2);
          }).catch(error=>{ console.error(error); process.exit(3); });"]
     (try
-      (Files/write path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes core-bytes)
       (let [run (shell/sh "node" "-e" script (str path))]
         (is (zero? (:exit run)) (:err run)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-nested-lists-share-one-total-item-budget
   (let [descriptor [:option [:list [:list :i64]]]
@@ -1048,9 +1012,8 @@
              [{:name 'echo :params ['value] :param-types [descriptor]
                :result descriptor :effects #{} :body 'value}]}
         core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
-        path (Files/createTempFile
-              "kotoba-component-nested-list-budget-" ".wasm"
-              (make-array FileAttribute 0))
+        path (kio/temp-file
+              "kotoba-component-nested-list-budget-" ".wasm")
         script
         "const fs=require('node:fs');
          WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
@@ -1068,12 +1031,11 @@
            if (!trapped) process.exit(2);
          }).catch(error=>{ console.error(error); process.exit(3); });"]
     (try
-      (Files/write path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes core-bytes)
       (let [run (shell/sh "node" "-e" script (str path))]
         (is (zero? (:exit run)) (:err run)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-list-string-enforces-one-aggregate-byte-budget
   (let [descriptor [:option [:list :string]]
@@ -1083,9 +1045,8 @@
              [{:name 'echo :params ['value] :param-types [descriptor]
                :result descriptor :effects #{} :body 'value}]}
         core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
-        path (Files/createTempFile
-              "kotoba-component-list-string-budget-" ".wasm"
-              (make-array FileAttribute 0))
+        path (kio/temp-file
+              "kotoba-component-list-string-budget-" ".wasm")
         script
         "const fs=require('node:fs');
          WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
@@ -1112,12 +1073,11 @@
            e['cm32p2||echo'](1,items,1);
          }).catch(error=>{ console.error(error); process.exit(3); });"]
     (try
-      (Files/write path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes core-bytes)
       (let [run (shell/sh "node" "-e" script (str path))]
         (is (zero? (:exit run)) (:err run)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-list-union-validates-only-each-active-item-case
   (let [descriptor [:option [:list [:option :string]]]
@@ -1127,9 +1087,8 @@
              [{:name 'echo :params ['value] :param-types [descriptor]
                :result descriptor :effects #{} :body 'value}]}
         core-bytes (core/emit kir :wasm32-wasi-kotoba-v1)
-        path (Files/createTempFile
-              "kotoba-component-list-union-validation-" ".wasm"
-              (make-array FileAttribute 0))
+        path (kio/temp-file
+              "kotoba-component-list-union-validation-" ".wasm")
         script
         "const fs=require('node:fs');
          WebAssembly.instantiate(fs.readFileSync(process.argv[1])).then(({instance})=>{
@@ -1143,12 +1102,11 @@
            if (!trapped) process.exit(2);
          }).catch(error=>{ console.error(error); process.exit(3); });"]
     (try
-      (Files/write path ^bytes core-bytes
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes core-bytes)
       (let [run (shell/sh "node" "-e" script (str path))]
         (is (zero? (:exit run)) (:err run)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest wit-canonical-name-collisions-fail-before-packaging
   (is (thrown-with-msg?
@@ -1254,11 +1212,9 @@
   (let [world (wit/emit edn-quoted-kir)
         core-bytes (core/emit edn-quoted-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes edn-quoted-kir world)
-        path (Files/createTempFile "kc-edn-quoted-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-edn-quoted-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :edn-quoted (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke" "edn-quoted(\"hello\")"
                          (str path))
@@ -1276,7 +1232,7 @@
         (is (= "" (read-string (str/trim (:out dq)))))
         (is (zero? (:exit bs)) (:err bs))
         (is (= "" (read-string (str/trim (:out bs))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-header-edn-kir
   "T8.3 reject-path header map: dual edn_quoted composition skeleton."
@@ -1324,11 +1280,9 @@
   (let [world (wit/emit http-header-edn-kir)
         core-bytes (core/emit http-header-edn-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-header-edn-kir world)
-        path (Files/createTempFile "kc-http-header-edn-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-header-edn-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-header-edn (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "http-header-edn(\"Content-Type\",\"text/plain\")"
@@ -1352,7 +1306,7 @@
         (is (= "" (read-string (str/trim (:out dq)))))
         (is (zero? (:exit bs)) (:err bs))
         (is (= "" (read-string (str/trim (:out bs))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def secret-request-edn-kir
   "T8.3 secret get-request fixed-depth EDN (ADR 0236 Component twin skeleton)."
@@ -1380,11 +1334,9 @@
   (let [world (wit/emit secret-request-edn-kir)
         core-bytes (core/emit secret-request-edn-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes secret-request-edn-kir world)
-        path (Files/createTempFile "kc-secret-request-edn-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-secret-request-edn-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :secret-request-edn (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "secret-request-edn(\"API_TOKEN\")"
@@ -1409,7 +1361,7 @@
         (is (= "" (read-string (str/trim (:out dq)))))
         (is (zero? (:exit long)) (:err long))
         (is (= "" (read-string (str/trim (:out long))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def headers-edn-append-kir
   "T8.3 multi-header append + uniqueness skeleton (WAT owns scan/splice)."
@@ -1445,11 +1397,9 @@
   (let [world (wit/emit headers-edn-append-kir)
         core-bytes (core/emit headers-edn-append-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes headers-edn-append-kir world)
-        path (Files/createTempFile "kc-headers-edn-append-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-headers-edn-append-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :headers-edn-append (:canonical-lowering packaged)))
       (let [one (shell/sh "wasmtime" "run" "--invoke"
                           "headers-edn-append(\"[]\",\"Host\",\"ex.com\")"
@@ -1491,7 +1441,7 @@
         (is (= "" (read-string (str/trim (:out bad)))))
         (is (zero? (:exit empty-acc)) (:err empty-acc))
         (is (= "" (read-string (str/trim (:out empty-acc))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def headers-names-add-kir
   "T8.3 true-set name list append skeleton (WAT owns element equality)."
@@ -1526,11 +1476,9 @@
   (let [world (wit/emit headers-names-add-kir)
         core-bytes (core/emit headers-names-add-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes headers-names-add-kir world)
-        path (Files/createTempFile "kc-headers-names-add-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-headers-names-add-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :headers-names-add (:canonical-lowering packaged)))
       (let [one (shell/sh "wasmtime" "run" "--invoke"
                           "headers-names-add(\"[]\",\"Host\")"
@@ -1569,7 +1517,7 @@
         (is (= "" (read-string (str/trim (:out bad)))))
         (is (zero? (:exit empty-acc)) (:err empty-acc))
         (is (= "" (read-string (str/trim (:out empty-acc))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-result-err-edn-kir
   "T8.3 result error arm skeleton (WAT owns scan + retryable gate)."
@@ -1601,11 +1549,9 @@
   (let [world (wit/emit http-result-err-edn-kir)
         core-bytes (core/emit http-result-err-edn-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-result-err-edn-kir world)
-        path (Files/createTempFile "kc-http-result-err-edn-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-result-err-edn-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-result-err-edn (:canonical-lowering packaged)))
       (let [ok0 (shell/sh "wasmtime" "run" "--invoke"
                           "http-result-err-edn(\"timeout\",0)" (str path))
@@ -1625,7 +1571,7 @@
         (is (= "" (read-string (str/trim (:out bad-atom)))))
         (is (zero? (:exit bad-retry)) (:err bad-retry))
         (is (= "" (read-string (str/trim (:out bad-retry))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-result-ok-edn-kir
   "T8.3 result ok arm skeleton (WAT owns status decimal + body scan + headers shape)."
@@ -1655,11 +1601,9 @@
   (let [world (wit/emit http-result-ok-edn-kir)
         core-bytes (core/emit http-result-ok-edn-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-result-ok-edn-kir world)
-        path (Files/createTempFile "kc-http-result-ok-edn-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-result-ok-edn-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-result-ok-edn (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "http-result-ok-edn(200,\"[]\",\"ok\")" (str path))
@@ -1687,7 +1631,7 @@
         (is (= "" (read-string (str/trim (:out bad-body)))))
         (is (zero? (:exit bad-hdr)) (:err bad-hdr))
         (is (= "" (read-string (str/trim (:out bad-hdr))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-request-edn0-kir
   "T8.3 0-header request EDN skeleton (WAT owns scan + decimal timeout)."
@@ -1721,11 +1665,9 @@
   (let [world (wit/emit http-request-edn0-kir)
         core-bytes (core/emit http-request-edn0-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-request-edn0-kir world)
-        path (Files/createTempFile "kc-http-request-edn0-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-request-edn0-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-request-edn0 (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "http-request-edn0(\"https://x\",\"{}\",1000)" (str path))
@@ -1745,7 +1687,7 @@
         (is (= "" (read-string (str/trim (:out neg)))))
         (is (zero? (:exit bad)) (:err bad))
         (is (= "" (read-string (str/trim (:out bad))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-request-edn-kir
   "T8.3 multi-header request EDN skeleton (WAT owns scan + shape + decimal)."
@@ -1783,11 +1725,9 @@
   (let [world (wit/emit http-request-edn-kir)
         core-bytes (core/emit http-request-edn-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-request-edn-kir world)
-        path (Files/createTempFile "kc-http-request-edn-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-request-edn-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-request-edn (:canonical-lowering packaged)))
       (let [empty (shell/sh "wasmtime" "run" "--invoke"
                             "http-request-edn(\"https://x\",\"[]\",\"{}\",1000)" (str path))
@@ -1815,7 +1755,7 @@
         (is (= "" (read-string (str/trim (:out bad-atom)))))
         (is (zero? (:exit neg)) (:err neg))
         (is (= "" (read-string (str/trim (:out neg))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def http-edn-reject-package-kir
@@ -2028,17 +1968,15 @@
   (let [world (wit/emit http-edn-reject-package-monomorph-forwards-kir)
         core-bytes (core/emit http-edn-reject-package-monomorph-forwards-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-edn-reject-package-monomorph-forwards-kir world)
-        path (Files/createTempFile "kc-edn-reject-fwd-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-edn-reject-fwd-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-edn-reject-package (:canonical-lowering packaged)))
       (let [empty (shell/sh "wasmtime" "run" "--invoke" "headers-edn-empty()" (str path))]
         (is (zero? (:exit empty)) (:err empty))
         (is (= "[]" (read-string (str/trim (:out empty))))))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest http-edn-reject-package-peels-monomorph-wrappers
   "T8.3 multi-file monomorph: peel export wrappers to private admission bodies."
@@ -2047,11 +1985,9 @@
   (let [world (wit/emit http-edn-reject-package-wrapper-kir)
         core-bytes (core/emit http-edn-reject-package-wrapper-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-edn-reject-package-wrapper-kir world)
-        path (Files/createTempFile "kc-reject-wrap-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-reject-wrap-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-edn-reject-package (:canonical-lowering packaged)))
       (let [empty (shell/sh "wasmtime" "run" "--invoke" "headers-edn-empty()"
                             (str path))
@@ -2070,7 +2006,7 @@
                (read-string (str/trim (:out one)))))
         (is (zero? (:exit dup)) (:err dup))
         (is (= "" (read-string (str/trim (:out dup))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest http-edn-reject-package-multi-export
   "T8.3 multi-export reject kit: empty + append + names-add + request + result arms."
@@ -2078,11 +2014,9 @@
   (let [world (wit/emit http-edn-reject-package-kir)
         core-bytes (core/emit http-edn-reject-package-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-edn-reject-package-kir world)
-        path (Files/createTempFile "kc-edn-reject-pkg-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-edn-reject-pkg-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-edn-reject-package (:canonical-lowering packaged)))
       (let [empty (shell/sh "wasmtime" "run" "--invoke" "headers-edn-empty()"
                             (str path))
@@ -2126,7 +2060,7 @@
                (read-string (str/trim (:out err)))))
         (is (zero? (:exit bad)) (:err bad))
         (is (= "" (read-string (str/trim (:out bad))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (deftest string-expression-package-multi-export
@@ -2149,11 +2083,9 @@
   (let [world (wit/emit string-expression-package-kir)
         core-bytes (core/emit string-expression-package-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes string-expression-package-kir world)
-        path (Files/createTempFile "kc-str-expr-pkg-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-str-expr-pkg-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :string-expression-package (:canonical-lowering packaged)))
       (is (= 4 (count (:exports world))))
       (let [empty (shell/sh "wasmtime" "run" "--invoke" "headers-edn-empty()"
@@ -2179,7 +2111,7 @@
         (is (zero? (:exit req)) (:err req))
         (is (= "{:url \"https://ex\" :headers [] :body \"\" :timeout-ms 30}"
                (read-string (str/trim (:out req))))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest string-length-canonical-lowering
   "T8.3 typed Component world first slice: string -> s64 without kotoba:typed."
@@ -2189,12 +2121,10 @@
   (let [world (wit/emit string-length-kir)
         core-bytes (core/emit string-length-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes string-length-kir world)
-        component-path (Files/createTempFile
-                        "kotoba-component-string-length-" ".wasm"
-                        (make-array FileAttribute 0))]
+        component-path (kio/temp-file
+                        "kotoba-component-string-length-" ".wasm")]
     (try
-      (Files/write component-path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes component-path ^bytes (:bytes packaged))
       (is (= :string-length (:canonical-lowering packaged)))
       (is (pos? (alength ^bytes (:bytes packaged))))
       (let [empty (shell/sh "wasmtime" "run" "--invoke" "len(\"\")"
@@ -2210,7 +2140,7 @@
         (is (zero? (:exit utf8)) (:err utf8))
         (is (= "6" (str/trim (:out utf8)))))
       (finally
-        (Files/deleteIfExists component-path)))))
+        (kio/delete-if-exists component-path)))))
 
 (def string-eq-kir
   {:format :kotoba.kir/v4
@@ -2258,11 +2188,9 @@
   (let [world (wit/emit string-eq-kir)
         core-bytes (core/emit string-eq-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes string-eq-kir world)
-        path (Files/createTempFile "kc-string-eq-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-string-eq-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :string-eq (:canonical-lowering packaged)))
       (let [same (shell/sh "wasmtime" "run" "--invoke" "eq(\"ab\",\"ab\")" (str path))
             diff (shell/sh "wasmtime" "run" "--invoke" "eq(\"ab\",\"ac\")" (str path))
@@ -2273,22 +2201,20 @@
         (is (= "0" (str/trim (:out diff))))
         (is (zero? (:exit empty)) (:err empty))
         (is (= "1" (str/trim (:out empty)))))
-      (finally (Files/deleteIfExists path))))
+      (finally (kio/delete-if-exists path))))
   (let [world (wit/emit string-eq-lit-kir)
         core-bytes (core/emit string-eq-lit-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes string-eq-lit-kir world)
-        path (Files/createTempFile "kc-string-eq-lit-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-string-eq-lit-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (let [ok (shell/sh "wasmtime" "run" "--invoke" "is-https(\"https://\")" (str path))
             no (shell/sh "wasmtime" "run" "--invoke" "is-https(\"http://\")" (str path))]
         (is (zero? (:exit ok)) (:err ok))
         (is (= "1" (str/trim (:out ok))))
         (is (zero? (:exit no)) (:err no))
         (is (= "0" (str/trim (:out no)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest string-substring-canonical-lowering
   "T8.3 typed Component: string-substring without kotoba:typed."
@@ -2296,11 +2222,9 @@
   (let [world (wit/emit string-substring-kir)
         core-bytes (core/emit string-substring-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes string-substring-kir world)
-        path (Files/createTempFile "kc-string-substr-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-string-substr-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :string-substring (:canonical-lowering packaged)))
       (let [mid (shell/sh "wasmtime" "run" "--invoke" "slice(\"hello\",1,4)" (str path))
             full (shell/sh "wasmtime" "run" "--invoke" "slice(\"ab\",0,2)" (str path))
@@ -2311,7 +2235,7 @@
         (is (= "\"ab\"" (str/trim (:out full))))
         (is (zero? (:exit empty)) (:err empty))
         (is (= "\"\"" (str/trim (:out empty)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def https-url-ok-kir
@@ -2341,11 +2265,9 @@
   (let [world (wit/emit https-url-ok-kir)
         core-bytes (core/emit https-url-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes https-url-ok-kir world)
-        path (Files/createTempFile "kc-https-url-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-https-url-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :https-url-ok (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"https://x\")" (str path))
             empty (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"\")" (str path))
@@ -2359,7 +2281,7 @@
         (is (= "-3" (str/trim (:out http))))
         (is (zero? (:exit short)) (:err short))
         (is (= "-3" (str/trim (:out short)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def https-url-ok-underscore-kir
@@ -2398,11 +2320,9 @@
   (let [world (wit/emit https-url-ok-let-kir)
         core-bytes (core/emit https-url-ok-let-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes https-url-ok-let-kir world)
-        path (Files/createTempFile "kc-https-url-ok-let-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-https-url-ok-let-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :https-url-ok (:canonical-lowering packaged)))
       ;; WIT export is hyphenated
       (let [ok (shell/sh "wasmtime" "run" "--invoke" "http-url-ok(\"https://x\")" (str path))
@@ -2414,7 +2334,7 @@
         (is (= "-1" (str/trim (:out empty))))
         (is (zero? (:exit http)) (:err http))
         (is (= "-3" (str/trim (:out http)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-post-request-ok-kir
   {:format :kotoba.kir/v4
@@ -2453,11 +2373,9 @@
   (let [world (wit/emit http-post-request-ok-kir)
         core-bytes (core/emit http-post-request-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-post-request-ok-kir world)
-        path (Files/createTempFile "kc-http-request-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-request-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-post-request-ok (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "http-post-request-ok(\"https://x\",1,\"{}\",1000)" (str path))
@@ -2479,7 +2397,7 @@
         (is (= "-4" (str/trim (:out headers))))
         (is (zero? (:exit timeout)) (:err timeout))
         (is (= "-6" (str/trim (:out timeout)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def http-response-ok-kir
@@ -2511,11 +2429,9 @@
   (let [world (wit/emit http-response-ok-kir)
         core-bytes (core/emit http-response-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-response-ok-kir world)
-        path (Files/createTempFile "kc-http-response-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-response-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-response-ok (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "http-response-ok(200,1,\"ok\")" (str path))
@@ -2529,7 +2445,7 @@
         (is (= "-1" (str/trim (:out bad-st))))
         (is (zero? (:exit bad-h)) (:err bad-h))
         (is (= "-2" (str/trim (:out bad-h)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def https-url-ok-with-main-kir
   {:format :kotoba.kir/v4
@@ -2568,11 +2484,9 @@
   (let [world (wit/emit https-url-ok-with-main-kir)
         core-bytes (core/emit https-url-ok-with-main-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes https-url-ok-with-main-kir world)
-        path (Files/createTempFile "kc-https-url-ok-main-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-https-url-ok-main-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :https-url-ok-with-main (:canonical-lowering packaged)))
       (is (= 2 (count (:exports world))))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
@@ -2584,7 +2498,7 @@
         (is (= "0" (str/trim (:out ok))))
         (is (zero? (:exit empty)) (:err empty))
         (is (= "-1" (str/trim (:out empty)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def http-error-ok-kir
@@ -2633,11 +2547,9 @@
   (let [world (wit/emit http-error-ok-kir)
         core-bytes (core/emit http-error-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-error-ok-kir world)
-        path (Files/createTempFile "kc-http-error-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-error-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-error-ok (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "http-error-ok(\"http/transport\",\"failed\",0)" (str path))
@@ -2655,7 +2567,7 @@
         (is (= "-3" (str/trim (:out badc))))
         (is (zero? (:exit badr)) (:err badr))
         (is (= "-5" (str/trim (:out badr)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest http-result-arm-ok-canonical-lowering
   "T8.3 typed Component composition: result arm tag without kotoba:typed."
@@ -2663,11 +2575,9 @@
   (let [world (wit/emit http-result-arm-ok-kir)
         core-bytes (core/emit http-result-arm-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-result-arm-ok-kir world)
-        path (Files/createTempFile "kc-http-result-arm-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-http-result-arm-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-result-arm-ok (:canonical-lowering packaged)))
       (let [ok0 (shell/sh "wasmtime" "run" "--invoke" "http-result-arm-ok(0)" (str path))
             ok1 (shell/sh "wasmtime" "run" "--invoke" "http-result-arm-ok(1)" (str path))
@@ -2678,7 +2588,7 @@
         (is (= "0" (str/trim (:out ok1))))
         (is (zero? (:exit bad)) (:err bad))
         (is (= "-1" (str/trim (:out bad)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-post-request-ok-frontend-kir
   "Frontend let+or desugar of provider http_post_request_ok body."
@@ -2742,11 +2652,9 @@
   (let [world (wit/emit http-post-request-ok-with-main-kir)
         core-bytes (core/emit http-post-request-ok-with-main-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-post-request-ok-with-main-kir world)
-        path (Files/createTempFile "kc-req-ok-main-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-req-ok-main-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-post-request-ok-with-main (:canonical-lowering packaged)))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
             ok (shell/sh "wasmtime" "run" "--invoke"
@@ -2759,7 +2667,7 @@
         (is (= "0" (str/trim (:out ok))))
         (is (zero? (:exit empty)) (:err empty))
         (is (= "-1" (str/trim (:out empty)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-status-ok-kir
   {:format :kotoba.kir/v4
@@ -2831,11 +2739,9 @@
   (let [world (wit/emit http-response-package-with-main-kir)
         core-bytes (core/emit http-response-package-with-main-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-response-package-with-main-kir world)
-        path (Files/createTempFile "kc-resp-pkg-main-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-resp-pkg-main-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-response-package-with-main (:canonical-lowering packaged)))
       (is (= 3 (count (:exports world))))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
@@ -2855,7 +2761,7 @@
         (is (= "0" (str/trim (:out resp-ok))))
         (is (zero? (:exit resp-h)) (:err resp-h))
         (is (= "-2" (str/trim (:out resp-h)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-error-package-with-main-kir
   {:format :kotoba.kir/v4
@@ -2910,11 +2816,9 @@
   (let [world (wit/emit http-error-package-with-main-kir)
         core-bytes (core/emit http-error-package-with-main-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-error-package-with-main-kir world)
-        path (Files/createTempFile "kc-err-pkg-main-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-err-pkg-main-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-error-package-with-main (:canonical-lowering packaged)))
       (is (= 3 (count (:exports world))))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
@@ -2935,7 +2839,7 @@
         (is (= "-3" (str/trim (:out badc))))
         (is (zero? (:exit arm0)) (:err arm0))
         (is (= "0" (str/trim (:out arm0)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def http-header-name-ok-kir
@@ -3005,11 +2909,9 @@
   (let [world (wit/emit http-header-name-ok-kir)
         core-bytes (core/emit http-header-name-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-header-name-ok-kir world)
-        path (Files/createTempFile "kc-header-name-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-header-name-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-header-name-ok (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "http-header-name-ok(\"Content-Type\")" (str path))
@@ -3027,7 +2929,7 @@
         (is (= "-3" (str/trim (:out space))))
         (is (zero? (:exit bang)) (:err bang))
         (is (= "0" (str/trim (:out bang)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest http-header-name-ok-with-main-live-vector
   "T8.3 multi-export: header_name_ok + live main → -130."
@@ -3036,11 +2938,9 @@
   (let [world (wit/emit http-header-name-ok-with-main-kir)
         core-bytes (core/emit http-header-name-ok-with-main-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-header-name-ok-with-main-kir world)
-        path (Files/createTempFile "kc-header-name-main-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-header-name-main-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-header-name-ok-with-main (:canonical-lowering packaged)))
       (is (= 2 (count (:exports world))))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
@@ -3058,7 +2958,7 @@
         (is (= "-1" (str/trim (:out empty))))
         (is (zero? (:exit space)) (:err space))
         (is (= "-3" (str/trim (:out space)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-header-name-ok-desugared-kir
   "Frontend loop desugar: (__kotoba_loop_1 ...) — matches real provider compile."
@@ -3205,11 +3105,9 @@
   (let [world (wit/emit secret-name-ok-kir)
         core-bytes (core/emit secret-name-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes secret-name-ok-kir world)
-        path (Files/createTempFile "kc-secret-name-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-secret-name-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :secret-name-ok (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"ok\")" (str path))
             empty (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"\")" (str path))
@@ -3226,7 +3124,7 @@
         (is (= "-3" (str/trim (:out slash))))
         (is (zero? (:exit sp)) (:err sp))
         (is (= "-3" (str/trim (:out sp)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest secret-name-ok-with-main-live-vector
   "T8.3 multi-export secret_name_ok + main → -130."
@@ -3235,11 +3133,9 @@
   (let [world (wit/emit secret-name-ok-with-main-kir)
         core-bytes (core/emit secret-name-ok-with-main-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes secret-name-ok-with-main-kir world)
-        path (Files/createTempFile "kc-secret-name-main-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-secret-name-main-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :secret-name-ok-with-main (:canonical-lowering packaged)))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
             star (shell/sh "wasmtime" "run" "--invoke" "secret-name-ok(\"ok*\")" (str path))]
@@ -3247,7 +3143,7 @@
         (is (= "-130" (str/trim (:out main))))
         (is (zero? (:exit star)) (:err star))
         (is (= "-3" (str/trim (:out star)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def fs-path-ok-kir
@@ -3320,11 +3216,9 @@
   (let [world (wit/emit fs-path-ok-kir)
         core-bytes (core/emit fs-path-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes fs-path-ok-kir world)
-        path (Files/createTempFile "kc-fs-path-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-fs-path-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :fs-path-ok (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke" "fs-path-ok(\"a/b\")" (str path))
             empty (shell/sh "wasmtime" "run" "--invoke" "fs-path-ok(\"\")" (str path))
@@ -3341,7 +3235,7 @@
         (is (= "-4" (str/trim (:out bs))))
         (is (zero? (:exit dd)) (:err dd))
         (is (= "-7" (str/trim (:out dd)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest fs-path-ok-with-main-live-vector
   "T8.3 multi-export fs_path_ok + main → -15470."
@@ -3350,16 +3244,14 @@
   (let [world (wit/emit fs-path-ok-with-main-kir)
         core-bytes (core/emit fs-path-ok-with-main-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes fs-path-ok-with-main-kir world)
-        path (Files/createTempFile "kc-fs-path-main-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-fs-path-main-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :fs-path-ok-with-main (:canonical-lowering packaged)))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))]
         (is (zero? (:exit main)) (:err main))
         (is (= "-15470" (str/trim (:out main)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest http-header-value-ok-canonical-lowering
   "T8.3 typed Component: header_value_ok CTL/length without kotoba:typed."
@@ -3367,11 +3259,9 @@
   (let [world (wit/emit http-header-value-ok-kir)
         core-bytes (core/emit http-header-value-ok-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-header-value-ok-kir world)
-        path (Files/createTempFile "kc-header-value-ok-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-header-value-ok-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-header-value-ok (:canonical-lowering packaged)))
       (let [ok (shell/sh "wasmtime" "run" "--invoke"
                          "http-header-value-ok(\"yes\")" (str path))
@@ -3385,7 +3275,7 @@
         (is (= "0" (str/trim (:out empty))))
         (is (zero? (:exit ctl)) (:err ctl))
         (is (= "-3" (str/trim (:out ctl)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest http-header-value-package-with-main-live-vector
   "T8.3 multi-export: value_ok + pair_ok + live main → -3036."
@@ -3397,11 +3287,9 @@
         packaged (artifact/package core-bytes
                                    http-header-value-package-with-main-kir
                                    world)
-        path (Files/createTempFile "kc-header-value-pkg-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-header-value-pkg-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-header-value-package-with-main (:canonical-lowering packaged)))
       (is (= 3 (count (:exports world))))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
@@ -3419,7 +3307,7 @@
         (is (= "0" (str/trim (:out pok))))
         (is (zero? (:exit pbad)) (:err pbad))
         (is (= "-3" (str/trim (:out pbad)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def http-headers-set-package-with-main-kir
@@ -3477,11 +3365,9 @@
         packaged (artifact/package core-bytes
                                    http-headers-set-package-with-main-kir
                                    world)
-        path (Files/createTempFile "kc-headers-set-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-headers-set-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-headers-set-package-with-main (:canonical-lowering packaged)))
       (is (= 4 (count (:exports world))))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
@@ -3496,7 +3382,7 @@
         (is (= "-4" (str/trim (:out bbad))))
         (is (zero? (:exit e0)) (:err e0))
         (is (= "0" (str/trim (:out e0)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (deftest http-header-name-ok-desugared-live-vector
   "T8.3: real frontend loop desugar + live main → -130."
@@ -3505,11 +3391,9 @@
   (let [world (wit/emit http-header-name-ok-desugared-kir)
         core-bytes (core/emit http-header-name-ok-desugared-kir :wasm32-wasi-kotoba-v1)
         packaged (artifact/package core-bytes http-header-name-ok-desugared-kir world)
-        path (Files/createTempFile "kc-header-name-desug-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-header-name-desug-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-header-name-ok-with-main (:canonical-lowering packaged)))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
             space (shell/sh "wasmtime" "run" "--invoke"
@@ -3518,7 +3402,7 @@
         (is (= "-130" (str/trim (:out main))))
         (is (zero? (:exit space)) (:err space))
         (is (= "-3" (str/trim (:out space)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 
 (def http-request-pack-package-with-main-kir
@@ -3637,11 +3521,9 @@
         packaged (artifact/package core-bytes
                                    http-request-pack-package-with-main-kir
                                    world)
-        path (Files/createTempFile "kc-request-pack-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-request-pack-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-request-pack-package-with-main (:canonical-lowering packaged)))
       (is (= 6 (count (:exports world))))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
@@ -3658,7 +3540,7 @@
         (is (= "-3" (str/trim (:out badu))))
         (is (zero? (:exit ok-url)) (:err ok-url))
         (is (= "1" (str/trim (:out ok-url)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 
 (def http-result-pack-package-with-main-kir
   {:format :kotoba.kir/v4
@@ -3737,11 +3619,9 @@
         packaged (artifact/package core-bytes
                                    http-result-pack-package-with-main-kir
                                    world)
-        path (Files/createTempFile "kc-result-pack-" ".wasm"
-                                   (make-array FileAttribute 0))]
+        path (kio/temp-file "kc-result-pack-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes packaged)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes packaged))
       (is (= :http-result-pack-package-with-main (:canonical-lowering packaged)))
       (is (= 9 (count (:exports world))))
       (let [main (shell/sh "wasmtime" "run" "--invoke" "main()" (str path))
@@ -3756,5 +3636,5 @@
         (is (= "-1" (str/trim (:out bbad))))
         (is (zero? (:exit e0)) (:err e0))
         (is (= "0" (str/trim (:out e0)))))
-      (finally (Files/deleteIfExists path)))))
+      (finally (kio/delete-if-exists path)))))
 

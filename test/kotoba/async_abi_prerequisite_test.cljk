@@ -29,7 +29,7 @@
    create futures. What is measured here is only that a guest which does NOT
    import them cannot invent a handle -- which is the mistake worth catching,
    because it is the one that still builds."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -39,7 +39,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wasmtime-available? []
   (let [{:keys [exit out]} (shell/sh wasmtime-binary "--version")]

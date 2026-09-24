@@ -1,7 +1,7 @@
 (ns kotoba.object-store-put-get-provider-component-test
   "W5 product vertical packaging (ADR 0132): unified object-store put+get
   dual-export + multi-step Wasmtime put-then-get (true + body-len = 3)."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -107,10 +107,10 @@
 (defn- put-get-sequence-driver-wat
   "put (true=1) then get-stream (len=2); return 1+2=3 as product vertical sum."
   []
-  (let [binding (.getBytes "example/blocks" "UTF-8")
-        digest (.getBytes "sha256:dead" "UTF-8")
-        payload (.getBytes "ok" "UTF-8")
-        key (.getBytes "sha256:dead" "UTF-8")
+  (let [binding (kbytes/utf8-bytes "example/blocks")
+        digest (kbytes/utf8-bytes "sha256:dead")
+        payload (kbytes/utf8-bytes "ok")
+        key (kbytes/utf8-bytes "sha256:dead")
         b-ptr 256
         d-ptr 320
         p-ptr 384
