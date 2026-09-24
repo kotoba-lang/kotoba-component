@@ -6,7 +6,7 @@
    `wasi:clocks/monotonic-clock@0.3.0`, so the assertions here are about
    agreement with the host clock rather than about a synthetic sequence, and
    about what the composed world is allowed to import."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]

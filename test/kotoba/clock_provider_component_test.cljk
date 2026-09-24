@@ -1,7 +1,7 @@
 (ns kotoba.clock-provider-component-test
   "W5 second slice: real clock-v1 wasm component provider (composition + validate).
    Multi-step Wasmtime sequence driver (wall then mono) added as deepen slice."
-  (:require [clojure.edn :as edn]
+  (:require [kotoba.lang.edn :as edn]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
