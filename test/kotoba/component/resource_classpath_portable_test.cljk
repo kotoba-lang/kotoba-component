@@ -12,7 +12,7 @@
       classpath lacked this repository's resources/ read the consumer's own
       file of the same name, silently -- case 2 (a decoy is planted there).
   Node only: on the JVM io/resource was always the classpath."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             #?@(:cljs [["node:child_process" :as cp]
                        ["node:fs" :as fs]
                        ["node:os" :as os]

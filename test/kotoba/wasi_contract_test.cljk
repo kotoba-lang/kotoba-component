@@ -5,7 +5,7 @@
    Two entries in that file named 0.2.x interfaces that 0.3.0 had removed,
    and both survived until someone tried to import them. This is the check
    that would have caught them at the moment they were written."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.component.wasi-contract :as wasi]))
 
 (deftest every-declared-wasi-import-exists-in-the-pinned-wit

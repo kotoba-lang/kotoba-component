@@ -20,7 +20,7 @@
   carries must produce the same world, the same digest and the same import
   list. A fix that made the exception go away and changed the bytes would pass
   a `thrown?` test and fail these."
-  (:require #?(:clj  [clojure.test :refer [deftest is testing]]
+  (:require #?(:clj  [kotoba.test :refer [deftest is testing]]
                :cljs [cljs.test :refer [deftest is testing] :include-macros true])
             [kotoba.component.wit :as wit]))
 

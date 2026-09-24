@@ -6,7 +6,7 @@
   import through anything weaker than guard-component-ability-call, but until
   this declaration existed it could only assume that requirement rather than
   read it. An assumption cannot be violated and therefore cannot be detected."
-  (:require [kotoba.lang.text] [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.lang.text] [kotoba.test :refer [deftest is testing]]
             [kotoba.component.wit :as wit]))
 
 (def ^:private kir

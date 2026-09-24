@@ -2,7 +2,7 @@
   "The comparison logic and the contract/code drift check are pure, so they run
   on any machine — including one with none of the pinned binaries installed,
   which is exactly the machine that needs them."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kotoba.component.doctor :as doctor]))
 
 (deftest pins-come-from-the-contract-not-from-this-namespace

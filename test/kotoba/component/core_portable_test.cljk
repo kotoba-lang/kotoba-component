@@ -9,7 +9,7 @@
 
   Until 2026-09-11 nothing had ever run this encoder on Node; it was the last
   JVM-only family amu's route stood on."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.component.core :as core]
             [kotoba.component.artifact :as artifact]
             [kotoba.component.wit :as wit]))
