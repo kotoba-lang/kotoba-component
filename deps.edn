@@ -1,5 +1,15 @@
 {:paths ["src" "resources"]
  :deps {
+        ;; kotoba.lang.coll replaced clojure.set here (2026-09-24). An explicit
+        ;; floor: kotoba.lang.coll carries clojure.set's union/intersection/
+        ;; difference/map-invert from 0ffd5f6, and tools.deps takes the NEWEST
+        ;; sha it is shown.
+        io.github.kotoba-lang/coll {:git/sha "0ffd5f6340af50871d4759b06e02ac4fbf9a4bdf"}
+        ;; kotoba.lang.edn replaced clojure.edn / cljs.reader here (2026-09-24, owner
+        ;; instruction "clojure.* は kotoba.* にしてね"). kotoba.lang.edn, not the
+        ;; kotoba.edn facade: the compiler (amu) links kotoba.lang.edn and excludes
+        ;; the edn-* definition repos kotoba.edn assembles. 79dba32 = edn main.
+        io.github.kotoba-lang/edn {:git/sha "79dba32c8892058842c57783f06a2dfe4601aeb0"}
         ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
         ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
         ;; this repo silently rides whatever a sibling happens to name.
