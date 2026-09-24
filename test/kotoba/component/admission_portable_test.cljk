@@ -6,7 +6,7 @@
   checked against the same bytes rather than against each other. The third
   vector carries a 0xff octet, the signed/unsigned boundary the JVM walk
   crosses through `bit-and 0xff` and the Node walk never sees."
-  (:require [clojure.test :refer [deftest is]]
+  (:require [kotoba.test :refer [deftest is]]
             [kotoba.component.admission :as admission]))
 
 (defn- bytes-of [octets]

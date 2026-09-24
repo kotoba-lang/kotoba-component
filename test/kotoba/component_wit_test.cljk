@@ -1,5 +1,5 @@
 (ns kotoba.component-wit-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [clojure.java.shell :as shell]
             [kotoba.component.wit :as wit])
   (:import [java.nio.file Files]
