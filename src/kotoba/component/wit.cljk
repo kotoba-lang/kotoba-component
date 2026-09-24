@@ -9,43 +9,41 @@
   same KIR, which is what CI6 exists to rule out. Keeping this namespace
   JVM-only made that comparison impossible rather than merely unmeasured.
 
-  The ClojureScript branch targets Node (nbb): it reads the contract from the
-  filesystem relative to the working directory and uses node:crypto, so it is
-  a compiler-side tool namespace, not browser code."
+  The ClojureScript branch targets Node (the kbb engine): it reads the
+  contract as a classpath resource (the engine's clojure.java.io/resource and
+  slurp) and uses node:crypto, so it is a compiler-side tool namespace, not
+  browser code."
   {:kotoba/export [contract contract-resource emit host-binding-contract required-host-guard type-text]}
   (:require [clojure.edn :as edn]
             [kotoba.lang.text :as str]
             [kotoba.abi.contract :as abi]
-            #?(:clj [clojure.java.io :as io])
-            #?@(:cljs [["fs" :as fs]
-                       ["node:crypto" :as crypto]
-                       ["node:path" :as path]
-                       [nbb.classpath :as classpath]]))
+            [clojure.java.io :as io]
+            #?@(:cljs [["node:crypto" :as crypto]]))
   #?(:clj (:import [java.nio.charset StandardCharsets]
                    [java.security MessageDigest])))
 
 (def contract-resource "kotoba/lang/component-model-v1.edn")
 
-#?(:cljs
-   (defn- resource-path
-     "The contract file as a classpath resource on Node. nbb has no
-     `io/resource`, but it does have a classpath: every `--classpath` entry
-     is probed for the resource's path, the way the JVM probes its own. Until
-     2026-09-11 this read `resources/<resource>` relative to the working
-     directory, which is this repository's root -- and nothing else's. amu
-     requiring this namespace from its own directory got ENOENT."
-     []
-     (let [candidates (concat (map #(path/join % contract-resource)
-                                   (str/split (classpath/get-classpath) #":"))
-                              [(str "resources/" contract-resource)])]
-       (or (first (filter #(fs/existsSync %) candidates))
-           (throw (ex-info "component contract resource is not on the classpath"
-                           {:phase :component-wit :resource contract-resource}))))))
+(defn- contract-text
+  "The contract, read as a CLASSPATH resource on both hosts: the JVM's
+  io/resource, and on Node the kbb engine's (org-babashka-nbb nbb.jvm), which
+  probes every classpath entry the same way.
 
-(def contract
-  (edn/read-string
-   #?(:clj (slurp (io/resource contract-resource))
-      :cljs (fs/readFileSync (resource-path) "utf8"))))
+  History, because each step failed a consumer that ran from its own root:
+  until 2026-09-11 the Node branch read `resources/<resource>` relative to
+  the working directory -- this repository's root and nothing else's (amu
+  and cloud-itonami-isic-3812 died with ENOENT). From then until 2026-09-24
+  it probed the classpath but kept that cwd path as a FALLBACK, so a
+  consumer whose classpath lacked this repository's resources/ silently read
+  whatever file of the same name sat under its own cwd. There is no fallback
+  now: not on the classpath is an error with its name."
+  []
+  (if-let [r (io/resource contract-resource)]
+    (slurp r)
+    (throw (ex-info "component contract resource is not on the classpath"
+                    {:phase :component-wit :resource contract-resource}))))
+
+(def contract (edn/read-string (contract-text)))
 
 (defn- reject [message data]
   (throw (ex-info message (assoc data :phase :component-wit))))
