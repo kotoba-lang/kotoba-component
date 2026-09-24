@@ -9,15 +9,13 @@
 
   `typed-cap-call` is a KIR form, not source syntax, so these fixtures build
   KIR directly -- the same way `component-artifact-test` does."
-  (:require [clojure.java.shell :as shell]
+  (:require [kotoba.io :as kio] [kotoba.process :as shell]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.text :as str]
             [kotoba.component.artifact :as artifact]
             [kotoba.component.composition :as composition]
             [kotoba.component.core :as component-core]
-            [kotoba.component.wit :as wit])
-  (:import [java.nio.file Files]
-           [java.nio.file.attribute FileAttribute]))
+            [kotoba.component.wit :as wit]))
 
 ;; clock/now, id 7 in the component-model contract: interface "clock",
 ;; function "now".
@@ -198,12 +196,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-match-aggregate-capability-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-match-aggregate-capability-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (is (= :structural-union-match-module
              (component-core/assert-supported! kir)))
       (is (= [:clock/now] (:imports application)))
@@ -230,7 +226,7 @@
         (is (not (zero? (:exit over)))
             "the Canonical boundary rejects 16,385 list elements"))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-union-match-module-calls-a-f64-list-capability
   (let [descriptor [:option :vector-f64]
@@ -266,12 +262,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-match-f64-list-capability-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-match-f64-list-capability-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (is (= :structural-union-match-module
              (component-core/assert-supported! kir)))
       (is (= [:clock/now] (:imports application)))
@@ -284,7 +278,7 @@
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-result-list-match-calls-a-named-capability
   (doseq [[descriptor count-op values]
@@ -328,12 +322,10 @@
           (composition/package-structural-union-identity-provider
            :clock/now descriptor)
           closed (composition/compose-closed application [provider])
-          path (Files/createTempFile
-                "kotoba-result-list-match-capability-" ".wasm"
-                (make-array FileAttribute 0))]
+          path (kio/temp-file
+                "kotoba-result-list-match-capability-" ".wasm")]
       (try
-        (Files/write path ^bytes (:bytes closed)
-                     (make-array java.nio.file.OpenOption 0))
+        (kio/write-bytes path ^bytes (:bytes closed))
         (is (= :structural-union-match-module
                (component-core/assert-supported! kir)))
         (is (= [:clock/now] (:imports application)))
@@ -346,7 +338,7 @@
             (is (zero? (:exit run)) (:err run))
             (is (= expected (str/trim (:out run))) invoke)))
         (finally
-          (Files/deleteIfExists path))))))
+          (kio/delete-if-exists path))))))
 
 (deftest structural-string-like-match-calls-a-named-capability
   (doseq [[descriptor body calls]
@@ -411,12 +403,10 @@
           (composition/package-structural-union-identity-provider
            :clock/now descriptor)
           closed (composition/compose-closed application [provider])
-          path (Files/createTempFile
-                "kotoba-string-like-match-capability-" ".wasm"
-                (make-array FileAttribute 0))]
+          path (kio/temp-file
+                "kotoba-string-like-match-capability-" ".wasm")]
       (try
-        (Files/write path ^bytes (:bytes closed)
-                     (make-array java.nio.file.OpenOption 0))
+        (kio/write-bytes path ^bytes (:bytes closed))
         (is (= :structural-union-match-module
                (component-core/assert-supported! kir)))
         (is (= [:clock/now] (:imports application)))
@@ -426,7 +416,7 @@
             (is (zero? (:exit run)) (:err run))
             (is (= expected (str/trim (:out run))) invoke)))
         (finally
-          (Files/deleteIfExists path))))))
+          (kio/delete-if-exists path))))))
 
 (deftest structural-admitted-list-match-calls-a-named-capability
   (doseq [[descriptor body calls]
@@ -497,12 +487,10 @@
           (composition/package-structural-union-identity-provider
            :clock/now descriptor)
           closed (composition/compose-closed application [provider])
-          path (Files/createTempFile
-                "kotoba-indirect-list-match-capability-" ".wasm"
-                (make-array FileAttribute 0))]
+          path (kio/temp-file
+                "kotoba-indirect-list-match-capability-" ".wasm")]
       (try
-        (Files/write path ^bytes (:bytes closed)
-                     (make-array java.nio.file.OpenOption 0))
+        (kio/write-bytes path ^bytes (:bytes closed))
         (is (= :structural-union-match-module
                (component-core/assert-supported! kir)))
         (is (= [:clock/now] (:imports application)))
@@ -512,7 +500,7 @@
             (is (zero? (:exit run)) (:err run))
             (is (= expected (str/trim (:out run))) invoke)))
         (finally
-          (Files/deleteIfExists path))))))
+          (kio/delete-if-exists path))))))
 
 (deftest structural-indirect-list-match-validates-untrusted-provider-results
   (let [descriptor [:option [:list :string]]
@@ -541,11 +529,10 @@
                :effects #{}
                :body 'value}]}
         core (component-core/emit kir :wasm32-wasi-kotoba-v1)
-        path (Files/createTempFile
-              "kotoba-indirect-list-provider-validation-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-indirect-list-provider-validation-" ".wasm")]
     (try
-      (Files/write path ^bytes core (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes core)
       (let [script
             (str
              "const fs=require('fs');let inst,mode=0,bad,over;"
@@ -573,7 +560,7 @@
         (is (= "{\"malformed\":true,\"aggregate\":true}"
                (str/trim (:out run)))))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-bool-list-match-rejects-noncanonical-provider-items
   (let [descriptor [:option [:list :bool]]
@@ -602,11 +589,10 @@
                :effects #{}
                :body 'value}]}
         core (component-core/emit kir :wasm32-wasi-kotoba-v1)
-        path (Files/createTempFile
-              "kotoba-bool-list-provider-validation-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-bool-list-provider-validation-" ".wasm")]
     (try
-      (Files/write path ^bytes core (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes core)
       (let [script
             (str
              "const fs=require('fs');let inst,bad;"
@@ -625,7 +611,7 @@
         (is (zero? (:exit run)) (:err run))
         (is (= "true" (str/trim (:out run)))))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-record-list-match-validates-all-provider-item-bools
   (let [inner-type
@@ -668,18 +654,14 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor schemas)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-record-list-match-capability-" ".wasm"
-              (make-array FileAttribute 0))
-        core-path (Files/createTempFile
-                   "kotoba-record-list-provider-validation-" ".wasm"
-                   (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-record-list-match-capability-" ".wasm")
+        core-path (kio/temp-file
+                   "kotoba-record-list-provider-validation-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
-      (Files/write core-path
-                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
+      (kio/write-bytes core-path
+                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1))
       (is (= :structural-union-match-module
              (component-core/assert-supported! kir)))
       (doseq [[invoke expected]
@@ -713,8 +695,8 @@
         (is (zero? (:exit run)) (:err run))
         (is (= "true" (str/trim (:out run)))))
       (finally
-        (Files/deleteIfExists path)
-        (Files/deleteIfExists core-path)))))
+        (kio/delete-if-exists path)
+        (kio/delete-if-exists core-path)))))
 
 (deftest structural-union-list-match-validates-only-active-provider-cases
   (let [item-type [:result :string :bool]
@@ -749,19 +731,15 @@
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
         component-path
-        (Files/createTempFile
-         "kotoba-union-list-match-capability-" ".wasm"
-         (make-array FileAttribute 0))
+        (kio/temp-file
+         "kotoba-union-list-match-capability-" ".wasm")
         core-path
-        (Files/createTempFile
-         "kotoba-union-list-provider-validation-" ".wasm"
-         (make-array FileAttribute 0))]
+        (kio/temp-file
+         "kotoba-union-list-provider-validation-" ".wasm")]
     (try
-      (Files/write component-path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
-      (Files/write core-path
-                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes component-path ^bytes (:bytes closed))
+      (kio/write-bytes core-path
+                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1))
       (is (= :structural-union-match-module
              (component-core/assert-supported! kir)))
       (let [run (shell/sh "wasmtime" "run" "--invoke"
@@ -797,8 +775,8 @@
         (is (zero? (:exit run)) (:err run))
         (is (= "[false,true,true,true,true]" (str/trim (:out run)))))
       (finally
-        (Files/deleteIfExists component-path)
-        (Files/deleteIfExists core-path)))))
+        (kio/delete-if-exists component-path)
+        (kio/delete-if-exists core-path)))))
 
 (deftest structural-recursive-list-match-validates-the-active-value-graph
   (let [inner-type
@@ -836,19 +814,15 @@
          :clock/now descriptor schemas)
         closed (composition/compose-closed application [provider])
         component-path
-        (Files/createTempFile
-         "kotoba-recursive-list-match-capability-" ".wasm"
-         (make-array FileAttribute 0))
+        (kio/temp-file
+         "kotoba-recursive-list-match-capability-" ".wasm")
         core-path
-        (Files/createTempFile
-         "kotoba-recursive-list-provider-validation-" ".wasm"
-         (make-array FileAttribute 0))]
+        (kio/temp-file
+         "kotoba-recursive-list-provider-validation-" ".wasm")]
     (try
-      (Files/write component-path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
-      (Files/write core-path
-                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes component-path ^bytes (:bytes closed))
+      (kio/write-bytes core-path
+                   ^bytes (component-core/emit kir :wasm32-wasi-kotoba-v1))
       (let [run
             (shell/sh
              "wasmtime" "run" "--invoke"
@@ -908,8 +882,8 @@
         (is (= "[false,true,true,true,true,true,true,true,true,true,false]"
                (str/trim (:out run)))))
       (finally
-        (Files/deleteIfExists component-path)
-        (Files/deleteIfExists core-path)))))
+        (kio/delete-if-exists component-path)
+        (kio/delete-if-exists core-path)))))
 
 (deftest structural-nested-list-match-shares-one-total-item-budget
   (doseq [[descriptor invoke expected]
@@ -950,12 +924,10 @@
           (composition/package-structural-union-identity-provider
            :clock/now descriptor)
           closed (composition/compose-closed application [provider])
-          path (Files/createTempFile
-                "kotoba-nested-list-match-capability-" ".wasm"
-                (make-array FileAttribute 0))]
+          path (kio/temp-file
+                "kotoba-nested-list-match-capability-" ".wasm")]
       (try
-        (Files/write path ^bytes (:bytes closed)
-                     (make-array java.nio.file.OpenOption 0))
+        (kio/write-bytes path ^bytes (:bytes closed))
         (is (= :structural-union-match-module
                (component-core/assert-supported! kir)))
         (doseq [[call result]
@@ -967,7 +939,7 @@
             (is (zero? (:exit run)) (:err run))
             (is (= result (str/trim (:out run))) call)))
         (finally
-          (Files/deleteIfExists path)))))
+          (kio/delete-if-exists path)))))
   (let [descriptor [:option [:list [:list :i64]]]
         body
         (list 'option-match descriptor 'value 9 'selected
@@ -987,11 +959,10 @@
               {:name 'echo :params ['value] :param-types [:i64]
                :result :i64 :effects #{} :body 'value}]}
         core (component-core/emit kir :wasm32-wasi-kotoba-v1)
-        path (Files/createTempFile
-              "kotoba-nested-list-total-validation-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-nested-list-total-validation-" ".wasm")]
     (try
-      (Files/write path ^bytes core (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes core)
       (let [script
             (str
              "const fs=require('fs');let inst,outer;"
@@ -1013,7 +984,7 @@
         (is (zero? (:exit run)) (:err run))
         (is (= "true" (str/trim (:out run)))))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-option-record-match-calls-a-named-capability
   (let [record-type
@@ -1054,12 +1025,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor schemas)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-option-record-match-capability-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-option-record-match-capability-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (is (= :structural-union-match-module
              (component-core/assert-supported! kir)))
       (is (= [:clock/now] (:imports application)))
@@ -1072,7 +1041,7 @@
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-union-capability-transports-bounded-lists
   (let [descriptor [:option :vector-i64]
@@ -1097,12 +1066,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-aggregate-capability-list-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-aggregate-capability-list-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (is (= :structural-union-capability-call
              (component-core/assert-supported! kir)))
       (is (= [:clock/now] (:imports application)))
@@ -1115,7 +1082,7 @@
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-union-capability-transports-nested-indirect-values
   (let [descriptor [:result [:option :vector-f64] :string]
@@ -1140,12 +1107,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-aggregate-capability-nested-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-aggregate-capability-nested-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (doseq [[invoke expected]
               [["echo(ok(none))" "ok(none)"]
                ["echo(ok(some([1.5, -2.25])))" "ok(some([1.5, -2.25]))"]
@@ -1155,7 +1120,7 @@
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-union-capability-transports-list-of-records
   (let [descriptor [:option [:list [:ref :demo/point]]]
@@ -1184,12 +1149,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor schemas)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-aggregate-capability-record-list-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-aggregate-capability-record-list-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (is (= :structural-union-capability-call
              (component-core/assert-supported! kir)))
       (is (= [:clock/now] (:imports application)))
@@ -1203,7 +1166,7 @@
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-union-capability-transports-list-of-strings
   (let [descriptor [:option [:list :string]]
@@ -1226,12 +1189,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-aggregate-capability-string-list-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-aggregate-capability-string-list-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (is (= :structural-union-capability-call
              (component-core/assert-supported! kir)))
       (doseq [[invoke expected]
@@ -1244,7 +1205,7 @@
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-union-capability-transports-list-of-unions
   (let [descriptor [:option [:list [:option :string]]]
@@ -1264,12 +1225,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-aggregate-capability-union-list-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-aggregate-capability-union-list-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (is (= :structural-union-capability-call
              (component-core/assert-supported! kir)))
       (doseq [[invoke expected]
@@ -1282,7 +1241,7 @@
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-union-capability-transports-nested-lists
   (let [descriptor [:option [:list [:list :i64]]]
@@ -1302,12 +1261,10 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-aggregate-capability-nested-list-" ".wasm"
-              (make-array FileAttribute 0))]
+        path (kio/temp-file
+              "kotoba-aggregate-capability-nested-list-" ".wasm")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (is (= :structural-union-capability-call
              (component-core/assert-supported! kir)))
       (doseq [[invoke expected]
@@ -1320,7 +1277,7 @@
           (is (zero? (:exit run)) (:err run))
           (is (= expected (str/trim (:out run))) invoke)))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest structural-union-capability-transports-maximum-list
   (let [descriptor [:option :vector-i64]
@@ -1344,20 +1301,18 @@
         (composition/package-structural-union-identity-provider
          :clock/now descriptor)
         closed (composition/compose-closed application [provider])
-        path (Files/createTempFile
-              "kotoba-aggregate-capability-max-list-" ".wasm"
-              (make-array FileAttribute 0))
+        path (kio/temp-file
+              "kotoba-aggregate-capability-max-list-" ".wasm")
         values (str/join "," (repeat 16384 "0"))
         invoke (str "echo(some([" values "]))")]
     (try
-      (Files/write path ^bytes (:bytes closed)
-                   (make-array java.nio.file.OpenOption 0))
+      (kio/write-bytes path ^bytes (:bytes closed))
       (let [run (shell/sh "wasmtime" "run" "--invoke" invoke (str path))]
         (is (zero? (:exit run)) (:err run))
         (is (= (str "some([" values "])")
                (str/replace (str/trim (:out run)) " " ""))))
       (finally
-        (Files/deleteIfExists path)))))
+        (kio/delete-if-exists path)))))
 
 (deftest declared-fuel-still-reaches-a-capability-component
   ;; The new lowering goes through the real backend, so it must keep the

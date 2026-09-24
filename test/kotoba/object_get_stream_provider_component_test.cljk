@@ -1,7 +1,7 @@
 (ns kotoba.object-get-stream-provider-component-test
   "W5 deepen ADR 0130: synthetic object get-stream wasm packaging
   (binding+key → i64 byte-count intermediate) + multi-step Wasmtime."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -87,9 +87,9 @@
 (defn- get-stream-sequence-driver-wat
   "Two get-stream calls; sum of fixed body lengths (2+2=4)."
   []
-  (let [binding (.getBytes "example/blocks" "UTF-8")
-        key1 (.getBytes "k1" "UTF-8")
-        key2 (.getBytes "k2" "UTF-8")
+  (let [binding (kbytes/utf8-bytes "example/blocks")
+        key1 (kbytes/utf8-bytes "k1")
+        key2 (kbytes/utf8-bytes "k2")
         b-ptr 256
         k1-ptr 384
         k2-ptr 400

@@ -1,7 +1,7 @@
 (ns kotoba.object-write-provider-component-test
   "W5 stream-object write-path wasm packaging: synthetic dual-export provider.
    Multi-step Wasmtime: put-block sequence and put+CAS dual-export walk."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -134,8 +134,8 @@
   []
   (let [mod "cm32p2|kotoba:application/object-store@1"
         export-run "cm32p2||run"
-        binding-bytes (vec (.getBytes "b" "UTF-8"))
-        digest-bytes (vec (.getBytes "d" "UTF-8"))
+        binding-bytes (vec (kbytes/utf8-bytes "b"))
+        digest-bytes (vec (kbytes/utf8-bytes "d"))
         binding-ptr 8
         digest-ptr (+ binding-ptr (count binding-bytes))
         push-put
@@ -256,10 +256,10 @@
   []
   (let [mod "cm32p2|kotoba:application/object-store@1"
         export-run "cm32p2||run"
-        binding-bytes (vec (.getBytes "b" "UTF-8"))
-        digest-bytes (vec (.getBytes "d" "UTF-8"))
-        key-bytes (vec (.getBytes "k" "UTF-8"))
-        next-bytes (vec (.getBytes "n" "UTF-8"))
+        binding-bytes (vec (kbytes/utf8-bytes "b"))
+        digest-bytes (vec (kbytes/utf8-bytes "d"))
+        key-bytes (vec (kbytes/utf8-bytes "k"))
+        next-bytes (vec (kbytes/utf8-bytes "n"))
         binding-ptr 8
         digest-ptr (+ binding-ptr (count binding-bytes))
         key-ptr (+ digest-ptr (count digest-bytes))

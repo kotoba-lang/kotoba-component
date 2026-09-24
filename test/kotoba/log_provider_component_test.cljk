@@ -1,7 +1,7 @@
 (ns kotoba.log-provider-component-test
   "W5 third slice: real log-v1 dual-export wasm component provider.
    Multi-step Wasmtime: append, append+read, ring oldest-drop, and truncation flag."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -152,10 +152,10 @@
   []
   (let [mod "cm32p2|kotoba:application/log@1"
         export-run "cm32p2||run"
-        level-bytes (vec (.getBytes "info" "UTF-8"))
-        event-bytes (vec (.getBytes "boot" "UTF-8"))
-        msg1-bytes (vec (.getBytes "one" "UTF-8"))
-        msg2-bytes (vec (.getBytes "two" "UTF-8"))
+        level-bytes (vec (kbytes/utf8-bytes "info"))
+        event-bytes (vec (kbytes/utf8-bytes "boot"))
+        msg1-bytes (vec (kbytes/utf8-bytes "one"))
+        msg2-bytes (vec (kbytes/utf8-bytes "two"))
         level-ptr 8
         event-ptr (+ level-ptr (count level-bytes))
         msg1-ptr (+ event-ptr (count event-bytes))
@@ -300,9 +300,9 @@
   []
   (let [mod "cm32p2|kotoba:application/log@1"
         export-run "cm32p2||run"
-        level-bytes (vec (.getBytes "info" "UTF-8"))
-        event-bytes (vec (.getBytes "boot" "UTF-8"))
-        msg-bytes (vec (.getBytes "hi" "UTF-8"))
+        level-bytes (vec (kbytes/utf8-bytes "info"))
+        event-bytes (vec (kbytes/utf8-bytes "boot"))
+        msg-bytes (vec (kbytes/utf8-bytes "hi"))
         level-ptr 8
         event-ptr (+ level-ptr (count level-bytes))
         msg-ptr (+ event-ptr (count event-bytes))
@@ -409,9 +409,9 @@
   []
   (let [mod "cm32p2|kotoba:application/log@1"
         export-run "cm32p2||run"
-        level-bytes (vec (.getBytes "info" "UTF-8"))
-        event-bytes (vec (.getBytes "boot" "UTF-8"))
-        msg-bytes (vec (.getBytes "hi" "UTF-8"))
+        level-bytes (vec (kbytes/utf8-bytes "info"))
+        event-bytes (vec (kbytes/utf8-bytes "boot"))
+        msg-bytes (vec (kbytes/utf8-bytes "hi"))
         level-ptr 8
         event-ptr (+ level-ptr (count level-bytes))
         msg-ptr (+ event-ptr (count event-bytes))
@@ -522,9 +522,9 @@
   []
   (let [mod "cm32p2|kotoba:application/log@1"
         export-run "cm32p2||run"
-        level-bytes (vec (.getBytes "info" "UTF-8"))
-        event-bytes (vec (.getBytes "boot" "UTF-8"))
-        msg-bytes (vec (.getBytes "hi" "UTF-8"))
+        level-bytes (vec (kbytes/utf8-bytes "info"))
+        event-bytes (vec (kbytes/utf8-bytes "boot"))
+        msg-bytes (vec (kbytes/utf8-bytes "hi"))
         level-ptr 8
         event-ptr (+ level-ptr (count level-bytes))
         msg-ptr (+ event-ptr (count event-bytes))

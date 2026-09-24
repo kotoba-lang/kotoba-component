@@ -1,7 +1,7 @@
 (ns kotoba.object-get-stream-cm-resource-provider-component-test
   "W5 deepen ADR 0135/0136: full Component Model `resource bytes-task` packaging
   + multi-step Wasmtime get→poll-ready→body-len→drop."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -103,8 +103,8 @@
 (defn- cm-resource-sequence-driver-wat
   "get-stream → poll-ready → body-len → drop; return length 2."
   []
-  (let [binding (.getBytes "example/blocks" "UTF-8")
-        key (.getBytes "k1" "UTF-8")
+  (let [binding (kbytes/utf8-bytes "example/blocks")
+        key (kbytes/utf8-bytes "k1")
         b-ptr 256
         k-ptr 320]
     (str

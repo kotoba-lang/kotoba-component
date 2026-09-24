@@ -1,7 +1,7 @@
 (ns kotoba.llm-provider-component-test
   "W5 remaining kit wasm packaging: synthetic llm-v1 component provider.
    Multi-step Wasmtime generate sequence (two fixed-ok) added as deepen slice."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -157,7 +157,7 @@
   []
   (let [mod "cm32p2|kotoba:application/llm@1"
         export-run "cm32p2||run"
-        model-bytes (vec (.getBytes "m" "UTF-8"))
+        model-bytes (vec (kbytes/utf8-bytes "m"))
         model-ptr 8
         r1-base 64
         r2-base 160
@@ -272,9 +272,9 @@
   []
   (let [mod "cm32p2|kotoba:application/llm@1"
         export-run "cm32p2||run"
-        model-bytes (vec (.getBytes "m" "UTF-8"))
-        p1 (vec (.getBytes "hello" "UTF-8"))
-        p2 (vec (.getBytes "xy" "UTF-8"))
+        model-bytes (vec (kbytes/utf8-bytes "m"))
+        p1 (vec (kbytes/utf8-bytes "hello"))
+        p2 (vec (kbytes/utf8-bytes "xy"))
         model-ptr 8
         p1-ptr 16
         p2-ptr 24

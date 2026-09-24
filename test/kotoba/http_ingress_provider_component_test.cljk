@@ -1,7 +1,7 @@
 (ns kotoba.http-ingress-provider-component-test
   "W5 family-3 second slice: synthetic http-ingress dual-export wasm provider.
    Multi-step Wasmtime: accept→none, reply true-sum, and accept+reply dual-export walk."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -504,8 +504,8 @@
   []
   (let [ingress "cm32p2|kotoba:application/http-ingress@1"
         host "cm32p2|kotoba:application/http-ingress-host@1"
-        method-bytes (vec (.getBytes "GET" "UTF-8"))
-        path-bytes (vec (.getBytes "/x" "UTF-8"))
+        method-bytes (vec (kbytes/utf8-bytes "GET"))
+        path-bytes (vec (kbytes/utf8-bytes "/x"))
         mptr 8
         pptr (+ mptr (count method-bytes))
         accept-ret 64]

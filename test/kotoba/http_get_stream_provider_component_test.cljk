@@ -1,7 +1,7 @@
 (ns kotoba.http-get-stream-provider-component-test
   "W5 deepen ADR 0131: synthetic http get-stream wasm packaging
   (url+headers → i64 byte-count intermediate) + multi-step Wasmtime."
-  (:require [clojure.java.io :as io]
+  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -13,7 +13,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- wat-data
   [bytes]
@@ -96,8 +96,8 @@
 (defn- get-stream-sequence-driver-wat
   "Two get calls with empty headers; sum of fixed body lengths (2+2=4)."
   []
-  (let [url1 (.getBytes "https://api.example.test/a" "UTF-8")
-        url2 (.getBytes "https://api.example.test/b" "UTF-8")
+  (let [url1 (kbytes/utf8-bytes "https://api.example.test/a")
+        url2 (kbytes/utf8-bytes "https://api.example.test/b")
         u1-ptr 256
         u2-ptr 384]
     (str
