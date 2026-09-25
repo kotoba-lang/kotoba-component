@@ -71,7 +71,7 @@
                           :effects #{} :body 42}]}
         wit (assoc (wit/emit kir {}) :imports ["aiueos-clock-now"])
         e (try (artifact/package #?(:clj (byte-array 0) :cljs (js/Buffer.alloc 0)) kir wit) nil
-               (catch #?(:clj clojure.lang.ExceptionInfo :cljs :default) e e))]
+               (catch :default e e))]
     (is (some? e))
     (is (= "component capability imports require Canonical provider lowering" (ex-message e)))
     (is (= :component-artifact (:phase (ex-data e))))))

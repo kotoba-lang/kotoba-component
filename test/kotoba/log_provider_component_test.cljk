@@ -1,7 +1,7 @@
 (ns kotoba.log-provider-component-test
   "W5 third slice: real log-v1 dual-export wasm component provider.
    Multi-step Wasmtime: append, append+read, ring oldest-drop, and truncation flag."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -73,7 +73,7 @@
                            [:record (second (:append-res d))
                             [[:sequence :bool]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"log-v1's own literal request/result shapes"
+         kerror/ExceptionInfo #"log-v1's own literal request/result shapes"
          (composition/package-log-provider
           (:append-req d) (:append-res d)
           (:read-req d) (:read-res d)

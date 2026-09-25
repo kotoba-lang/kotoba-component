@@ -1,7 +1,7 @@
 (ns kotoba.object-get-stream-linear-table-component-test
   "W5 deepen ADR 0134: intermediate CM packaging linear resource table
   (get→poll→read→drop free functions on object-store)."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -31,7 +31,7 @@
   (let [req-name :kotoba.object/get-stream-request
         d (descriptors)]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"binding\+key"
+         kerror/ExceptionInfo #"binding\+key"
          (composition/package-object-get-stream-linear-table-provider
           [:ref req-name]
           (assoc (:schemas d)

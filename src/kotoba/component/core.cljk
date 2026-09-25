@@ -1,14 +1,13 @@
 (ns kotoba.component.core
   "Dedicated standard32 core emission for qualified Component Model slices."
   {:kotoba/export [assert-supported! asymmetric-variant-capability-provider-wat clock-provider-wat clock-wasi-provider-wat emit fuel-enforcement http-echo-stub-wat http-get-stream-provider-wat http-host-import-module http-host-provider-wat http-ingress-provider-wat http-provider-wat llm-echo-stub-wat llm-host-import-module llm-host-provider-wat llm-provider-wat log-provider-table-capacity log-provider-wat object-get-stream-cm-resource-provider-wat object-get-stream-linear-table-provider-wat object-get-stream-provider-wat object-store-put-get-provider-wat object-write-provider-wat scalar-capability-imports state-provider-table-capacity state-provider-wat storage-provider-table-capacity storage-provider-wat ui-provider-wat variant-capability-provider-wat wasi-monotonic-clock-import-module wasi-system-clock-import-module]}
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             [kotoba.wasm.core :as wasm]
             [kotoba.wasm.canonical-abi :as canonical]
             [kotoba.component.wit :as component-wit]
             [kotoba.abi.contract :as abi]
             [kotoba.kir.value :as value]
-            [kotoba.wasm.tools :as wasm-tools])
-  #?(:clj (:import [java.nio.charset StandardCharsets])))
+            [kotoba.wasm.tools :as wasm-tools]))
 
 (defn- reject [message data]
   (throw (ex-info message (assoc data :phase :component-core))))
@@ -21,7 +20,7 @@
 ;; Portable since 2026-09-11 (amu ADR 0348 iteration 6).
 
 (defn- utf8-octets [^String s]
-  #?(:clj (vec (.getBytes s StandardCharsets/UTF_8))
+  #?(:clj (vec (kbytes/utf8-bytes s))
      :cljs (vec (js/Array.from (js/Buffer.from s "utf8")))))
 
 (defn- hex2 [n]

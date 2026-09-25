@@ -1,7 +1,7 @@
 (ns kotoba.object-write-provider-component-test
   "W5 stream-object write-path wasm packaging: synthetic dual-export provider.
    Multi-step Wasmtime: put-block sequence and put+CAS dual-export walk."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -66,7 +66,7 @@
                    [:record :kotoba.object/put-block-request
                     [[:binding :keyword]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"stream-object write-path shapes"
+         kerror/ExceptionInfo #"stream-object write-path shapes"
          (composition/package-object-write-provider
           (:put-req d) (:put-res d) (:cas-req d) (:cas-res d) bad)))))
 

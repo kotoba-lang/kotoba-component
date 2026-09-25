@@ -1,7 +1,7 @@
 (ns kotoba.storage-provider-component-test
   "W5 remaining kit wasm packaging: synthetic storage-v1 component provider.
    Multi-step Wasmtime get→missing sequence added as deepen slice."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -73,7 +73,7 @@
         schemas (assoc (:schemas d)
                        :demo/req [:variant :demo/req [[:x :bool]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"storage-v1's own literal request/result shape"
+         kerror/ExceptionInfo #"storage-v1's own literal request/result shape"
          (composition/package-storage-provider
           bad-req (:result d) schemas)))))
 

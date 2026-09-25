@@ -14,12 +14,12 @@
   slurp) and uses node:crypto, so it is a compiler-side tool namespace, not
   browser code."
   {:kotoba/export [contract contract-resource emit host-binding-contract required-host-guard type-text]}
-  (:require [kotoba.lang.edn :as edn]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
             [kotoba.lang.text :as str]
             [kotoba.abi.contract :as abi]
-            [clojure.java.io :as io]
+            [kotoba.io :as io]
             #?@(:cljs [["node:crypto" :as crypto]]))
-  #?(:clj (:import [java.nio.charset StandardCharsets]
+  #?(:clj (:import
                    [java.security MessageDigest])))
 
 (def contract-resource "kotoba/lang/component-model-v1.edn")
@@ -51,7 +51,7 @@
 (defn- text-sha256 [text]
   #?(:clj
      (let [bytes (.digest (MessageDigest/getInstance "SHA-256")
-                          (.getBytes ^String text StandardCharsets/UTF_8))]
+                          (kbytes/utf8-bytes ^String text))]
        (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bytes)))
      :cljs
      (-> (crypto/createHash "sha256") (.update text "utf8") (.digest "hex"))))

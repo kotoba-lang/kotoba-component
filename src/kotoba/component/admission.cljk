@@ -23,9 +23,9 @@
   So this namespace emits a REQUEST -- everything the compiler genuinely knows
   -- and names the two keys a composer must add. Requesting is not granting."
   {:kotoba/export [cid cid-of-text complete composer-supplied-keys envelope-keys format-tag request request-keys]}
-  (:require [kotoba.lang.text :as str]
+  (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
             #?@(:cljs [["node:crypto" :as crypto]]))
-  #?(:clj (:import [java.nio.charset StandardCharsets]
+  #?(:clj (:import
                    [java.security MessageDigest])))
 
 (def format-tag :kotoba.component-admission-request/v1)
@@ -90,7 +90,7 @@
   (str "b" (base32-lower-nopad (into [0x01 0x55 0x12 0x20] (octets (sha256-bytes input))))))
 
 (defn cid-of-text [text]
-  (cid #?(:clj (.getBytes ^String text StandardCharsets/UTF_8)
+  (cid #?(:clj (kbytes/utf8-bytes ^String text)
           :cljs (js/Buffer.from text "utf8"))))
 
 ;; --- request ----------------------------------------------------------------

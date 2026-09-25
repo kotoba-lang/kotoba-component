@@ -6,8 +6,8 @@
    `wasi:clocks/monotonic-clock@0.3.0`, so the assertions here are about
    agreement with the host clock rather than about a synthetic sequence, and
    about what the composed world is allowed to import."
-  (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.lang.edn :as edn]
+            [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -20,7 +20,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (def ^:private minimum-wasmtime-major
   "Read from the pinned contract rather than restated, so the test cannot
@@ -123,7 +123,7 @@
                    [:monotonic [:ref :demo/mono]]
                    [:error [:ref :demo/err]]]]}]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"clock-v1's own literal request/result shape"
+         kerror/ExceptionInfo #"clock-v1's own literal request/result shape"
          (composition/package-clock-wasi-provider
           :clock/now [:ref :demo/clock-request] [:ref :demo/clock-result] schemas)))))
 
@@ -251,11 +251,11 @@
     ;; Narrowing the declared set must make the SAME artifact fail: this is
     ;; the check that the allowlist is load-bearing rather than decorative.
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"undeclared import"
+         kerror/ExceptionInfo #"undeclared import"
          (composition/assert-declared-wasi-imports!
           (:bytes provider) ["wasi:clocks/monotonic-clock@0.3.0"])))
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"missing a declared import"
+         kerror/ExceptionInfo #"missing a declared import"
          (composition/assert-declared-wasi-imports!
           (:bytes provider) (conj composition/clock-wasi-imports
                                   "wasi:filesystem/types@0.3.0"))))))
