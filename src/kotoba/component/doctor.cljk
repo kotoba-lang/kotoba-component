@@ -34,13 +34,13 @@
   as an ordinary test."
   {:kotoba/export [-main bump-policy check contract contract-drift evaluate install-hint major parse-version pins report]}
   (:require [kotoba.lang.edn :as edn]
-            [kotoba.io :as io]
+            [kotoba.component.embedded-resources :as embedded-resources]
             [kotoba.lang.text :as str]
             [kotoba.component.composition :as composition]
             [kotoba.wasm.tools :as wasm-tools]))
 
 (def contract
-  (edn/read-string (slurp (io/resource "kotoba/lang/component-model-v1.edn"))))
+  (edn/read-string (embedded-resources/resource-text "kotoba/lang/component-model-v1.edn")))
 
 (def pins
   "The declared toolchain, read from the contract rather than restated here."

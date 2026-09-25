@@ -1,6 +1,8 @@
 (ns kotoba.component.resource-classpath-portable-test
-  "kotoba.component.wit reads its contract (kotoba/lang/component-model-v1.edn)
-  as a CLASSPATH resource, from a CONSUMER's working directory.
+  "kotoba.component.wit's contract (kotoba/lang/component-model-v1.edn), read
+  from a CONSUMER's working directory. Since 2026-09-25 it is compile-time
+  text (kotoba.component.embedded-resources, superproject adr-2609242330 S3
+  (b')): neither the consumer's classpath nor its cwd can change it.
 
   The fixture is a consumer: a temp directory that is not this repository,
   where a fresh engine is started with this repository's classpath and asked
@@ -46,14 +48,15 @@
        (testing "1: from a consumer root with no resources/ at all, the contract resolves"
          (let [out (run-consumer consumer abs)]
            (is (.includes out "[:ok true nil]") out)))
-       (testing "2: this repository's resources/ NOT on the classpath, a decoy under the consumer's cwd -> named error, never the decoy"
+       (testing "2: this repository's resources/ NOT on the classpath, a decoy under the consumer's cwd -> the embedded contract, never the decoy"
+         ;; Until 2026-09-25 this case was a named error ("not on the
+         ;; classpath"); the contract no longer comes from the classpath.
          (.mkdirSync fs (.join path consumer "resources" "kotoba" "lang") #js {:recursive true})
          (.writeFileSync fs (.join path consumer "resources" "kotoba" "lang" "component-model-v1.edn") "{:decoy true}")
          (let [out (run-consumer consumer (.filter abs #(not= % resources)))]
            ;; [:ok <has :capabilities> <:decoy>] -- the decoy read is [:ok false true]
            (is (not (.includes out "[:ok false true]")) out)
-           (is (not (.includes out "[:ok")) out)
-           (is (.includes out "component contract resource is not on the classpath") out)))
+           (is (.includes out "[:ok true nil]") out)))
        (testing "boundary: the same decoy present, the classpath complete -> the real contract wins"
          (let [out (run-consumer consumer abs)]
            (is (.includes out "[:ok true nil]") out)))

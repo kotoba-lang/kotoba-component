@@ -22,7 +22,7 @@
   and fails at package time."
   {:kotoba/export [assert-declarations-resolve! capability-catalog parse-interface-id unresolvable-declarations]}
   (:require [kotoba.lang.edn :as edn]
-            [kotoba.io :as io]
+            [kotoba.component.embedded-resources :as embedded-resources]
             [kotoba.component.wit-text :as wit-text]))
 
 (defn- reject [message data]
@@ -45,10 +45,13 @@
   [{:keys [dir files]}]
   (into #{}
         (mapcat (fn [file]
-                  (let [resource (io/resource (str dir "/" file))]
-                    (when-not resource
+                  ;; compile-time text of resources/<dir>/<file> (superproject
+                  ;; adr-2609242330 S3 (b')); nil exactly when the path is not
+                  ;; one the generator embedded.
+                  (let [text (embedded-resources/resource-text (str dir "/" file))]
+                    (when-not text
                       (reject "vendored WASI WIT is missing" {:file (str dir "/" file)}))
-                    (wit-text/interface-names (slurp resource)))))
+                    (wit-text/interface-names text))))
         files))
 
 (defn parse-interface-id
@@ -63,8 +66,8 @@
 (defn capability-catalog
   "Capability entries from the pinned contract."
   []
-  (-> (io/resource "kotoba/lang/component-model-v1.edn")
-      slurp edn/read-string :capabilities))
+  (-> (embedded-resources/resource-text "kotoba/lang/component-model-v1.edn")
+      edn/read-string :capabilities))
 
 (defn unresolvable-declarations
   "Every `:provider-wasi` entry that does not name an interface present in
