@@ -1,8 +1,8 @@
 (ns kotoba.clock-provider-component-test
   "W5 second slice: real clock-v1 wasm component provider (composition + validate).
    Multi-step Wasmtime sequence driver (wall then mono) added as deepen slice."
-  (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.lang.edn :as edn]
+            [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -14,7 +14,7 @@
 
 (def ^:private wasmtime-binary
   (let [pinned (io/file ".tools" "wasmtime" "wasmtime")]
-    (if (.canExecute pinned) (.getPath pinned) "wasmtime")))
+    (if (io/can-execute? pinned) (io/path pinned) "wasmtime")))
 
 (defn- ref-ify
   [variant-descriptor]
@@ -72,7 +72,7 @@
                    [:monotonic [:ref :demo/mono]]
                    [:error [:ref :demo/err]]]]}]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"clock-v1's own literal request/result shape"
+         kerror/ExceptionInfo #"clock-v1's own literal request/result shape"
          (composition/package-clock-provider
           :clock/now descriptor result-descriptor schemas)))))
 

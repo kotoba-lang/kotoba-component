@@ -1,7 +1,7 @@
 (ns kotoba.llm-provider-component-test
   "W5 remaining kit wasm packaging: synthetic llm-v1 component provider.
    Multi-step Wasmtime generate sequence (two fixed-ok) added as deepen slice."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -72,7 +72,7 @@
                    [:record :kotoba.llm/generate-request
                     [[:model :keyword] [:prompt :string]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"llm-v1's own literal request/result shape"
+         kerror/ExceptionInfo #"llm-v1's own literal request/result shape"
          (composition/package-llm-provider
           (:request d) (:result d) bad)))))
 

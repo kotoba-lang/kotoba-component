@@ -1,5 +1,5 @@
 (ns kotoba.component-wit-test
-  (:require [kotoba.io :as kio] [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.io :as kio] [kotoba.test :refer [deftest is testing]]
             [kotoba.process :as shell]
             [kotoba.component.wit :as wit]))
 
@@ -57,20 +57,20 @@
                             :result record-type :body 'point}]}
         source (:source (wit/emit value))]
     (is (re-find #"export echo: func\(point: app-point\) -> app-point" source))
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo #"differs from sealed schema identity"
+    (is (thrown-with-msg? kerror/ExceptionInfo #"differs from sealed schema identity"
                           (wit/emit (assoc-in value [:functions 0 :result]
                                               [:record :app/point [[:x :f64]]]))))))
 
 (deftest rejects-unregistered-capabilities-and-name-collisions
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"no WIT contract"
+  (is (thrown-with-msg? kerror/ExceptionInfo #"no WIT contract"
                         (wit/emit (assoc-in kir [:functions 0 :body]
                                            '(typed-cap-call 255 :i64 :i64 0)))))
-  (is (thrown-with-msg? clojure.lang.ExceptionInfo #"collide"
+  (is (thrown-with-msg? kerror/ExceptionInfo #"collide"
                         (wit/emit (assoc kir :schemas
                                          {:app/a [:record :app/a [[:x :i64]]]
                                           :app.a [:record :app.a [[:x :i64]]]}))))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"export names collide"
+       kerror/ExceptionInfo #"export names collide"
        (wit/emit {:format :kotoba.kir/v4
                   :exports ['do-work 'do_work]
                   :schemas {}
@@ -79,7 +79,7 @@
                               {:name 'do_work :params [] :param-types []
                                :result :i64 :body 0}]})))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"parameter names collide"
+       kerror/ExceptionInfo #"parameter names collide"
        (wit/emit {:format :kotoba.kir/v4
                   :exports ['invoke]
                   :schemas {}
@@ -129,7 +129,7 @@
                             :param-types [[:ref :edn/node]]
                             :result [:ref :edn/node]
                             :body 'n}]}]
-    (is (thrown-with-msg? clojure.lang.ExceptionInfo
+    (is (thrown-with-msg? kerror/ExceptionInfo
                           #"recursive schema has no WIT representation"
                           (wit/emit value)))))
 

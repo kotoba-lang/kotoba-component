@@ -34,7 +34,7 @@
   as an ordinary test."
   {:kotoba/export [-main bump-policy check contract contract-drift evaluate install-hint major parse-version pins report]}
   (:require [kotoba.lang.edn :as edn]
-            [clojure.java.io :as io]
+            [kotoba.io :as io]
             [kotoba.lang.text :as str]
             [kotoba.component.composition :as composition]
             [kotoba.wasm.tools :as wasm-tools]))

@@ -1,5 +1,5 @@
 (ns kotoba.component-test
-  (:require [kotoba.io :as kio] [clojure.java.shell :as shell]
+  (:require [kotoba.lang.error :as kerror] [kotoba.io :as kio] [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
             [kotoba.component.core :as core]
@@ -360,7 +360,7 @@
             [:record :demo/labeled-point [[:label :string] [:x :i64]]]
             point :label)))]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
+         kerror/ExceptionInfo #"no qualified Canonical lowering"
          (core/assert-supported! escaped))
         "an indirect leaf cannot escape through an unrelated scalar context")))
 
@@ -522,7 +522,7 @@
             [:record :demo/list-point [[:items :vector-i64] [:x :i64]]]
             point :items)))]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
+         kerror/ExceptionInfo #"no qualified Canonical lowering"
          (core/assert-supported! escaped))
         "an indirect list cannot escape through an unrelated context")))
 
@@ -968,7 +968,7 @@
                  [{:name 'echo :params ['value] :param-types [descriptor]
                    :result descriptor :effects #{} :body 'value}]}]
         (is (thrown-with-msg?
-             clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
+             kerror/ExceptionInfo #"no qualified Canonical lowering"
              (core/emit kir :wasm32-wasi-kotoba-v1)))))))
 
 (deftest structural-list-record-validates-every-active-item
@@ -1110,7 +1110,7 @@
 
 (deftest wit-canonical-name-collisions-fail-before-packaging
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"export names collide"
+       kerror/ExceptionInfo #"export names collide"
        (wit/emit {:format :kotoba.kir/v4 :exports ['do-work 'do_work]
                   :schemas {}
                   :functions [{:name 'do-work :params [] :param-types []
@@ -1118,7 +1118,7 @@
                               {:name 'do_work :params [] :param-types []
                                :result :i64 :body 0}]})))
   (is (thrown-with-msg?
-       clojure.lang.ExceptionInfo #"parameter names collide"
+       kerror/ExceptionInfo #"parameter names collide"
        (wit/emit {:format :kotoba.kir/v4 :exports ['invoke] :schemas {}
                   :functions [{:name 'invoke
                                :params ['item-id 'item_id]

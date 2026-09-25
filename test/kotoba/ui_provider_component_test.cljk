@@ -1,7 +1,7 @@
 (ns kotoba.ui-provider-component-test
   "W5 remaining wasm packaging: synthetic ui-v1 dual-export component provider.
    Multi-step Wasmtime: commit sequence and commit+next-event dual-export walk."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -66,7 +66,7 @@
                    :kotoba.ui/commit-result
                    [:record :kotoba.ui/commit-result [[:revision :bool]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"ui-v1's own literal request/result shapes"
+         kerror/ExceptionInfo #"ui-v1's own literal request/result shapes"
          (composition/package-ui-provider
           (:commit-req d) (:commit-res d)
           (:event-req d) (:event-res d)

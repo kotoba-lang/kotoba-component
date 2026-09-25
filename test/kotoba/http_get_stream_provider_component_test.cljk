@@ -1,7 +1,7 @@
 (ns kotoba.http-get-stream-provider-component-test
   "W5 deepen ADR 0131: synthetic http get-stream wasm packaging
   (url+headers → i64 byte-count intermediate) + multi-step Wasmtime."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -40,7 +40,7 @@
                            [:record :kotoba.http/get-stream-request
                             [[:url :string]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"url\+headers"
+         kerror/ExceptionInfo #"url\+headers"
          (composition/package-http-get-stream-provider
           (:req d) (:res d) bad-schemas)))))
 

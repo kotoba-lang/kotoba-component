@@ -1,7 +1,7 @@
 (ns kotoba.http-provider-component-test
   "W5 family-2 second slice: synthetic http-v1 wasm component provider.
    Multi-step Wasmtime post sequence (two fixed-ok posts) added as deepen slice."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -71,7 +71,7 @@
                    [:record :kotoba.http/post-request
                     [[:url :string] [:body :string]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"http-v1's own literal request/result shape"
+         kerror/ExceptionInfo #"http-v1's own literal request/result shape"
          (composition/package-http-provider
           (:request d) (:result d) bad)))))
 

@@ -1,7 +1,7 @@
 (ns kotoba.object-get-stream-provider-component-test
   "W5 deepen ADR 0130: synthetic object get-stream wasm packaging
   (binding+key → i64 byte-count intermediate) + multi-step Wasmtime."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -35,7 +35,7 @@
                            [:record :kotoba.object/get-stream-request
                             [[:key :string]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"binding\+key"
+         kerror/ExceptionInfo #"binding\+key"
          (composition/package-object-get-stream-provider
           (:req d) (:res d) bad-schemas)))))
 

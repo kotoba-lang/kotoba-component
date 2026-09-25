@@ -9,7 +9,7 @@
 
   `typed-cap-call` is a KIR form, not source syntax, so these fixtures build
   KIR directly -- the same way `component-artifact-test` does."
-  (:require [kotoba.io :as kio] [kotoba.process :as shell]
+  (:require [kotoba.lang.error :as kerror] [kotoba.io :as kio] [kotoba.process :as shell]
             [kotoba.test :refer [deftest is testing]]
             [kotoba.lang.text :as str]
             [kotoba.component.artifact :as artifact]
@@ -159,7 +159,7 @@
                             (list 'typed-cap-call clock-now
                                   :string :i64 'item))))]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"no qualified Canonical lowering"
+         kerror/ExceptionInfo #"no qualified Canonical lowering"
          (component-core/assert-supported! unsupported))
         "a non-scalar capability cannot fall back to a generic ambient import")))
 

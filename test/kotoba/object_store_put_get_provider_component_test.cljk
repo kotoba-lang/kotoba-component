@@ -1,7 +1,7 @@
 (ns kotoba.object-store-put-get-provider-component-test
   "W5 product vertical packaging (ADR 0132): unified object-store put+get
   dual-export + multi-step Wasmtime put-then-get (true + body-len = 3)."
-  (:require [kotoba.bytes :as kbytes] [kotoba.io :as io]
+  (:require [kotoba.lang.error :as kerror] [kotoba.bytes :as kbytes] [kotoba.io :as io]
             [clojure.java.shell :as shell]
             [kotoba.lang.text :as str]
             [kotoba.test :refer [deftest is]]
@@ -40,7 +40,7 @@
                    [:record :kotoba.object/get-stream-request
                     [[:key :string]]])]
     (is (thrown-with-msg?
-         clojure.lang.ExceptionInfo #"put bool \+ get i64"
+         kerror/ExceptionInfo #"put bool \+ get i64"
          (composition/package-object-store-put-get-provider
           (:put-req d) (:put-res d)
           (:get-req d) (:get-res d)
