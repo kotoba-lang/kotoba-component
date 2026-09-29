@@ -22,40 +22,58 @@
 
   So this namespace emits a REQUEST -- everything the compiler genuinely knows
   -- and names the two keys a composer must add. Requesting is not granting."
-  {:kotoba/export [cid cid-of-text complete composer-supplied-keys envelope-keys format-tag request request-keys]}
+  {:kotoba/export #?(:kotoba [cid cid-of-text]
+                     :default [cid cid-of-text complete composer-supplied-keys envelope-keys format-tag request request-keys])}
   (:require [kotoba.bytes :as kbytes] [kotoba.lang.text :as str]
+            #?@(:kotoba [[multiformats.core :as mf]])
             #?@(:cljs [["node:crypto" :as crypto]]))
   #?(:clj (:import
                    [java.security MessageDigest])))
 
-(def format-tag :kotoba.component-admission-request/v1)
+#?(:kotoba nil
+   :default
+(def format-tag :kotoba.component-admission-request/v1))
 
+#?(:kotoba nil
+   :default
 (def envelope-keys
   "The exact key set kototama's validate-world! requires of a full envelope."
   #{:target :wasi-version :profile :imports :exports :grants
-    :provider-bindings :ambient-wasi :budgets :identity})
+    :provider-bindings :ambient-wasi :budgets :identity}))
 
+#?(:kotoba nil
+   :default
 (def composer-supplied-keys
   "Envelope keys a composer/authority must add to a request. See ns docstring."
-  #{:grants :provider-bindings})
+  #{:grants :provider-bindings}))
 
-(def request-keys (into #{} (remove composer-supplied-keys) envelope-keys))
+#?(:kotoba nil
+   :default
+(def request-keys (into #{} (remove composer-supplied-keys) envelope-keys)))
 
+#?(:kotoba nil
+   :default
 (defn- reject [message data]
-  (throw (ex-info message (assoc data :phase :component-admission))))
+  (throw (ex-info message (assoc data :phase :component-admission)))))
 
 ;; --- CIDv1 (raw, sha2-256, base32-lower, unpadded) --------------------------
 ;; kototama's `cid-looking?` gate only checks the multibase prefix, but a real
 ;; CID is cheap here and a prefix-shaped digest would be a lie that passes.
 
-(def ^:private base32-alphabet "abcdefghijklmnopqrstuvwxyz234567")
+#?(:kotoba nil
+   :default
+(def ^:private base32-alphabet "abcdefghijklmnopqrstuvwxyz234567"))
 
+#?(:kotoba nil
+   :default
 (defn- octets
   "The bytes as a vector of 0..255, whichever host container they arrived in."
   [bytes]
   #?(:clj (mapv #(bit-and (int %) 0xff) bytes)
-     :cljs (vec (js/Array.from bytes))))
+     :cljs (vec (js/Array.from bytes)))))
 
+#?(:kotoba nil
+   :default
 (defn- base32-lower-nopad [bytes]
   (let [bytes (octets bytes)
         n (count bytes)
@@ -72,12 +90,22 @@
           ;; keep the accumulator small: only the low `bits` bits are live
           (recur (inc i) (bit-and acc (dec (bit-shift-left 1 bits))) bits))
         (do (when (pos? bits) (emit! (bit-shift-left acc (- 5 bits))))
-            (apply str @out))))))
+            (apply str @out)))))))
 
+#?(:kotoba nil
+   :default
 (defn- sha256-bytes [input]
   #?(:clj (.digest (MessageDigest/getInstance "SHA-256") ^bytes input)
-     :cljs (-> (.createHash crypto "sha256") (.update input) (.digest))))
+     :cljs (-> (.createHash crypto "sha256") (.update input) (.digest)))))
 
+#?(:kotoba
+(defn cid
+  "CIDv1 of `input` bytes: multibase 'b' + base32(0x01 0x55 0x12 0x20 digest)."
+  [input :vector-i64] :string
+  (mf/cidv1-raw input)))
+
+#?(:kotoba nil
+   :default
 (defn cid
   "CIDv1 of `input` bytes: multibase 'b' + base32(0x01 0x55 0x12 0x20 digest).
   0x01 = CID version 1, 0x55 = raw codec, 0x12/0x20 = sha2-256 / 32 bytes.
@@ -87,21 +115,31 @@
   runs over a vector of octets on both. `admission-portable-test` pins three
   vectors produced by the JVM implementation before the port."
   [input]
-  (str "b" (base32-lower-nopad (into [0x01 0x55 0x12 0x20] (octets (sha256-bytes input))))))
+  (str "b" (base32-lower-nopad (into [0x01 0x55 0x12 0x20] (octets (sha256-bytes input)))))))
 
+#?(:kotoba
+(defn cid-of-text [text :string] :string
+  (cid (kbytes/utf8-encode text))))
+
+#?(:kotoba nil
+   :default
 (defn cid-of-text [text]
   (cid #?(:clj (kbytes/utf8-bytes ^String text)
-          :cljs (js/Buffer.from text "utf8"))))
+          :cljs (js/Buffer.from text "utf8")))))
 
 ;; --- request ----------------------------------------------------------------
 
+#?(:kotoba nil
+   :default
 (defn- bounded-set! [field values]
   (let [value-set (set values)]
     (when (> (count value-set) 256)
       (reject "component envelope field exceeds its bound"
               {:field field :count (count value-set) :max 256}))
-    value-set))
+    value-set)))
 
+#?(:kotoba nil
+   :default
 (defn- budgets! [profile budgets]
   (when-not (map? budgets)
     (reject "component budgets must be a map" {:budgets budgets}))
@@ -115,8 +153,10 @@
               {:profile profile :missing (vec missing) :budgets budgets}))
     (when (and (= :async profile) (not= true (:cancellation budgets)))
       (reject "async components require cancellation" {:budgets budgets})))
-  budgets)
+  budgets))
 
+#?(:kotoba nil
+   :default
 (defn request
   "Build the compiler's half of a component admission envelope.
 
@@ -154,8 +194,10 @@
                          :component-cid component-cid
                          :definition-cids definition-cids))
            :format format-tag
-           :composer-supplied-keys composer-supplied-keys)))
+           :composer-supplied-keys composer-supplied-keys))))
 
+#?(:kotoba nil
+   :default
 (defn complete
   "Compose a full kototama envelope from a `request` plus the two keys only an
   authority/composer may decide. Returns a map with exactly `envelope-keys`;
@@ -180,4 +222,4 @@
     (when-not (= envelope-keys (set (keys envelope)))
       (reject "composed envelope key set is not exact"
               {:keys (set (keys envelope))}))
-    envelope))
+    envelope)))
