@@ -15,13 +15,164 @@
   {:kotoba/export [interface-functions interface-names world-imports]}
   (:require [kotoba.lang.text :as str]))
 
-(def ^:private interface-open #"\s*interface ([a-z0-9-]+) \{")
 
+;; ── the Kotoba reading of this file ─────────────────────────────────────────
+;; `#?(:kotoba A :default B)`: the Kotoba reader takes A, the JVM and
+;; ClojureScript readers take B, so every host body below is what it was.
+;; The regexes become byte scans over the same text (each pattern's grammar is
+;; ASCII; the scans that must cross other characters step by UTF-8 width, so
+;; they never land inside a sequence). "No match" is the empty string where the
+;; hosts have nil: every name these patterns capture has at least one
+;; character. Results are typed: a set of names, a list of ids, a map from
+;; interface id to whether it declares a function.
+
+#?(:kotoba
+   (defn- utf8-width [cp :i64] :i64
+     (cond (< cp 128) 1 (< cp 2048) 2 (< cp 65536) 3 :else 4)))
+
+#?(:kotoba
+   (defn- ws? [c :i64] :bool
+     (or (= c 32) (and (>= c 9) (<= c 13)))))
+
+#?(:kotoba
+   (defn- skip-ws [s :string i :i64] :i64
+     (let [n (string-byte-length s)]
+       (loop [j i]
+         (if (and (< j n) (ws? (string-code-point-at s j))) (recur (+ j 1)) j)))))
+
+#?(:kotoba
+   (defn- name-char? [c :i64] :bool
+     (or (and (>= c 97) (<= c 122)) (and (>= c 48) (<= c 57)) (= c 45))))
+
+#?(:kotoba
+   (defn- name-end [s :string i :i64] :i64
+     (let [n (string-byte-length s)]
+       (loop [j i]
+         (if (and (< j n) (name-char? (string-code-point-at s j))) (recur (+ j 1)) j)))))
+
+#?(:kotoba
+   (defn- lit-at?
+     "S holds the ASCII text LIT at byte offset I."
+     [s :string i :i64 lit :string] :bool
+     (let [n (string-byte-length s)
+           m (string-byte-length lit)]
+       (loop [k 0]
+         (cond (>= k m) true
+               (>= (+ i k) n) false
+               (= (string-code-point-at s (+ i k)) (string-code-point-at lit k)) (recur (+ k 1))
+               :else false)))))
+
+#?(:kotoba
+   (defn- interface-name-of
+     "The NAME of a line `\\s*interface NAME {` (the whole line), or \"\"."
+     [line :string] :string
+     (let [i (skip-ws line 0)]
+       (if (lit-at? line i "interface ")
+         (let [j (+ i 10)
+               e (name-end line j)]
+           (if (and (> e j) (lit-at? line e " {") (= (+ e 2) (string-byte-length line)))
+             (string-substring line j e)
+             ""))
+         ""))))
+
+#?(:kotoba
+   (defn- package-end
+     "The end of the run of characters that are neither whitespace nor `{`."
+     [s :string i :i64] :i64
+     (let [n (string-byte-length s)]
+       (loop [j i]
+         (if (< j n)
+           (let [c (string-code-point-at s j)]
+             (if (or (ws? c) (= c 123)) j (recur (+ j (utf8-width c)))))
+           j)))))
+
+#?(:kotoba
+   (defn- package-id-of
+     "The ID of a line `package ID {` (the whole line, already trimmed), or \"\"."
+     [t :string] :string
+     (if (lit-at? t 0 "package ")
+       (let [e (package-end t 8)]
+         (if (and (> e 8) (lit-at? t e " {") (= (+ e 2) (string-byte-length t)))
+           (string-substring t 8 e)
+           ""))
+       "")))
+
+#?(:kotoba
+   (defn- import-id-of
+     "The trimmed ID of a line `import ID;` (the whole line, already trimmed:
+     ID has neither `;` nor `{`), or \"\"."
+     [t :string] :string
+     (if (lit-at? t 0 "import ")
+       (let [n (string-byte-length t)
+             semi (string-find-byte t 59 7)
+             brace (string-find-byte t 123 7)]
+         (if (and (> semi 7) (= semi (- n 1)) (< brace 0))
+           (str/trim (string-substring t 7 semi))
+           ""))
+       "")))
+
+#?(:kotoba
+   (defn- brace-depth
+     "Count of `{` minus count of `}` in S."
+     [s :string] :i64
+     (let [n (string-byte-length s)]
+       (loop [i 0 d 0]
+         (if (>= i n)
+           d
+           (let [c (string-code-point-at s i)]
+             (recur (+ i (utf8-width c)) (cond (= c 123) (+ d 1) (= c 125) (- d 1) :else d))))))))
+
+#?(:kotoba
+   (defn- interface-id
+     "`PKG/IFACE` or `PKG/IFACE@VERSION` for a package `PKG@VERSION`."
+     [package :string iface :string] :string
+     (let [at (string-find-byte package 64 0)]
+       (if (< at 0)
+         (string-concat (string-concat package "/") iface)
+         (string-concat
+          (string-concat (string-concat (string-substring package 0 at) "/") iface)
+          (string-concat "@" (string-substring package (+ at 1) (string-byte-length package))))))))
+
+#?(:kotoba nil
+   :default
+(def ^:private interface-open #"\s*interface ([a-z0-9-]+) \{"))
+
+#?(:kotoba
+(defn interface-names
+  "Every interface name declared in a `.wit` source file."
+  [text :string] [:set :string]
+  (let [lines (str/split-lines text)
+        n (vector-count lines)]
+    (loop [i 0 acc (typed-set-new [:set :string])]
+      (if (>= i n)
+        acc
+        (let [name (interface-name-of (typed-list-nth [:list :string] lines i))]
+          (recur (+ i 1) (if (string=? name "") acc (typed-set-conj [:set :string] acc name)))))))))
+
+#?(:kotoba nil
+   :default
 (defn interface-names
   "Every interface name declared in a `.wit` source file."
   [text]
-  (into #{} (keep #(second (re-matches interface-open %)) (str/split-lines text))))
+  (into #{} (keep #(second (re-matches interface-open %)) (str/split-lines text)))))
 
+#?(:kotoba
+(defn world-imports
+  "Instance imports declared by the top-level world of printed component WIT."
+  [text :string] [:list :string]
+  (let [lines (str/split-lines text)
+        n (vector-count lines)]
+    (loop [i 0 out (typed-list-new [:list :string])]
+      (if (>= i n)
+        out
+        (let [t (str/trim (typed-list-nth [:list :string] lines i))]
+          (if (string=? (package-id-of t) "")
+            (let [id (import-id-of t)]
+              (recur (+ i 1) (if (string=? id "") out (conj out id))))
+            out)))))))
+
+#?(:kotoba nil
+   :default
 (defn world-imports
   "Instance imports declared by the top-level world of printed component WIT.
 
@@ -34,8 +185,39 @@
        (keep (fn [line]
                (when-let [[_ id] (re-matches #"import ([^;{]+);" (str/trim line))]
                  (str/trim id))))
-       vec))
+       vec)))
 
+#?(:kotoba
+(defn interface-functions
+  "Map of `PKG/IFACE@VER` -> whether that interface declares at least one function."
+  [text :string] [:map :string :bool]
+  (let [lines (str/split-lines text)
+        n (vector-count lines)]
+    (loop [i 0 package "" iface "" depth 0 has-func false
+           acc (typed-map-new [:map :string :bool])]
+      (if (>= i n)
+        acc
+        (let [t (str/trim (typed-list-nth [:list :string] lines i))]
+          (cond
+            (and (string=? iface "") (not (string=? (package-id-of t) "")))
+            (recur (+ i 1) (package-id-of t) "" 0 false acc)
+
+            (and (not (string=? package "")) (string=? iface "")
+                 (not (string=? (interface-name-of t) "")))
+            (recur (+ i 1) package (interface-name-of t) 1 false acc)
+
+            (not (string=? iface ""))
+            (let [d (+ depth (brace-depth t))]
+              (if (= d 0)
+                (recur (+ i 1) package "" 0 false
+                       (typed-map-assoc [:map :string :bool] acc (interface-id package iface) has-func))
+                (recur (+ i 1) package iface d
+                       (or has-func (str/includes? t "func(")) acc)))
+
+            :else (recur (+ i 1) package iface depth has-func acc))))))))
+
+#?(:kotoba nil
+   :default
 (defn interface-functions
   "Map of `\"<pkg>:<ns>/<iface>@<ver>\"` -> whether that interface declares at
   least one function, over printed component WIT.
@@ -81,4 +263,4 @@
                        (assoc acc id (boolean (some #(str/includes? % "func(") body)))))
               (recur more package iface depth (conj body trimmed) acc)))
 
-          :else (recur more package iface depth body acc))))))
+          :else (recur more package iface depth body acc)))))))
