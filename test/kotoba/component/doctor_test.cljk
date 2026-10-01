@@ -63,7 +63,7 @@
     (let [text (doctor/report [(doctor/evaluate :wasmtime nil)] [])]
       (is (re-find #"wasmtime" text))
       (is (re-find #"not installed" text))
-      (is (re-find #"cargo install wasmtime-cli" text))))
+      (is (re-find #"bytecodealliance/wasmtime/releases" text))))
   (testing "drift is reported distinctly from a missing tool"
     (let [text (doctor/report [] [{:pin :wac :contract "0.10.1"
                                    :enforced-by "x/y" :enforced "0.9.0"}])]

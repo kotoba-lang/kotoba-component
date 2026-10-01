@@ -96,9 +96,10 @@
                :reason "A floor rather than an exact pin: wasmtime executes artifacts, it does not produce bytes that must reproduce."}}})
 
 (def install-hint
-  {:wasm-tools "cargo install wasm-tools --version %s --locked"
-   :wac        "cargo install wac-cli --version %s --locked"
-   :wasmtime   "cargo install wasmtime-cli --locked   # any major >= %s"})
+  ;; Prebuilt release binaries only: no Rust toolchain is needed to get them.
+  {:wasm-tools "download the prebuilt binary: https://github.com/bytecodealliance/wasm-tools/releases/tag/v%s"
+   :wac        "download the prebuilt binary: https://github.com/bytecodealliance/wac/releases/tag/v%s"
+   :wasmtime   "download the prebuilt binary: https://github.com/bytecodealliance/wasmtime/releases   # any major >= %s"})
 
 ;; ---------------------------------------------------------------------------
 ;; pure helpers (no subprocess, so they are testable anywhere)

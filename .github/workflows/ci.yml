@@ -33,7 +33,9 @@ jobs:
       # kotoba-lang/compiler's own workflow installs. The provider-composition
       # tests shell out to it.
       - name: Install pinned Component composition tool
-        run: cargo install --locked --version 0.10.1 wac-cli
+        run: |
+          curl -sSfL -o "$HOME/.wasm-bin/wac" https://github.com/bytecodealliance/wac/releases/download/v0.10.1/wac-cli-x86_64-unknown-linux-musl
+          chmod +x "$HOME/.wasm-bin/wac"
       - run: wasm-tools --version && wasmtime --version && wac --version
       - run: clojure -M:test
 
