@@ -13,9 +13,9 @@
   (node:crypto), so it is a compiler-side tool namespace, not browser code.
   The contract is compile-time text (kotoba.component.embedded-resources)
   on both hosts since 2026-09-25."
-  {:kotoba/export [contract contract-resource emit host-binding-contract required-host-guard type-text]}
+  {:kotoba/export #?(:kotoba [contract contract-resource emit emit-with emit-with-contract host-binding-contract required-host-guard type-text] :default [contract contract-resource emit host-binding-contract required-host-guard type-text])}
   (:require [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
-            #?(:kotoba [kotoba.form :as form])
+            #?@(:kotoba [[kotoba.form :as form] [multiformats.core :as mf]])
             [kotoba.lang.text :as str]
             [kotoba.abi.contract :as abi]
             [kotoba.component.embedded-resources :as embedded-resources]
@@ -25,8 +25,21 @@
   #?(:clj (:import
                    [java.security MessageDigest])))
 
-(def contract-resource "kotoba/lang/component-model-v1.edn")
+#?(:kotoba
+(defn contract-resource [] :string "kotoba/lang/component-model-v1.edn")
+   :default
+(def contract-resource "kotoba/lang/component-model-v1.edn"))
 
+#?(:kotoba
+(defn- contract-text
+  "The contract text (compile-time data, embedded)."
+  [] :string
+  (let [t (embedded-resources/resource-text (contract-resource))]
+    (if (option-some?-of [:option :string] t)
+      (option-value-of [:option :string] t "")
+      (throw (ex-info "component contract resource is not embedded"
+                      {:phase :component-wit :resource (contract-resource)})))))
+   :default
 (defn- contract-text
   "The contract text: compile-time data since 2026-09-25 (superproject
   adr-2609242330 S3, decision (b')). `kotoba.component.embedded-resources`
@@ -48,8 +61,7 @@
   []
   (or (embedded-resources/resource-text contract-resource)
       (throw (ex-info "component contract resource is not embedded"
-                      {:phase :component-wit :resource contract-resource}))))
-
+                      {:phase :component-wit :resource contract-resource})))))
 ;; Kotoba: the contract is a Form (the recursive value of compiler data; a
 ;; `:document` stops at depth 8 and 32 items per container, this file is deeper),
 ;; read from the embedded text by `kotoba.form/edn-form`, and a constant must be a
@@ -59,17 +71,801 @@
    :default
 (def contract (edn/read-string (contract-text))))
 
+#?(:kotoba
+nil
+   :default
 (defn- reject [message data]
-  (throw (ex-info message (assoc data :phase :component-wit))))
+  (throw (ex-info message (assoc data :phase :component-wit)))))
 
+#?(:kotoba
+(defn- text-sha256 [text :string] :string
+  (kbytes/hex (mf/sha256 (kbytes/utf8-encode text))))
+   :default
 (defn- text-sha256 [text]
   #?(:clj
      (let [bytes (.digest (MessageDigest/getInstance "SHA-256")
                           (kbytes/utf8-bytes ^String text))]
        (apply str (map #(format "%02x" (bit-and (int %) 0xff)) bytes)))
      :cljs
-     (-> (crypto/createHash "sha256") (.update text "utf8") (.digest "hex"))))
+     (-> (crypto/createHash "sha256") (.update text "utf8") (.digest "hex")))))
 
+;; ── the Kotoba reading of this file ─────────────────────────────────────────
+;; `#?(:kotoba A :default B)`: the Kotoba reader takes A, the JVM and
+;; ClojureScript readers take B, so every host body below is what it was. KIR,
+;; the contract and every type descriptor are the recursive `:form/r` record of
+;; kotoba.form; a host `nil` is the nil Form; the exported constants are
+;; zero-argument functions. `emit`'s options map is the second argument of
+;; `emit-with` (Kotoba has no optional arity here). Differences, each forced by
+;; the language: a refusal's data is a flat map of strings; `wit-name` lowers
+;; ASCII only (a non-ASCII letter becomes `-`, where the host's `lower` would map
+;; U+212A KELVIN SIGN to `k` and U+0130 to `i` + a combining dot); a function that
+;; can refuse is called from a tail position or a `let` binding (the abort
+;; ability's rule) and a loop that can refuse is a recursion.
+
+#?(:kotoba
+(defn- kf [k :keyword] [:ref :form/r] (form/keyword-form k)))
+
+#?(:kotoba
+(defn- gk [m [:ref :form/r] k :keyword] [:ref :form/r]
+  (if (form/is-map? m) (form/form-get m (form/keyword-form k)) (form/nil-form))))
+
+#?(:kotoba
+(defn- gs [m [:ref :form/r] k :keyword] :string
+  (let [v (gk m k)] (if (form/is-string? v) (form/string-value v) ""))))
+
+#?(:kotoba
+(defn- is-kw? [x [:ref :form/r] k :keyword] :bool
+  (and (form/is-keyword? x) (= (form/keyword-value x) k))))
+
+#?(:kotoba
+(defn- truthy? [x [:ref :form/r]] :bool
+  (not (or (form/is-nil? x) (and (form/is-bool? x) (not (form/bool-value x)))))))
+
+;; ---- text of a Form (pr-str), for ordering ---------------------------------------------------
+
+#?(:kotoba
+(defn- edn-seq [kids [:list [:ref :form/r]] i :i64 acc :string] :string
+  (if (>= i (vector-count kids))
+    acc
+    (edn-seq kids (+ i 1) (str acc (if (= i 0) "" " ") (edn-text (typed-list-nth [:list [:ref :form/r]] kids i)))))))
+
+#?(:kotoba
+(defn- edn-map [kids [:list [:ref :form/r]] i :i64 acc :string] :string
+  (if (>= (+ i 1) (vector-count kids))
+    acc
+    (edn-map kids (+ i 2) (str acc (if (= i 0) ", " ", ") (edn-text (typed-list-nth [:list [:ref :form/r]] kids i))
+                               " " (edn-text (typed-list-nth [:list [:ref :form/r]] kids (+ i 1))))))))
+
+#?(:kotoba
+(defn- edn-text [f [:ref :form/r]] :string
+  (let [t (form/tag-of f)]
+    (cond
+      (= t 0) "nil"
+      (= t 1) (if (form/is-true? f) "true" "false")
+      (= t 2) (string-from-i64 (form/int-value f))
+      (= t 3) (document-edn-print (document-string (form/string-value f)))
+      (= t 4) (document-edn-print (document-keyword (form/keyword-value f)))
+      (= t 5) (form/symbol-value f)
+      (= t 6) (str "(" (edn-seq (form/kids-of f) 0 "") ")")
+      (= t 7) (str "[" (edn-seq (form/kids-of f) 0 "") "]")
+      (= t 8) (str "#{" (edn-seq (form/kids-of f) 0 "") "}")
+      (= t 9) (str "{" (edn-map (form/kids-of f) 0 "") "}")
+      :else ""))))
+
+;; ---- small lists of Forms -------------------------------------------------------------------------
+
+#?(:kotoba
+(defn- has-item? [xs [:list [:ref :form/r]] x [:ref :form/r] i :i64] :bool
+  (cond (>= i (vector-count xs)) false
+        (form/eq (typed-list-nth [:list [:ref :form/r]] xs i) x) true
+        :else (has-item? xs x (+ i 1)))))
+
+#?(:kotoba
+(defn- add-unique [xs [:list [:ref :form/r]] x [:ref :form/r]] [:list [:ref :form/r]]
+  (if (has-item? xs x 0) xs (form/append-form xs x))))
+
+;; the text a name-like leaf sorts by (`(str x)`)
+#?(:kotoba
+(defn- leaf-text [x [:ref :form/r]] :string
+  (cond (form/is-string? x) (form/string-value x)
+        (form/is-keyword? x) (document-edn-print (document-keyword (form/keyword-value x)))
+        (form/is-symbol? x) (form/symbol-value x)
+        (form/is-int? x) (string-from-i64 (form/int-value x))
+        :else "")))
+
+#?(:kotoba
+(defn- take-forms [xs [:list [:ref :form/r]] n :i64] [:list [:ref :form/r]]
+  (loop [i 0 acc (form/no-forms)]
+    (if (>= i n) acc (recur (+ i 1) (form/append-form acc (typed-list-nth [:list [:ref :form/r]] xs i)))))))
+
+#?(:kotoba
+(defn- drop-forms [xs [:list [:ref :form/r]] n :i64] [:list [:ref :form/r]]
+  (let [len (vector-count xs)]
+    (loop [i n acc (form/no-forms)]
+      (if (>= i len) acc (recur (+ i 1) (form/append-form acc (typed-list-nth [:list [:ref :form/r]] xs i))))))))
+
+;; X inserted before the first item whose key is greater (stable)
+#?(:kotoba
+(defn- insert-by-text [xs [:list [:ref :form/r]] x [:ref :form/r] key :string] [:list [:ref :form/r]]
+  (let [n (vector-count xs)]
+    (loop [i 0]
+      (cond
+        (>= i n) (form/append-form xs x)
+        (> (string-compare (leaf-text (typed-list-nth [:list [:ref :form/r]] xs i)) key) 0)
+        (form/append-many (form/append-form (take-forms xs i) x) (drop-forms xs i))
+        :else (recur (+ i 1)))))))
+
+;; the leaves of XS sorted by their text (`(sort-by str ...)`)
+#?(:kotoba
+(defn- sort-by-text [xs [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (let [n (vector-count xs)]
+    (loop [i 0 acc (form/no-forms)]
+      (if (>= i n)
+        acc
+        (let [x (typed-list-nth [:list [:ref :form/r]] xs i)]
+          (recur (+ i 1) (insert-by-text acc x (leaf-text x)))))))))
+
+;; ---- wit-name ------------------------------------------------------------------------------------
+
+#?(:kotoba
+(defn- source-text [value [:ref :form/r]] :string
+  (cond (form/is-keyword? value)
+        (let [s (document-edn-print (document-keyword (form/keyword-value value)))]
+          (string-substring s 1 (string-byte-length s)))
+        (form/is-symbol? value) (form/symbol-value value)
+        (form/is-string? value) (form/string-value value)
+        :else "")))
+
+#?(:kotoba
+(defn- cp-width [cp :i64] :i64 (cond (< cp 128) 1 (< cp 2048) 2 (< cp 65536) 3 :else 4)))
+
+;; the bytes of S lowered, every run of characters outside [a-z0-9-] one `-`, runs of `-` one `-`
+#?(:kotoba
+(defn- wit-bytes [s :string i :i64 n :i64 acc :vector-i64] :vector-i64
+  (if (>= i n)
+    acc
+    (let [cp (string-code-point-at s i)
+          c (cond (and (>= cp 65) (<= cp 90)) (+ cp 32)
+                  (or (and (>= cp 97) (<= cp 122)) (and (>= cp 48) (<= cp 57))) cp
+                  :else 45)
+          last-c (if (= 0 (vector-count acc)) 0 (vector-at acc (- (vector-count acc) 1)))]
+      (wit-bytes s (+ i (cp-width cp)) n
+                 (if (and (= c 45) (= last-c 45)) acc (vector-conj acc c)))))))
+
+#?(:kotoba
+(defn- strip-dashes [v :vector-i64] :vector-i64
+  (let [n (vector-count v)
+        from (if (and (> n 0) (= 45 (vector-at v 0))) 1 0)
+        to (if (and (> n from) (= 45 (vector-at v (- n 1)))) (- n 1) n)]
+    (loop [i from acc (vector-i64)]
+      (if (>= i to) acc (recur (+ i 1) (vector-conj acc (vector-at v i))))))))
+
+#?(:kotoba
+(defn- wit-name [value [:ref :form/r]] :string
+  (let [source (source-text value)
+        v (strip-dashes (wit-bytes source 0 (string-byte-length source) (vector-i64)))
+        ok? (and (> (vector-count v) 0) (>= (vector-at v 0) 97) (<= (vector-at v 0) 122))]
+    (if ok?
+      (string-from-utf8 (bytes-from-vector-i64 v))
+      (throw (ex-info "value has no canonical WIT identifier" {:phase :component-wit :value source}))))))
+
+;; ---- type-text -----------------------------------------------------------------------------------------------
+
+#?(:kotoba
+(defn- tuple-text [items [:ref :form/r] i :i64 acc :string] :string
+  (if (>= i (form/count-of items))
+    acc
+    (let [t (type-text (form/nth-of items i))]
+      (tuple-text items (+ i 1) (str acc (if (= i 0) "" ", ") t))))))
+
+#?(:kotoba
+(defn- vector-type-text [d [:ref :form/r]] :string
+  (let [head (form/nth-of d 0)]
+    (cond
+      (or (is-kw? head :ref) (is-kw? head :record)) (wit-name (form/nth-of d 1))
+      (is-kw? head :option) (let [t (type-text (form/nth-of d 1))] (str "option<" t ">"))
+      (is-kw? head :result) (let [a (type-text (form/nth-of d 1))
+                                  b (type-text (form/nth-of d 2))]
+                              (str "result<" a ", " b ">"))
+      (is-kw? head :list) (let [t (type-text (form/nth-of d 1))] (str "list<" t ">"))
+      (is-kw? head :vector) (let [t (tuple-text (form/nth-of d 1) 0 "")] (str "tuple<" t ">"))
+      (is-kw? head :set) (let [t (type-text (form/nth-of d 1))] (str "list<" t ">"))
+      (is-kw? head :map) (let [a (type-text (form/nth-of d 1))
+                               b (type-text (form/nth-of d 2))]
+                           (str "list<tuple<" a ", " b ">>"))
+      :else (throw (ex-info "descriptor is not representable as a WIT value type" {:phase :component-wit}))))))
+
+#?(:kotoba
+(defn type-text
+  "The canonical WIT spelling for an admitted Kotoba descriptor (a Form)."
+  [descriptor [:ref :form/r]] :string
+  (cond
+    (is-kw? descriptor :i64) "s64"
+    (is-kw? descriptor :f32) "f32"
+    (is-kw? descriptor :f64) "f64"
+    (is-kw? descriptor :bool) "bool"
+    (or (is-kw? descriptor :string) (is-kw? descriptor :keyword)) "string"
+    (is-kw? descriptor :vector-i64) "list<s64>"
+    (is-kw? descriptor :vector-f64) "list<f64>"
+    (and (form/is-vec? descriptor) (> (form/count-of descriptor) 0) (form/is-keyword? (form/nth-of descriptor 0)))
+    (vector-type-text descriptor)
+    :else (throw (ex-info "descriptor is not representable as a WIT value type" {:phase :component-wit})))))
+
+;; ---- schemas --------------------------------------------------------------------------------------------------------
+
+#?(:kotoba
+(defn- field-lines [fields [:ref :form/r] i :i64 acc :string] :string
+  (if (>= i (form/count-of fields))
+    acc
+    (let [f (form/nth-of fields i)
+          n (wit-name (form/nth-of f 0))
+          t (type-text (form/nth-of f 1))]
+      (field-lines fields (+ i 1) (str acc "    " n ": " t ",\n"))))))
+
+#?(:kotoba
+(defn- case-lines [cases [:ref :form/r] i :i64 acc :string] :string
+  (if (>= i (form/count-of cases))
+    acc
+    (let [c (form/nth-of cases i)
+          n (wit-name (form/nth-of c 0))
+          t (type-text (form/nth-of c 1))]
+      (case-lines cases (+ i 1) (str acc "    " n "(" t "),\n"))))))
+
+#?(:kotoba
+(defn- schema-text [schema-name [:ref :form/r] descriptor [:ref :form/r]] :string
+  (let [name (wit-name schema-name)
+        head (if (and (form/is-vec? descriptor) (> (form/count-of descriptor) 0)) (form/nth-of descriptor 0) (form/nil-form))]
+    (cond
+      (is-kw? head :record)
+      (if (not (form/eq schema-name (form/nth-of descriptor 1)))
+        (throw (ex-info "schema key and record identity differ" {:phase :component-wit :schema (leaf-text schema-name)}))
+        (let [body (field-lines (form/nth-of descriptor 2) 0 "")]
+          (str "  record " name " {\n" body "  }\n")))
+      (is-kw? head :variant)
+      (if (not (form/eq schema-name (form/nth-of descriptor 1)))
+        (throw (ex-info "schema key and variant identity differ" {:phase :component-wit :schema (leaf-text schema-name)}))
+        (let [body (case-lines (form/nth-of descriptor 2) 0 "")]
+          (str "  variant " name " {\n" body "  }\n")))
+      :else
+      (let [t (type-text descriptor)]
+        (str "  type " name " = " t ";\n"))))))
+
+;; the schema names a descriptor refers to, each once (a record / ref vector answers its
+;; name and does not descend), ACC in first-seen order
+#?(:kotoba
+(defn- referenced-kids [d [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (form/count-of d))
+    acc
+    (referenced-kids d (+ i 1) (referenced-names (form/nth-of d i) acc)))))
+
+#?(:kotoba
+(defn- referenced-names [d [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (cond
+    (and (form/is-vec? d) (> (form/count-of d) 0)
+         (or (is-kw? (form/nth-of d 0) :ref) (is-kw? (form/nth-of d 0) :record)))
+    (add-unique acc (form/nth-of d 1))
+    (or (form/is-vec? d) (form/is-seq? d) (form/is-set? d) (form/is-map? d))
+    (referenced-kids d 0 acc)
+    :else acc)))
+
+;; the payload of a record / variant (not its nominal identity slot)
+#?(:kotoba
+(defn- schema-payload [descriptor [:ref :form/r]] [:ref :form/r]
+  (if (and (form/is-vec? descriptor) (= 3 (form/count-of descriptor))
+           (or (is-kw? (form/nth-of descriptor 0) :record) (is-kw? (form/nth-of descriptor 0) :variant)))
+    (form/nth-of descriptor 2)
+    descriptor)))
+
+;; the names of the schemas reachable from the root descriptors, found in SCHEMAS
+#?(:kotoba
+(defn- surface-walk [schemas [:ref :form/r] todo [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]]
+  [:list [:ref :form/r]]
+  (if (>= i (vector-count todo))
+    acc
+    (let [n (typed-list-nth [:list [:ref :form/r]] todo i)]
+      (cond
+        (has-item? acc n 0) (surface-walk schemas todo (+ i 1) acc)
+        (form/form-has? schemas n)
+        (surface-walk schemas
+                      (referenced-names (schema-payload (form/form-get schemas n)) todo)
+                      (+ i 1)
+                      (form/append-form acc n))
+        :else (surface-walk schemas todo (+ i 1) acc))))))
+
+#?(:kotoba
+(defn- roots-names [roots [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count roots))
+    acc
+    (roots-names roots (+ i 1) (referenced-names (typed-list-nth [:list [:ref :form/r]] roots i) acc)))))
+
+#?(:kotoba
+(defn- wit-surface-names [schemas [:ref :form/r] roots [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (surface-walk schemas (roots-names roots 0 (form/no-forms)) 0 (form/no-forms))))
+
+;; the names reachable in one or more steps from START's successors, in discovery order
+#?(:kotoba
+(defn- reach-walk [schemas [:ref :form/r] todo [:list [:ref :form/r]] i :i64 seen [:list [:ref :form/r]]]
+  [:list [:ref :form/r]]
+  (if (>= i (vector-count todo))
+    seen
+    (let [n (typed-list-nth [:list [:ref :form/r]] todo i)]
+      (if (has-item? seen n 0)
+        (reach-walk schemas todo (+ i 1) seen)
+        (reach-walk schemas
+                    (if (form/form-has? schemas n)
+                      (referenced-names (schema-payload (form/form-get schemas n)) todo)
+                      todo)
+                    (+ i 1)
+                    (form/append-form seen n)))))))
+
+#?(:kotoba
+(defn- schema-edges [schemas [:ref :form/r] n [:ref :form/r]] [:list [:ref :form/r]]
+  (if (form/form-has? schemas n)
+    (referenced-names (schema-payload (form/form-get schemas n)) (form/no-forms))
+    (form/no-forms))))
+
+;; a recursive schema has no WIT representation (a WIT record is sized); SURFACE is
+;; the names to test, in order
+#?(:kotoba
+(defn- reject-recursive [schemas [:ref :form/r] surface [:list [:ref :form/r]] i :i64] :i64
+  (if (>= i (vector-count surface))
+    0
+    (let [n (typed-list-nth [:list [:ref :form/r]] surface i)
+          reached (reach-walk schemas (schema-edges schemas n) 0 (form/no-forms))]
+      (if (has-item? reached n 0)
+        (throw (ex-info "recursive schema has no WIT representation" {:phase :component-wit :schema (leaf-text n)}))
+        (reject-recursive schemas surface (+ i 1)))))))
+
+#?(:kotoba
+(defn- type-uses [descriptors [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (sort-by-text (roots-names descriptors 0 (form/no-forms)))))
+
+#?(:kotoba
+(defn- name-list [names [:list [:ref :form/r]] i :i64 acc :string] :string
+  (if (>= i (vector-count names))
+    acc
+    (let [n (wit-name (typed-list-nth [:list [:ref :form/r]] names i))]
+      (name-list names (+ i 1) (str acc (if (= i 0) "" ", ") n))))))
+
+#?(:kotoba
+(defn- use-line [names [:list [:ref :form/r]]] :string
+  (if (= 0 (vector-count names))
+    ""
+    (let [joined (name-list names 0 "")]
+      (str "  use types.{" joined "};\n")))))
+
+;; ---- capability contracts -----------------------------------------------------------------------
+
+#?(:kotoba
+(defn- typed-cap-call? [node [:ref :form/r]] :bool
+  (and (form/is-seq? node) (> (form/count-of node) 0)
+       (form/is-symbol? (form/nth-of node 0))
+       (string=? (form/symbol-value (form/nth-of node 0)) "typed-cap-call"))))
+
+#?(:kotoba
+(defn- cap-entry [node [:ref :form/r]] [:ref :form/r]
+  (form/form-map (typed-list-new [:list [:ref :form/r]]
+                                 (kf :id) (form/nth-of node 1)
+                                 (kf :request-type) (form/nth-of node 2)
+                                 (kf :result-type) (form/nth-of node 3)))))
+
+;; the typed-cap-call forms anywhere under NODE (a depth-first tree-seq), each once
+#?(:kotoba
+(defn- collect-caps-kids [node [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (form/count-of node))
+    acc
+    (collect-caps-kids node (+ i 1) (collect-caps (form/nth-of node i) acc)))))
+
+#?(:kotoba
+(defn- collect-caps [node [:ref :form/r] acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (let [acc2 (if (typed-cap-call? node) (add-unique acc (cap-entry node)) acc)]
+    (if (or (form/is-seq? node) (form/is-vec? node) (form/is-set? node) (form/is-map? node))
+      (collect-caps-kids node 0 acc2)
+      acc2))))
+
+#?(:kotoba
+(defn- caps-of-functions [fns [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (form/count-of fns))
+    acc
+    (caps-of-functions fns (+ i 1) (collect-caps (gk (form/nth-of fns i) :body) acc)))))
+
+;; -1, 0, 1 by (id, text of the request type, text of the result type)
+#?(:kotoba
+(defn- cap-compare [a [:ref :form/r] b [:ref :form/r]] :i64
+  (let [ia (form/int-value (gk a :id))
+        ib (form/int-value (gk b :id))]
+    (cond
+      (< ia ib) -1
+      (> ia ib) 1
+      :else (let [c (string-compare (edn-text (gk a :request-type)) (edn-text (gk b :request-type)))]
+              (if (= c 0)
+                (string-compare (edn-text (gk a :result-type)) (edn-text (gk b :result-type)))
+                c))))))
+
+#?(:kotoba
+(defn- insert-cap [xs [:list [:ref :form/r]] x [:ref :form/r]] [:list [:ref :form/r]]
+  (let [n (vector-count xs)]
+    (loop [i 0]
+      (cond
+        (>= i n) (form/append-form xs x)
+        (> (cap-compare (typed-list-nth [:list [:ref :form/r]] xs i) x) 0)
+        (form/append-many (form/append-form (take-forms xs i) x) (drop-forms xs i))
+        :else (recur (+ i 1)))))))
+
+#?(:kotoba
+(defn- sort-caps [xs [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count xs))
+    acc
+    (sort-caps xs (+ i 1) (insert-cap acc (typed-list-nth [:list [:ref :form/r]] xs i))))))
+
+#?(:kotoba
+(defn- capability-contracts [kir [:ref :form/r]] [:list [:ref :form/r]]
+  (sort-caps (caps-of-functions (gk kir :functions) 0 (form/no-forms)) 0 (form/no-forms))))
+
+#?(:kotoba
+(defn- find-capability [caps [:ref :form/r] id [:ref :form/r] i :i64] [:ref :form/r]
+  (cond (>= i (form/count-of caps)) (form/nil-form)
+        (form/eq (gk (form/nth-of caps i) :id) id) (form/nth-of caps i)
+        :else (find-capability caps id (+ i 1)))))
+
+;; each capability contract joined with its WIT contract entry
+#?(:kotoba
+(defn- merge-capabilities [cs [:list [:ref :form/r]] caps [:ref :form/r] i :i64 acc [:list [:ref :form/r]]]
+  [:list [:ref :form/r]]
+  (if (>= i (vector-count cs))
+    acc
+    (let [c (typed-list-nth [:list [:ref :form/r]] cs i)
+          entry (find-capability caps (gk c :id) 0)]
+      (if (form/is-nil? entry)
+        (throw (ex-info "typed capability has no WIT contract" {:phase :component-wit :id (leaf-text (gk c :id))}))
+        (merge-capabilities cs caps (+ i 1)
+                            (form/append-form acc (form/assoc-form (form/assoc-form entry (kf :request-type) (gk c :request-type))
+                                                                   (kf :result-type) (gk c :result-type)))))))))
+
+;; ---- interfaces -----------------------------------------------------------------------------------
+
+#?(:kotoba
+(defn- interface-names [caps [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count caps))
+    acc
+    (interface-names caps (+ i 1) (add-unique acc (gk (typed-list-nth [:list [:ref :form/r]] caps i) :interface))))))
+
+#?(:kotoba
+(defn- entries-of [caps [:list [:ref :form/r]] interface [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count caps))
+    acc
+    (let [c (typed-list-nth [:list [:ref :form/r]] caps i)]
+      (entries-of caps interface (+ i 1) (if (form/eq (gk c :interface) interface) (form/append-form acc c) acc))))))
+
+#?(:kotoba
+(defn- entry-types [entries [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count entries))
+    acc
+    (let [e (typed-list-nth [:list [:ref :form/r]] entries i)]
+      (entry-types entries (+ i 1) (form/append-form (form/append-form acc (gk e :request-type)) (gk e :result-type)))))))
+
+#?(:kotoba
+(defn- entry-lines [entries [:list [:ref :form/r]] i :i64 linear? :bool acc :string] :string
+  (if (>= i (vector-count entries))
+    acc
+    (let [e (typed-list-nth [:list [:ref :form/r]] entries i)
+          function (gs e :function)
+          t1 (type-text (gk e :request-type))
+          t2 (type-text (gk e :result-type))
+          line (if linear?
+                 (str "  resource " function "-capability;\n"
+                      "  issue-" function ": func() -> own<" function "-capability>;\n"
+                      "  execute-" function ": func(cap: own<" function "-capability>, request: " t1 ") -> " t2 ";\n")
+                 (str "  " function ": func(request: " t1 ") -> " t2 ";\n"))]
+      (entry-lines entries (+ i 1) linear? (str acc line))))))
+
+#?(:kotoba
+(defn- interface-text [interface :string entries [:list [:ref :form/r]] linear? :bool] :string
+  (let [uses (use-line (type-uses (entry-types entries 0 (form/no-forms))))
+        body (entry-lines entries 0 linear? "")]
+    (str "interface " interface " {\n" uses body "}\n\n"))))
+
+#?(:kotoba
+(defn- interfaces-text [caps [:list [:ref :form/r]] names [:list [:ref :form/r]] i :i64 linear? :bool acc :string] :string
+  (if (>= i (vector-count names))
+    acc
+    (let [n (typed-list-nth [:list [:ref :form/r]] names i)
+          text (interface-text (leaf-text n) (entries-of caps n 0 (form/no-forms)) linear?)]
+      (interfaces-text caps names (+ i 1) linear? (str acc text))))))
+
+#?(:kotoba
+(defn- import-lines [names [:list [:ref :form/r]] i :i64 acc :string] :string
+  (if (>= i (vector-count names))
+    acc
+    (import-lines names (+ i 1) (str acc "  import " (leaf-text (typed-list-nth [:list [:ref :form/r]] names i)) ";\n")))))
+
+;; ---- exports ---------------------------------------------------------------------------------------------
+
+#?(:kotoba
+(defn- export-params [names [:ref :form/r] types [:ref :form/r] i :i64 acc :string] :string
+  (if (or (>= i (form/count-of names)) (>= i (form/count-of types)))
+    acc
+    (let [n (wit-name (form/nth-of names i))
+          t (type-text (form/nth-of types i))]
+      (export-params names types (+ i 1) (str acc (if (= i 0) "" ", ") n ": " t))))))
+
+#?(:kotoba
+(defn- export-text [function [:ref :form/r]] :string
+  (let [n (wit-name (gk function :name))
+        params (export-params (gk function :params) (gk function :param-types) 0 "")
+        r (type-text (gk function :result))]
+    (str "  export " n ": func(" params ") -> " r ";\n"))))
+
+#?(:kotoba
+(defn- exports-text [fns [:list [:ref :form/r]] i :i64 acc :string] :string
+  (if (>= i (vector-count fns))
+    acc
+    (let [t (export-text (typed-list-nth [:list [:ref :form/r]] fns i))]
+      (exports-text fns (+ i 1) (str acc t))))))
+
+;; the functions of KIR whose name is among its :exports, sorted by the text of the name
+#?(:kotoba
+(defn- insert-function [xs [:list [:ref :form/r]] x [:ref :form/r]] [:list [:ref :form/r]]
+  (let [n (vector-count xs)
+        key (leaf-text (gk x :name))]
+    (loop [i 0]
+      (cond
+        (>= i n) (form/append-form xs x)
+        (> (string-compare (leaf-text (gk (typed-list-nth [:list [:ref :form/r]] xs i) :name)) key) 0)
+        (form/append-many (form/append-form (take-forms xs i) x) (drop-forms xs i))
+        :else (recur (+ i 1)))))))
+
+#?(:kotoba
+(defn- exported-functions [kir [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (let [fns (gk kir :functions)
+        exports (gk kir :exports)]
+    (if (>= i (form/count-of fns))
+      acc
+      (let [f (form/nth-of fns i)]
+        (exported-functions kir (+ i 1)
+                            (if (has-item? (form/kids-of exports) (gk f :name) 0) (insert-function acc f) acc)))))))
+
+;; ---- name lists ---------------------------------------------------------------------------------------------
+
+#?(:kotoba
+(defn- wit-names-of [xs [:ref :form/r] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (form/count-of xs))
+    acc
+    (let [n (wit-name (form/nth-of xs i))]
+      (wit-names-of xs (+ i 1) (form/append-form acc (form/string-form n)))))))
+
+#?(:kotoba
+(defn- all-distinct? [xs [:list [:ref :form/r]]] :bool
+  (let [n (vector-count xs)]
+    (loop [i 0 seen (form/no-forms)]
+      (cond (>= i n) true
+            (has-item? seen (typed-list-nth [:list [:ref :form/r]] xs i) 0) false
+            :else (recur (+ i 1) (form/append-form seen (typed-list-nth [:list [:ref :form/r]] xs i))))))))
+
+#?(:kotoba
+(defn- map-keys [m [:ref :form/r]] [:ref :form/r]
+  (let [ks (form/kids-of m)
+        n (vector-count ks)]
+    (form/form-vec
+     (loop [i 0 acc (form/no-forms)]
+       (if (>= i n) acc (recur (+ i 2) (form/append-form acc (typed-list-nth [:list [:ref :form/r]] ks i)))))))))
+
+;; a parameter-name collision in any exported function
+#?(:kotoba
+(defn- check-parameters [fns [:list [:ref :form/r]] i :i64] :i64
+  (if (>= i (vector-count fns))
+    0
+    (let [f (typed-list-nth [:list [:ref :form/r]] fns i)
+          names (wit-names-of (gk f :params) 0 (form/no-forms))]
+      (if (not (all-distinct? names))
+        (throw (ex-info "parameter names collide after WIT canonicalization" {:phase :component-wit :export (leaf-text (gk f :name))}))
+        (check-parameters fns (+ i 1)))))))
+
+;; the parameter types then the result of every exported function
+#?(:kotoba
+(defn- export-types-of [fns [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count fns))
+    acc
+    (let [f (typed-list-nth [:list [:ref :form/r]] fns i)]
+      (export-types-of fns (+ i 1) (form/append-form (form/append-many acc (form/kids-of (gk f :param-types))) (gk f :result)))))))
+
+#?(:kotoba
+(defn- cap-types-of [caps [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (entry-types caps i acc)))
+
+;; every inline record descriptor under D must be the sealed schema of its identity
+#?(:kotoba
+(defn- check-inline-kids [d [:ref :form/r] schemas [:ref :form/r] i :i64] :i64
+  (if (>= i (form/count-of d))
+    0
+    (let [r (check-inline (form/nth-of d i) schemas)]
+      (check-inline-kids d schemas (+ i 1))))))
+
+#?(:kotoba
+(defn- check-inline [d [:ref :form/r] schemas [:ref :form/r]] :i64
+  (if (and (form/is-vec? d) (> (form/count-of d) 0) (is-kw? (form/nth-of d 0) :record)
+           (not (and (form/is-map? schemas) (form/form-has? schemas (form/nth-of d 1))
+                     (form/eq d (form/form-get schemas (form/nth-of d 1))))))
+    (throw (ex-info "inline record differs from sealed schema identity" {:phase :component-wit :schema (leaf-text (form/nth-of d 1))}))
+    (if (or (form/is-vec? d) (form/is-seq? d) (form/is-set? d) (form/is-map? d))
+      (check-inline-kids d schemas 0)
+      0))))
+
+#?(:kotoba
+(defn- check-inline-all [types [:list [:ref :form/r]] schemas [:ref :form/r] i :i64] :i64
+  (if (>= i (vector-count types))
+    0
+    (let [r (check-inline (typed-list-nth [:list [:ref :form/r]] types i) schemas)]
+      (check-inline-all types schemas (+ i 1))))))
+
+;; ---- schema texts, sorted by name -------------------------------------------------------------------------------
+
+#?(:kotoba
+(defn- schema-texts [schemas [:ref :form/r] names [:list [:ref :form/r]] i :i64 acc :string] :string
+  (if (>= i (vector-count names))
+    acc
+    (let [n (typed-list-nth [:list [:ref :form/r]] names i)
+          t (schema-text n (form/form-get schemas n))]
+      (schema-texts schemas names (+ i 1) (str acc t))))))
+
+;; ---- host binding and the receipt ------------------------------------------------------------------------------------------
+
+#?(:kotoba
+(defn host-binding-contract [] :keyword :kotoba.component.host-binding/v1))
+
+#?(:kotoba
+(defn required-host-guard [] :keyword :guard-component-ability-call))
+
+#?(:kotoba
+(defn- guard-pairs [names [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count names))
+    acc
+    (guard-pairs names (+ i 1)
+                 (form/append-form (form/append-form acc (typed-list-nth [:list [:ref :form/r]] names i))
+                                   (kf (required-host-guard)))))))
+
+;; the declared host entry point per effectful import (CI5)
+#?(:kotoba
+(defn- host-binding [import-names [:list [:ref :form/r]]] [:ref :form/r]
+  (form/form-map
+   (typed-list-new [:list [:ref :form/r]]
+                   (kf :contract) (kf (host-binding-contract))
+                   (kf :required-guard) (kf (required-host-guard))
+                   (kf :imports) (form/form-map (guard-pairs (sort-by-text import-names) 0 (form/no-forms)))))))
+
+#?(:kotoba
+(defn- cap-names [caps [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count caps))
+    acc
+    (cap-names caps (+ i 1) (form/append-form acc (gk (typed-list-nth [:list [:ref :form/r]] caps i) :name))))))
+
+#?(:kotoba
+(defn- fn-names [fns [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count fns))
+    acc
+    (fn-names fns (+ i 1) (form/append-form acc (gk (typed-list-nth [:list [:ref :form/r]] fns i) :name))))))
+
+;; the ABI's import name of every capability id, ids sorted
+#?(:kotoba
+(defn- insert-int [xs [:list [:ref :form/r]] x [:ref :form/r]] [:list [:ref :form/r]]
+  (let [n (vector-count xs)]
+    (loop [i 0]
+      (cond
+        (>= i n) (form/append-form xs x)
+        (> (form/int-value (typed-list-nth [:list [:ref :form/r]] xs i)) (form/int-value x))
+        (form/append-many (form/append-form (take-forms xs i) x) (drop-forms xs i))
+        :else (recur (+ i 1)))))))
+
+#?(:kotoba
+(defn- sorted-ids [caps [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count caps))
+    acc
+    (sorted-ids caps (+ i 1) (insert-int acc (gk (typed-list-nth [:list [:ref :form/r]] caps i) :id))))))
+
+#?(:kotoba
+(defn- import-names-of [ids [:list [:ref :form/r]] i :i64 acc [:list [:ref :form/r]]] [:list [:ref :form/r]]
+  (if (>= i (vector-count ids))
+    acc
+    (import-names-of ids (+ i 1)
+                     (form/append-form acc (form/string-form (abi/capability-import-name (form/int-value (typed-list-nth [:list [:ref :form/r]] ids i)))))))))
+
+#?(:kotoba
+(defn- emit-v3 [kir [:ref :form/r] ctr [:ref :form/r]] [:ref :form/r]
+  (let [source (abi/typed-capability-wit-v3)
+        profile (gk (gk ctr :profiles) :typed-capability-v3)]
+    (if (not (and (form/eq (gk profile :target) (kf (abi/component-target-v2)))
+                  (form/eq (gk profile :world) (form/string-form (abi/typed-capability-world-v3)))))
+      (throw (ex-info "typed capability profile diverges from the shared ABI" {:phase :component-wit}))
+      (let [ids (sorted-ids (capability-contracts kir) 0 (form/no-forms))
+            names (import-names-of ids 0 (form/no-forms))]
+        (form/form-map
+         (typed-list-new [:list [:ref :form/r]]
+                         (kf :format) (kf :kotoba.wit-package/v1)
+                         (kf :target) (gk profile :target)
+                         (kf :world) (gk profile :world)
+                         (kf :wasi-version) (form/string-form (abi/wasi-version))
+                         (kf :source) (form/string-form source)
+                         (kf :sha256) (form/string-form (text-sha256 source))
+                         (kf :imports) (form/form-vec names)
+                         (kf :host-binding) (host-binding names)
+                         (kf :capability-mode) (kf :linear-resource)
+                         (kf :capability-transport) (gk profile :capability-transport))))))))
+
+#?(:kotoba
+(defn- emit-v1 [kir [:ref :form/r] ctr [:ref :form/r] mode [:ref :form/r]] [:ref :form/r]
+  (let [schemas (let [s (gk kir :schemas)] (if (form/is-map? s) s (form/form-map (form/no-forms))))
+        canonical (wit-names-of (map-keys schemas) 0 (form/no-forms))]
+    (if (not (all-distinct? canonical))
+      (throw (ex-info "schema names collide after WIT canonicalization" {:phase :component-wit}))
+      (let [capabilities (merge-capabilities (capability-contracts kir) (gk ctr :capabilities) 0 (form/no-forms))
+            interfaces (sort-by-text (interface-names capabilities 0 (form/no-forms)))
+            exports (exported-functions kir 0 (form/no-forms))
+            export-names (wit-names-of (form/form-vec (fn-names exports 0 (form/no-forms))) 0 (form/no-forms))]
+        (if (not (all-distinct? export-names))
+          (throw (ex-info "export names collide after WIT canonicalization" {:phase :component-wit}))
+          (let [checked (check-parameters exports 0)
+                export-types (export-types-of exports 0 (form/no-forms))
+                capability-types (entry-types capabilities 0 (form/no-forms))
+                surface (wit-surface-names schemas (form/append-many export-types capability-types))
+                recursive (reject-recursive schemas (sort-by-text surface) 0)
+                inline (check-inline-all export-types schemas 0)
+                types-block (if (> (vector-count surface) 0)
+                              (let [body (schema-texts schemas (sort-by-text surface) 0 "")]
+                                (str "interface types {\n" body "}\n\n"))
+                              "")
+                interfaces-block (interfaces-text capabilities interfaces 0 (form/eq mode (kf :linear-resource)) "")
+                uses (use-line (type-uses export-types))
+                imports (import-lines interfaces 0 "")
+                exports-block (exports-text exports 0 "")
+                text (str "package kotoba:application@1.0.0;\n\n" types-block interfaces-block
+                          "world application {\n" uses imports exports-block "}\n")
+                import-names (cap-names capabilities 0 (form/no-forms))]
+            (form/form-map
+             (typed-list-new [:list [:ref :form/r]]
+                             (kf :format) (kf :kotoba.wit-package/v1)
+                             (kf :target) (kf :wasm-component-kotoba-v1)
+                             (kf :wasi-version) (form/string-form "0.3.0")
+                             (kf :source) (form/string-form text)
+                             (kf :sha256) (form/string-form (text-sha256 text))
+                             (kf :imports) (form/form-vec import-names)
+                             (kf :host-binding) (host-binding import-names)
+                             (kf :capability-mode) mode
+                             (kf :exports) (form/form-vec (fn-names exports 0 (form/no-forms))))))))))))
+
+#?(:kotoba
+(defn emit-with-contract
+  "`emit-with` over the contract Form CTR (the parsed embedded contract), so a
+  caller that emits many worlds reads the contract once."
+  [kir [:ref :form/r] opts [:ref :form/r] ctr [:ref :form/r]] [:ref :form/r]
+  (let [m (gk opts :capability-mode)
+        mode (if (truthy? m) m (kf :function))
+        fmt (gk kir :format)]
+    (cond
+      (not (or (is-kw? fmt :kotoba.kir/v3) (is-kw? fmt :kotoba.kir/v4)))
+      (throw (ex-info "WIT generation requires checked KIR" {:phase :component-wit}))
+      (truthy? (gk opts :typed-capability-v3?))
+      (emit-v3 kir ctr)
+      :else
+      (emit-v1 kir ctr mode)))))
+
+#?(:kotoba
+(defn emit-with
+  "A deterministic WIT v1 package and receipt for checked KIR (a Form); OPTS a Form
+  map that may carry :capability-mode (default :function) and :typed-capability-v3?."
+  [kir [:ref :form/r] opts [:ref :form/r]] [:ref :form/r]
+  (let [ctr (contract)]
+    (emit-with-contract kir opts ctr))))
+
+#?(:kotoba
+(defn emit
+  "A deterministic WIT v1 package and receipt for checked KIR (a Form)."
+  [kir [:ref :form/r]] [:ref :form/r]
+  (emit-with kir (form/form-map (form/no-forms)))))
+
+#?(:kotoba
+nil
+   :default
+(do
 (defn- wit-name [value]
   (let [source (cond (keyword? value) (subs (str value) 1)
                      (symbol? value) (str value)
@@ -436,4 +1232,4 @@
        :imports (mapv :name capabilities)
        :host-binding (host-binding (mapv :name capabilities))
        :capability-mode capability-mode
-       :exports (mapv :name exports)})))))
+       :exports (mapv :name exports)})))))))
