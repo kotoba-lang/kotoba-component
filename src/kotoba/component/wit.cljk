@@ -15,10 +15,13 @@
   on both hosts since 2026-09-25."
   {:kotoba/export [contract contract-resource emit host-binding-contract required-host-guard type-text]}
   (:require [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
+            #?(:kotoba [kotoba.form :as form])
             [kotoba.lang.text :as str]
             [kotoba.abi.contract :as abi]
             [kotoba.component.embedded-resources :as embedded-resources]
             #?@(:cljs [["node:crypto" :as crypto]]))
+  #?(:kotoba (:schemas {:form/r [:record :form/r [[:tag :i64] [:s :string] [:n :i64] [:k :keyword]
+                                                  [:kids [:list [:ref :form/r]]] [:span :i64] [:data :bytes]]]}))
   #?(:clj (:import
                    [java.security MessageDigest])))
 
@@ -47,7 +50,14 @@
       (throw (ex-info "component contract resource is not embedded"
                       {:phase :component-wit :resource contract-resource}))))
 
-(def contract (edn/read-string (contract-text)))
+;; Kotoba: the contract is a Form (the recursive value of compiler data; a
+;; `:document` stops at depth 8 and 32 items per container, this file is deeper),
+;; read from the embedded text by `kotoba.form/edn-form`, and a constant must be a
+;; function -- so it is `(contract)` there and `contract` on the hosts.
+#?(:kotoba
+   (defn contract [] [:ref :form/r] (form/edn-form (contract-text)))
+   :default
+(def contract (edn/read-string (contract-text))))
 
 (defn- reject [message data]
   (throw (ex-info message (assoc data :phase :component-wit))))
