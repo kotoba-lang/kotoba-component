@@ -36,7 +36,7 @@
        org.clojure/clojure {:mvn/version "1.12.0"}
         io.github.kotoba-lang/abi
         {:git/url "https://github.com/kotoba-lang/abi.git"
-         :git/sha "4172242a524c8ab88e4b7036e30ae492b46fc484"}
+         :git/sha "4dd0b7b9898cec5432bbe60c2904c1546e5f524a"}
         io.github.kotoba-lang/osaho
         {:git/url "https://github.com/kotoba-lang/osaho.git"
          :git/sha "e2cabbc6773ae24f407f61aa0a50844f0fabc377"}

@@ -16,7 +16,7 @@
   {:kotoba/export [contract contract-resource emit host-binding-contract required-host-guard type-text]}
   (:require [kotoba.bytes :as kbytes] [kotoba.lang.edn :as edn]
             [kotoba.lang.text :as str]
-            [kotoba.abi.contract :as abi]
+            [kotoba.abi.component :as abi]
             [kotoba.component.embedded-resources :as embedded-resources]
             #?@(:cljs [["node:crypto" :as crypto]]))
   #?(:clj (:import

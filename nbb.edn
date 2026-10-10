@@ -3,6 +3,8 @@
 ;; scripts/migrate-clojure-test-to-kotoba-test.cljk; :paths copied from deps.edn.
 {:paths ["src" "resources"]
  :deps {
+        io.github.kotoba-lang/abi {:git/url "https://github.com/kotoba-lang/abi.git" :git/sha "4dd0b7b9898cec5432bbe60c2904c1546e5f524a"}
+
         ;; kotoba.lang.error replaced clojure.lang.ExceptionInfo here (2026-09-25).
         ;; An explicit floor: tools.deps takes the NEWEST sha it is shown.
         io.github.kotoba-lang/error {:git/sha "838dec56c9a5b74f9eec825a2fb28bda157f8cd3"}
