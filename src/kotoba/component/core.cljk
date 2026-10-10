@@ -5,7 +5,7 @@
             [kotoba.wasm.core :as wasm]
             [kotoba.wasm.canonical-abi :as canonical]
             [kotoba.component.wit :as component-wit]
-            [kotoba.abi.contract :as abi]
+            [kotoba.abi.component :as abi]
             [kotoba.kir.value :as value]
             [kotoba.wasm.tools :as wasm-tools]))
 
