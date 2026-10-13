@@ -29,7 +29,7 @@ checkable from outside.
 
 ## Depends on
 
-- `kotoba-lang/kotoba-kir`
+- `kotoba-lang/osaho` (formerly `kotoba-kir`)
 - `kotoba-lang/kotoba-wasm`
 
 ## Structural union boundary
