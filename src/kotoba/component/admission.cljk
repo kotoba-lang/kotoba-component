@@ -53,7 +53,7 @@
 (defn- octets
   "The bytes as a vector of 0..255, whichever host container they arrived in."
   [bytes]
-  #?(:clj (mapv #(bit-and (int %) 0xff) bytes)
+  #?(:clj (mapv (fn [x] (bit-and (int x) 0xff)) bytes)
      :cljs (vec (js/Array.from bytes))))
 
 (defn- base32-lower-nopad [bytes]
@@ -109,7 +109,7 @@
                    :sync [:fuel :memory-pages]
                    :async [:fuel :memory-pages :deadline-ms :max-items :max-bytes]
                    (reject "component profile is unsupported" {:profile profile}))
-        missing (remove #(let [n (get budgets %)] (and (integer? n) (pos? n))) required)]
+        missing (remove (fn [x] (let [n (get budgets x)] (and (integer? n) (pos? n)))) required)]
     (when (seq missing)
       (reject "component requires positive resource bounds"
               {:profile profile :missing (vec missing) :budgets budgets}))
